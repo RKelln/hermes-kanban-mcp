@@ -3,9 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,25 +11,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/experimance/kanban-mcp/internal/config"
-	"github.com/experimance/kanban-mcp/internal/httpauth"
-	"github.com/experimance/kanban-mcp/internal/kanban"
-	"github.com/experimance/kanban-mcp/internal/mcptools"
+	"github.com/RKelln/hermes-kanban-mcp/internal/config"
+	"github.com/RKelln/hermes-kanban-mcp/internal/httpauth"
+	"github.com/RKelln/hermes-kanban-mcp/internal/mcptools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const testToken = "test-token-ABCDEFGH0123456789"
 
-// fakeLister is a minimal mcptools.BoardLister so the full mux can be
-// exercised without a live kanban backend.
-type fakeLister struct{ boards []kanban.Board }
-
-func (f *fakeLister) ListBoards(_ context.Context, _ bool) ([]kanban.Board, error) {
-	return f.boards, nil
-}
-
 // testMux builds the full wiring (newMux — the same code path main uses)
-// with a fake board list backend and a discard logger.
+// with a Server whose backend client points at a dead base URL (the
+// transport/auth/tools-list tests never issue backend calls) and a
+// discard logger.
 func testMux(t *testing.T, token string, rateLimit int) http.Handler {
 	t.Helper()
 	return testMuxLogger(t, token, rateLimit, slog.New(slog.NewJSONHandler(io.Discard, nil)))
@@ -49,9 +40,8 @@ func testMuxLogger(t *testing.T, token string, rateLimit int, logger *slog.Logge
 		KanbanDefaultBoard: "hermes-agent",
 		MCPRateLimit:       rateLimit,
 	}
-	return newMux(cfg, logger, &fakeLister{boards: []kanban.Board{
-		{Slug: "hermes-agent", Name: "Hermes Agent", Counts: map[string]int{"ready": 3}},
-	}})
+	toolServer := mcptools.NewServerWithClient(&http.Client{}, "http://127.0.0.1:9/api/plugins/kanban", "hermes-agent")
+	return newMux(cfg, logger, toolServer)
 }
 
 // mcpClient is a minimal Streamable HTTP client over the full mux. It
@@ -220,7 +210,6 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 	// it: initialize -> notifications/initialized -> tools/list, with the
 	// session id captured from the initialize response replayed.
 	result := c.rpc(t, 1, "initialize", map[string]any{
-		// Illustrative protocol version, as the curl checks use.
 		"protocolVersion": "2026-07-28",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "test", "version": "0"},
@@ -236,8 +225,8 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 	if err := json.Unmarshal(result, &initResult); err != nil {
 		t.Fatalf("initialize result is not the expected shape: %v (result: %s)", err, result)
 	}
-	if initResult.ServerInfo.Name != "kanban-mcp" {
-		t.Errorf("serverInfo.name = %q, want kanban-mcp", initResult.ServerInfo.Name)
+	if initResult.ServerInfo.Name != "hermes-kanban-mcp" {
+		t.Errorf("serverInfo.name = %q, want hermes-kanban-mcp", initResult.ServerInfo.Name)
 	}
 	if initResult.ServerInfo.Version == "" {
 		t.Error("serverInfo.version is empty")
@@ -257,12 +246,19 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 	if err := json.Unmarshal(listResult, &listed); err != nil {
 		t.Fatalf("tools/list result is not the expected shape: %v (result: %s)", err, listResult)
 	}
-	var names []string
+	names := make(map[string]bool, len(listed.Tools))
 	for _, tool := range listed.Tools {
-		names = append(names, tool.Name)
+		names[tool.Name] = true
 	}
-	if len(names) != 1 || names[0] != "board_list" {
-		t.Errorf("tools/list = %v, want exactly [board_list]", names)
+	want := []string{"board_list", "ticket_list", "ticket_get", "ticket_claim",
+		"ticket_comment", "ticket_complete", "ticket_block", "ticket_create"}
+	if len(names) != len(want) {
+		t.Errorf("tools/list has %d tools, want %d (%v)", len(names), len(want), names)
+	}
+	for _, w := range want {
+		if !names[w] {
+			t.Errorf("tools/list is missing %s (have %v)", w, names)
+		}
 	}
 }
 
@@ -283,135 +279,5 @@ func TestMCPServerRateLimitIsWired(t *testing.T) {
 	}
 	if got := hdr.Get("Retry-After"); got == "" {
 		t.Error("429 response is missing Retry-After")
-	}
-}
-
-// logLines parses every JSON line of the captured log buffer.
-func logLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
-	t.Helper()
-	var lines []map[string]any
-	sc := bufio.NewScanner(buf)
-	for sc.Scan() {
-		if strings.TrimSpace(sc.Text()) == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-			t.Fatalf("log line is not JSON: %v (line: %s)", err, sc.Text())
-		}
-		lines = append(lines, m)
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan log buffer: %v", err)
-	}
-	return lines
-}
-
-// The three outcome classifications of the per-tool-call log line.
-func TestToolCallLoggingOutcomes(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-
-	call := func(ctx context.Context, innerErr error) {
-		t.Helper()
-		wrapped := logToolCall(logger, "board_list", "hermes-agent",
-			func(ctx context.Context, _ *mcp.CallToolRequest, _ mcptools.In) (*mcp.CallToolResult, mcptools.Out, error) {
-				if innerErr != nil {
-					return nil, mcptools.Out{}, innerErr
-				}
-				return nil, mcptools.Out{DefaultBoard: "hermes-agent"}, nil
-			})
-		wrapped(ctx, nil, mcptools.In{})
-	}
-
-	// Every log line must carry exactly the negotiated fields.
-	assertFields := func(t *testing.T, wantOutcome string) {
-		t.Helper()
-		lines := logLines(t, &buf)
-		if len(lines) != 1 {
-			t.Fatalf("got %d log lines, want 1 (lines: %v)", len(lines), lines)
-		}
-		line := lines[0]
-		if line["tool"] != "board_list" {
-			t.Errorf("tool = %v, want board_list", line["tool"])
-		}
-		if line["board"] != "hermes-agent" {
-			t.Errorf("board = %v, want hermes-agent", line["board"])
-		}
-		if line["outcome"] != wantOutcome {
-			t.Errorf("outcome = %v, want %s", line["outcome"], wantOutcome)
-		}
-		if _, ok := line["duration_ms"]; !ok {
-			t.Error("missing duration_ms field")
-		}
-		if _, ok := line["token"]; ok {
-			t.Error("a token field must never be logged")
-		}
-	}
-
-	t.Run("ok", func(t *testing.T) {
-		buf.Reset()
-		call(context.Background(), nil)
-		assertFields(t, "ok")
-	})
-
-	t.Run("tool_error", func(t *testing.T) {
-		buf.Reset()
-		call(context.Background(), errors.New("boom"))
-		assertFields(t, "tool_error")
-	})
-
-	t.Run("transport_error", func(t *testing.T) {
-		buf.Reset()
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // the client is gone before the handler returns
-		call(ctx, nil)
-		assertFields(t, "transport_error")
-	})
-}
-
-// The full stack — HTTP auth, rate limiter, SDK transport, tool handler,
-// log wrapper — with the token and JSON-RPC bodies flowing through it:
-// board_list must be callable end to end and the log must carry the tool
-// call line without ever containing the token or a request body.
-func TestMCPServerToolCallLogging(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	h := testMuxLogger(t, testToken, 60, logger)
-
-	c := newMCPClient(h, testToken)
-	c.rpc(t, 1, "initialize", map[string]any{
-		"protocolVersion": "2026-07-28",
-		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "test", "version": "0"},
-	})
-	c.post(t, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, http.StatusAccepted)
-	c.rpc(t, 2, "tools/call", map[string]any{"name": "board_list", "arguments": map[string]any{}})
-
-	var toolCalls []map[string]any
-	for _, l := range logLines(t, &buf) {
-		if l["msg"] == "tool call" {
-			toolCalls = append(toolCalls, l)
-		}
-	}
-	if len(toolCalls) != 1 {
-		t.Fatalf("got %d tool call log lines, want 1", len(toolCalls))
-	}
-	tc := toolCalls[0]
-	if tc["tool"] != "board_list" || tc["board"] != "hermes-agent" || tc["outcome"] != "ok" {
-		t.Errorf("unexpected tool call log fields: %v", tc)
-	}
-	if _, ok := tc["duration_ms"]; !ok {
-		t.Error("tool call log is missing duration_ms")
-	}
-
-	// Secret hygiene through the real path: the token travelled in the
-	// Authorization header and the request bodies carried JSON-RPC
-	// payloads; neither may appear in the log.
-	if strings.Contains(buf.String(), testToken) {
-		t.Error("bearer token leaked into the server log")
-	}
-	if strings.Contains(buf.String(), "clientInfo") {
-		t.Error("a request body member leaked into the server log")
 	}
 }

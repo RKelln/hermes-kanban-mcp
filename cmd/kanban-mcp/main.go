@@ -29,10 +29,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/experimance/kanban-mcp/internal/config"
-	"github.com/experimance/kanban-mcp/internal/httpauth"
-	"github.com/experimance/kanban-mcp/internal/kanban"
-	"github.com/experimance/kanban-mcp/internal/mcptools"
+	"github.com/RKelln/hermes-kanban-mcp/internal/config"
+	"github.com/RKelln/hermes-kanban-mcp/internal/httpauth"
+	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
+	"github.com/RKelln/hermes-kanban-mcp/internal/mcptools"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -58,8 +58,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := kanban.New(cfg.KanbanUsername, cfg.KanbanPassword)
-	mux := newMux(cfg, logger, client)
+	session, err := kanban.NewSessionClient(cfg.KanbanBaseURL, cfg.KanbanUsername, cfg.KanbanPassword)
+	if err != nil {
+		logger.Error("kanban session login failed", "error", err)
+		os.Exit(1)
+	}
+	toolServer := mcptools.NewServerWithClient(session, cfg.KanbanBaseURL, cfg.KanbanDefaultBoard)
+	mux := newMux(cfg, logger, toolServer)
 
 	servers, err := startServers(cfg.BindAddrs, mux, logger)
 	if err != nil {
@@ -97,18 +102,14 @@ func main() {
 // wrapped inside it — auth runs before limiting, so a bad token gets a
 // 401 even when the bucket is empty. The MCP server is created once and
 // handed to the Streamable HTTP handler's getServer closure, which is
-// the canonical single-server wiring from the design.
-//
-// lister backs the board_list tool; the real *kanban.Client is passed in
-// production, tests substitute an in-memory fake.
-func newMux(cfg *config.Config, logger *slog.Logger, lister mcptools.BoardLister) http.Handler {
+// the canonical single-server wiring from the design. All eight tools
+// are registered via mcptools.Register.
+func newMux(cfg *config.Config, logger *slog.Logger, toolServer *mcptools.Server) http.Handler {
 	rl := httpauth.NewRateLimiter(cfg.MCPRateLimit, httpauth.DefaultBurst)
 
-	srv := mcp.NewServer(&mcp.Implementation{Name: "kanban-mcp", Version: version}, nil)
+	srv := mcp.NewServer(&mcp.Implementation{Name: "hermes-kanban-mcp", Version: version}, nil)
+	mcptools.Register(srv, toolServer)
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil)
-	mcp.AddTool(srv, mcptools.BoardListTool(),
-		logToolCall(logger, "board_list", cfg.KanbanDefaultBoard,
-			mcptools.BoardList(lister, cfg.KanbanDefaultBoard)))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -117,40 +118,6 @@ func newMux(cfg *config.Config, logger *slog.Logger, lister mcptools.BoardLister
 	})
 	mux.Handle("/mcp", httpauth.Bearer(cfg.MCPBearerToken, rl.Wrap(h)))
 	return mux
-}
-
-// logToolCall wraps a typed MCP tool handler so every call emits one
-// structured JSON log line with tool, board, duration_ms, and outcome.
-//
-// outcome is one of:
-//   - "ok" — the handler returned a result with a live request context
-//   - "tool_error" — the handler returned an error the SDK will surface
-//     as an isError tool result (a recoverable backend failure)
-//   - "transport_error" — the request context was done by the time the
-//     handler returned (client disconnect or deadline), so the result
-//     cannot be delivered and the failure is transport-level
-//
-// The bearer token, the kanban password, and request bodies are never
-// logged: the wrapper only ever emits the four fixed fields above.
-func logToolCall[In, Out any](logger *slog.Logger, tool, board string, h mcp.ToolHandlerFor[In, Out]) mcp.ToolHandlerFor[In, Out] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
-		start := time.Now()
-		result, out, err := h(ctx, req, in)
-		outcome := "ok"
-		switch {
-		case ctx.Err() != nil:
-			outcome = "transport_error"
-		case err != nil:
-			outcome = "tool_error"
-		}
-		logger.Info("tool call",
-			"tool", tool,
-			"board", board,
-			"duration_ms", time.Since(start).Milliseconds(),
-			"outcome", outcome,
-		)
-		return result, out, err
-	}
 }
 
 // startServers binds one listener per comma-separated address and serves

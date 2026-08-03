@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"strings"
 	"sync"
 	"time"
 )
@@ -170,7 +171,7 @@ func (c *Client) loginLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("kanban: marshal login payload: %w", err)
 	}
-	status, body, err := c.doOnce(ctx, http.MethodPost, "auth/password-login", payload)
+	status, body, err := c.doOnce(ctx, http.MethodPost, c.loginURL(), payload)
 	if err != nil {
 		return err
 	}
@@ -181,18 +182,45 @@ func (c *Client) loginLocked(ctx context.Context) error {
 	return nil
 }
 
+// loginURL returns the absolute URL of the password-login route. The
+// route lives at the dashboard root (/auth/password-login), NOT under
+// the plugin mount /api/plugins/kanban/ — that prefix sits behind the
+// session auth middleware, so a login POST sent there would be rejected
+// as unauthenticated before reaching the route. The root is derived from
+// baseURL by stripping the plugin mount suffix when present, which keeps
+// httptest fakes that override baseURL to a bare origin working
+// unchanged.
+func (c *Client) loginURL() string {
+	const pluginMount = "/api/plugins/kanban/"
+	root := c.baseURL
+	if strings.HasSuffix(root, pluginMount) {
+		root = strings.TrimSuffix(root, pluginMount)
+	}
+	if !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
+	return root + "auth/password-login"
+}
+
 // doOnce performs a single HTTP request against baseURL+path and returns
 // the status and fully-read body. It does no session management and no
 // retries; that orchestration lives in do and loginLocked. Content-Type:
 // application/json is set when body is present (non-empty). The response
 // body is read eagerly (bounded by maxBodyRead) so the caller never owns
 // a connection.
+//
+// path is normally relative to baseURL; an absolute URL (scheme-prefixed,
+// as produced by loginURL) is used as-is.
 func (c *Client) doOnce(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
 	var rdr io.Reader
 	if len(body) > 0 {
 		rdr = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, rdr)
+	target := c.baseURL + path
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		target = path
+	}
+	req, err := http.NewRequestWithContext(ctx, method, target, rdr)
 	if err != nil {
 		return 0, nil, fmt.Errorf("kanban: build %s %s: %w", method, path, err)
 	}

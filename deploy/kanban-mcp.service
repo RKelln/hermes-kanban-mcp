@@ -1,0 +1,57 @@
+# kanban-mcp.service — systemd unit for the kanban-mcp MCP bridge
+#
+# Deploy steps:
+#   1. Install the static binary:  install -m 0755 bin/kanban-mcp /usr/local/bin/kanban-mcp
+#   2. Create /etc/kanban-mcp.env from deploy/kanban-mcp.env.example and
+#      chmod 600 it — it holds KANBAN_PASSWORD and MCP_BEARER_TOKEN secrets.
+#   3. Copy this file to /etc/systemd/system/kanban-mcp.service, then:
+#      systemctl daemon-reload && systemctl enable --now kanban-mcp
+
+[Unit]
+Description=kanban-mcp MCP bridge to the Hermes kanban board
+# The bridge proxies MCP tool calls to the kanban REST API on the same
+# host, so it must wait for the network stack to be configured.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Static binary (CGO_ENABLED=0); no interpreter or shared runtime deps.
+ExecStart=/usr/local/bin/kanban-mcp
+# All configuration is environment-only. systemd reads the env file
+# before exec, so the process itself never needs write access to it.
+EnvironmentFile=/etc/kanban-mcp.env
+
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# ---- Sandboxing ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+# ProtectHome=read-only: the bridge only ever needs to READ hermes state
+# under the service user's home (kanban DB ~/.hermes/kanban.db, hermes
+# config) while proxying to the REST API. Full write access to $HOME
+# would let a compromised bridge rewrite the operator's whole home
+# directory for no functional gain, so it is deliberately withheld.
+#
+# Known trade-off (intentional, NOT relaxed silently): shell-outs that
+# WRITE under $HOME — e.g. `hermes kanban claim` via $HERMES_BIN, which
+# updates ~/.hermes/kanban.db — will fail under read-only /home. If that
+# becomes a requirement, document it in README.md (docs task owns that
+# note) instead of setting ProtectHome=false here. A narrower carve-out
+# is possible once __SERVICE_USER__ is known: keep ProtectHome=read-only
+# and add ReadWritePaths=<path to that user's ~/.hermes/kanban.db>.
+ProtectHome=read-only
+
+# __SERVICE_USER__ placeholder: MUST be the account that can execute
+# `hermes` (used for claim and typed-block shell-outs via $HERMES_BIN).
+# It should also be the account whose ~/.hermes holds the board DB the
+# bridge manages, so those shell-outs operate on the same kanban the
+# REST API reads.
+User=__SERVICE_USER__
+
+[Install]
+WantedBy=multi-user.target

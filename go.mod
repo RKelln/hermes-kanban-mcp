@@ -1,4 +1,4 @@
-module github.com/experimance/kanban-mcp
+module github.com/RKelln/hermes-kanban-mcp
 
 go 1.25.0
 

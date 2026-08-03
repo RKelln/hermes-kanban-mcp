@@ -1,0 +1,998 @@
+{
+  "columns": [
+    {
+      "name": "triage",
+      "tasks": [
+        {
+          "id": "t_9c1a2f01",
+          "title": "Triage: rate-limiter unit test flakes under -race",
+          "body": "Synthetic preview body for t_9c1a2f01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "triage",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785700000,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 604800,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_9c1a2f01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        },
+        {
+          "id": "t_9c1a2f02",
+          "title": "Triage: dashboard kanban tab shows stale claim_expires",
+          "body": "Synthetic preview body for t_9c1a2f02; full text is served by GET /tasks/{id}.",
+          "assignee": null,
+          "status": "triage",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785703600,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 601200,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_9c1a2f02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 1,
+          "progress": null
+        },
+        {
+          "id": "t_9c1a2f03",
+          "title": "Triage: bearer middleware double-writes WWW-Authenticate",
+          "body": "Synthetic preview body for t_9c1a2f03; full text is served by GET /tasks/{id}.",
+          "assignee": "reviewer",
+          "status": "triage",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785707200,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 597600,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_9c1a2f03; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 2,
+          "progress": null
+        }
+      ]
+    },
+    {
+      "name": "todo",
+      "tasks": [
+        {
+          "id": "t_4b7d8e01",
+          "title": "Add config knob for per-profile max_task_output_bytes",
+          "body": "Synthetic preview body for t_4b7d8e01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "todo",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785710800,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 594000,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_4b7d8e01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 3,
+          "progress": null
+        },
+        {
+          "id": "t_4b7d8e02",
+          "title": "Document ticket_list sort order in the MCP schema",
+          "body": "Synthetic preview body for t_4b7d8e02; full text is served by GET /tasks/{id}.",
+          "assignee": "writer",
+          "status": "todo",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785714400,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 590400,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_4b7d8e02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 4,
+          "progress": null
+        },
+        {
+          "id": "t_4b7d8e03",
+          "title": "Extract shared truncation helpers into internal/shape",
+          "body": "Synthetic preview body for t_4b7d8e03; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "todo",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785718000,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 586800,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_4b7d8e03; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        },
+        {
+          "id": "t_4b7d8e04",
+          "title": "Migrate testdata fixtures to synthetic content generator",
+          "body": "Synthetic preview body for t_4b7d8e04; full text is served by GET /tasks/{id}.",
+          "assignee": "researcher-a",
+          "status": "todo",
+          "priority": 3,
+          "created_by": "fixture-gen",
+          "created_at": 1785721600,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 583200,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_4b7d8e04; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 1
+          },
+          "comment_count": 1,
+          "progress": {
+            "done": 1,
+            "total": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "scheduled",
+      "tasks": [
+        {
+          "id": "t_8f3e9a01",
+          "title": "Rotate staging API tokens (expires 2026-08-10)",
+          "body": "Synthetic preview body for t_8f3e9a01; full text is served by GET /tasks/{id}.",
+          "assignee": "ops",
+          "status": "scheduled",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785725200,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 579600,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_8f3e9a01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 2,
+          "progress": null
+        },
+        {
+          "id": "t_8f3e9a02",
+          "title": "Quarterly capacity review for the agent pool",
+          "body": "Synthetic preview body for t_8f3e9a02; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "scheduled",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785728800,
+          "started_at": null,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 576000,
+            "started_age_seconds": null,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_8f3e9a02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 3,
+          "progress": null
+        }
+      ]
+    },
+    {
+      "name": "ready",
+      "tasks": [
+        {
+          "id": "t_2d6c5b01",
+          "title": "Implement ticket_list status array filter",
+          "body": "Synthetic preview body for t_2d6c5b01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "ready",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785732400,
+          "started_at": 1785733000,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 572400,
+            "started_age_seconds": 571800,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_2d6c5b01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 4,
+          "progress": null
+        },
+        {
+          "id": "t_2d6c5b02",
+          "title": "Add claim_expires formatting to list output",
+          "body": "Synthetic preview body for t_2d6c5b02; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "ready",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785736000,
+          "started_at": 1785736600,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 568800,
+            "started_age_seconds": 568200,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_2d6c5b02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        },
+        {
+          "id": "t_2d6c5b03",
+          "title": "Wire board slug cache into ensureKnownBoard",
+          "body": "Synthetic preview body for t_2d6c5b03; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "ready",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785739600,
+          "started_at": 1785740200,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 565200,
+            "started_age_seconds": 564600,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_2d6c5b03; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 1,
+          "progress": null
+        },
+        {
+          "id": "t_2d6c5b04",
+          "title": "Write size-budget regression test for list output",
+          "body": "Synthetic preview body for t_2d6c5b04; full text is served by GET /tasks/{id}.",
+          "assignee": "reviewer",
+          "status": "ready",
+          "priority": 3,
+          "created_by": "fixture-gen",
+          "created_at": 1785743200,
+          "started_at": 1785743800,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 561600,
+            "started_age_seconds": 561000,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_2d6c5b04; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 2,
+          "progress": null
+        },
+        {
+          "id": "t_2d6c5b05",
+          "title": "Add json-schema descriptions for ticket_get input",
+          "body": "Synthetic preview body for t_2d6c5b05; full text is served by GET /tasks/{id}.",
+          "assignee": "writer",
+          "status": "ready",
+          "priority": 4,
+          "created_by": "fixture-gen",
+          "created_at": 1785746800,
+          "started_at": 1785747400,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 558000,
+            "started_age_seconds": 557400,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_2d6c5b05; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 3,
+          "progress": null
+        }
+      ]
+    },
+    {
+      "name": "running",
+      "tasks": [
+        {
+          "id": "t_5e7a4d01",
+          "title": "Implement bearer auth middleware with JSON 401",
+          "body": "Synthetic preview body for t_5e7a4d01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "running",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785750400,
+          "started_at": 1785751000,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": "agent-box:7788990",
+          "claim_expires": 1785764800,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": 9014,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 554400,
+            "started_age_seconds": 553800,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_5e7a4d01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 4,
+          "progress": null
+        },
+        {
+          "id": "t_5e7a4d02",
+          "title": "Add per-IP token-bucket rate limiter",
+          "body": "Synthetic preview body for t_5e7a4d02; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "running",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785754000,
+          "started_at": 1785754600,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": "agent-box:7788990",
+          "claim_expires": 1785768400,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": 9015,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 550800,
+            "started_age_seconds": 550200,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_5e7a4d02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        },
+        {
+          "id": "t_5e7a4d03",
+          "title": "Define kanban DTOs and typed APIError mapper",
+          "body": "Synthetic preview body for t_5e7a4d03; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "running",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785757600,
+          "started_at": 1785758200,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": 9016,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 547200,
+            "started_age_seconds": 546600,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_5e7a4d03; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 1,
+          "progress": null
+        }
+      ]
+    },
+    {
+      "name": "blocked",
+      "tasks": [
+        {
+          "id": "t_6f8b3c01",
+          "title": "Migrate sqlite WAL checkpoint tuning to prod",
+          "body": "Synthetic preview body for t_6f8b3c01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "blocked",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785761200,
+          "started_at": 1785761800,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 2,
+          "current_run_id": 9017,
+          "block_kind": "needs_input",
+          "block_recurrences": 2,
+          "block_reason": "Waiting on the q3 capacity review from the infrastructure team before the migration window can be scheduled; the review board pushed the decision to next Tuesday and the runbook still needs a sign-off from security.",
+          "age": {
+            "created_age_seconds": 543600,
+            "started_age_seconds": 543000,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_6f8b3c01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 2,
+          "progress": null,
+          "diagnostics": [
+            {
+              "kind": "block_recurrence",
+              "severity": "warning",
+              "count": 1,
+              "first_seen_at": 1785761200,
+              "last_seen_at": 1785764800,
+              "suggestion": "Check whether the block reason is stale or the task needs triage."
+            }
+          ],
+          "warnings": [
+            {
+              "kind": "blocked_untouched",
+              "severity": "warning",
+              "count": 1,
+              "last_seen_at": 1785764800,
+              "message": "Task has been blocked for a while."
+            }
+          ]
+        },
+        {
+          "id": "t_6f8b3c02",
+          "title": "Rotate deploy@web-toronto ssh key",
+          "body": "Synthetic preview body for t_6f8b3c02; full text is served by GET /tasks/{id}.",
+          "assignee": "ops",
+          "status": "blocked",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785764800,
+          "started_at": 1785765400,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 2,
+          "current_run_id": 9018,
+          "block_kind": "capability",
+          "block_recurrences": 1,
+          "block_reason": "Missing credentials for the staging database; ask ops for a rotated token.",
+          "age": {
+            "created_age_seconds": 540000,
+            "started_age_seconds": 539400,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_6f8b3c02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 3,
+          "progress": null,
+          "diagnostics": [
+            {
+              "kind": "blocked_untouched",
+              "severity": "warning",
+              "count": 1,
+              "first_seen_at": 1785764800,
+              "last_seen_at": 1785768400,
+              "suggestion": "Check whether the block reason is stale or the task needs triage."
+            }
+          ],
+          "warnings": [
+            {
+              "kind": "blocked_untouched",
+              "severity": "warning",
+              "count": 1,
+              "last_seen_at": 1785768400,
+              "message": "Task has been blocked for a while."
+            }
+          ]
+        },
+        {
+          "id": "t_6f8b3c03",
+          "title": "Land schema migration for task_links index",
+          "body": "Synthetic preview body for t_6f8b3c03; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "blocked",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785768400,
+          "started_at": 1785769000,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": 9019,
+          "block_kind": "dependency",
+          "block_recurrences": 1,
+          "block_reason": "Dependency block: waiting on the parent task t_4b7d8e04 to land its fixture generator.",
+          "age": {
+            "created_age_seconds": 536400,
+            "started_age_seconds": 535800,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_6f8b3c03; worker handoff preview.",
+          "link_counts": {
+            "parents": 1,
+            "children": 0
+          },
+          "comment_count": 4,
+          "progress": null,
+          "diagnostics": [
+            {
+              "kind": "blocked_untouched",
+              "severity": "warning",
+              "count": 1,
+              "first_seen_at": 1785768400,
+              "last_seen_at": 1785772000,
+              "suggestion": "Check whether the block reason is stale or the task needs triage."
+            }
+          ],
+          "warnings": [
+            {
+              "kind": "blocked_untouched",
+              "severity": "warning",
+              "count": 1,
+              "last_seen_at": 1785772000,
+              "message": "Task has been blocked for a while."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "review",
+      "tasks": [
+        {
+          "id": "t_3a9d7e01",
+          "title": "Review truncation discipline in ticket_get output",
+          "body": "Synthetic preview body for t_3a9d7e01; full text is served by GET /tasks/{id}.",
+          "assignee": "reviewer",
+          "status": "review",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785772000,
+          "started_at": 1785772600,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 532800,
+            "started_age_seconds": 532200,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_3a9d7e01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        },
+        {
+          "id": "t_3a9d7e02",
+          "title": "Review size-budget regression guard patch",
+          "body": "Synthetic preview body for t_3a9d7e02; full text is served by GET /tasks/{id}.",
+          "assignee": "reviewer",
+          "status": "review",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785775600,
+          "started_at": 1785776200,
+          "completed_at": null,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": null,
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 529200,
+            "started_age_seconds": 528600,
+            "time_to_complete_seconds": null
+          },
+          "latest_summary": "Latest synthetic run summary for t_3a9d7e02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 1,
+          "progress": null
+        }
+      ]
+    },
+    {
+      "name": "done",
+      "tasks": [
+        {
+          "id": "t_1c5e8f01",
+          "title": "Scaffold Go module and config package",
+          "body": "Synthetic preview body for t_1c5e8f01; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "done",
+          "priority": 0,
+          "created_by": "fixture-gen",
+          "created_at": 1785779200,
+          "started_at": 1785779800,
+          "completed_at": 1785786400,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": "handoff summary",
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 525600,
+            "started_age_seconds": 525000,
+            "time_to_complete_seconds": 7200
+          },
+          "latest_summary": "Latest synthetic run summary for t_1c5e8f01; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 2,
+          "progress": null
+        },
+        {
+          "id": "t_1c5e8f02",
+          "title": "Add README, env example, and gitignore",
+          "body": "Synthetic preview body for t_1c5e8f02; full text is served by GET /tasks/{id}.",
+          "assignee": "default",
+          "status": "done",
+          "priority": 1,
+          "created_by": "fixture-gen",
+          "created_at": 1785782800,
+          "started_at": 1785783400,
+          "completed_at": 1785790000,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": "handoff summary",
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 522000,
+            "started_age_seconds": 521400,
+            "time_to_complete_seconds": 7200
+          },
+          "latest_summary": "Latest synthetic run summary for t_1c5e8f02; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 3,
+          "progress": null
+        },
+        {
+          "id": "t_1c5e8f03",
+          "title": "Set up CI vet+test job on the agent box",
+          "body": "Synthetic preview body for t_1c5e8f03; full text is served by GET /tasks/{id}.",
+          "assignee": "ops",
+          "status": "done",
+          "priority": 2,
+          "created_by": "fixture-gen",
+          "created_at": 1785786400,
+          "started_at": 1785787000,
+          "completed_at": 1785793600,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": "handoff summary",
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 518400,
+            "started_age_seconds": 517800,
+            "time_to_complete_seconds": 7200
+          },
+          "latest_summary": "Latest synthetic run summary for t_1c5e8f03; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 4,
+          "progress": null
+        },
+        {
+          "id": "t_1c5e8f04",
+          "title": "Write kanban DTO decode tests for null fields",
+          "body": "Synthetic preview body for t_1c5e8f04; full text is served by GET /tasks/{id}.",
+          "assignee": "writer",
+          "status": "done",
+          "priority": 3,
+          "created_by": "fixture-gen",
+          "created_at": 1785790000,
+          "started_at": 1785790600,
+          "completed_at": 1785797200,
+          "workspace_kind": "scratch",
+          "workspace_path": null,
+          "claim_lock": null,
+          "claim_expires": null,
+          "result": "handoff summary",
+          "consecutive_failures": 0,
+          "current_run_id": null,
+          "block_kind": null,
+          "block_recurrences": 0,
+          "block_reason": null,
+          "age": {
+            "created_age_seconds": 514800,
+            "started_age_seconds": 514200,
+            "time_to_complete_seconds": 7200
+          },
+          "latest_summary": "Latest synthetic run summary for t_1c5e8f04; worker handoff preview.",
+          "link_counts": {
+            "parents": 0,
+            "children": 0
+          },
+          "comment_count": 0,
+          "progress": null
+        }
+      ]
+    }
+  ],
+  "tenants": [],
+  "assignees": [
+    "default",
+    "ops",
+    "researcher-a",
+    "reviewer",
+    "writer"
+  ],
+  "latest_event_id": 4000,
+  "now": 1786304800
+}

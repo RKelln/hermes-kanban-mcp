@@ -1,0 +1,35 @@
+{
+  "boards": [
+    {
+      "slug": "hermes-agent",
+      "name": "Hermes Agent Board",
+      "description": "Synthetic fixture board (not live data)",
+      "icon": "robot",
+      "color": "#4466aa",
+      "is_current": true,
+      "total": 4,
+      "counts": { "triage": 1, "ready": 2, "running": 1 }
+    },
+    {
+      "slug": "default",
+      "name": "Default Board",
+      "description": "Synthetic fixture board (not live data)",
+      "icon": "inbox",
+      "color": "#44aa66",
+      "is_current": false,
+      "total": 3,
+      "counts": { "todo": 2, "blocked": 1 }
+    },
+    {
+      "slug": "bard",
+      "name": "Bard Board",
+      "description": "Synthetic fixture board (not live data)",
+      "icon": "music",
+      "color": "#aa6644",
+      "is_current": false,
+      "total": 0,
+      "counts": {}
+    }
+  ],
+  "current": "hermes-agent"
+}
