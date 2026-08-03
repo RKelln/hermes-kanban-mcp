@@ -1,0 +1,17 @@
+# build artifacts
+/kanban-mcp
+/bin/
+*.exe
+
+# env / secrets (never commit)
+.env
+*.env
+!*.env.example
+
+# logs
+*.log
+
+# editor/OS
+.DS_Store
+.idea/
+.vscode/
