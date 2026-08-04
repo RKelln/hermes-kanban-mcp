@@ -16,6 +16,11 @@ import (
 func TestTicketGetSurfacesBlockReason(t *testing.T) {
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			// board-lister path: the known-board slug cache needs this
+			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
 		io_WriteString(w, `{
 			"task": {"id": "t_x1", "title": "T", "status": "blocked", "latest_summary": "review-required: shipped the widget"},
 			"comments": [],
@@ -26,6 +31,7 @@ func TestTicketGetSurfacesBlockReason(t *testing.T) {
 	defer fake.Close()
 
 	s := NewServer(fake.URL, "hermes-agent")
+	SetBoardLister(s) // production wiring installs the Server itself via Register
 	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: "hermes-agent"})
 	if res == nil || res.IsError {
 		t.Fatalf("TicketGet returned error result: %+v", res)
