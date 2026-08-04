@@ -1,0 +1,58 @@
+package mcptools
+
+import "context"
+
+// MaxHelpOutputBytes is the hard cap on the rendered kanban_help result.
+// Help is called rarely and on demand, so it may exceed the 2 KB
+// write-tool budget — but it stays well under the read-tool ceiling.
+const MaxHelpOutputBytes = 8 * 1024
+
+// helpDoc is the full usage documentation returned by kanban_help. It is
+// the MCP-native replacement for a docs page: agents self-serve the
+// complete workflow without any of it living in their context until
+// they ask.
+const helpDoc = `# hermes-kanban MCP — usage
+
+8 tools for a Hermes kanban board:
+- board_list      orient: boards + per-status task counts
+- ticket_list     summary view; filters: status[], assignee, limit (max 50)
+- ticket_get      full detail (truncated); call when list summaries are thin
+- ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
+- ticket_comment  log context/decisions as you work
+- ticket_complete finish; REVIEW-GATED by default (comment + review-required block)
+- ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
+- ticket_create   new ticket; title required; parents supported
+
+Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
+ticket_comment -> ticket_complete. An omitted 'board' defaults to the
+server's configured board.
+
+Lifecycle facts:
+- Claims are kernel-enforced: a ticket with an open parent stays 'todo';
+  gate tickets are wired as parents and complete when the human completes
+  them (children promote immediately).
+- ticket_complete refuses an unclaimed ticket (must be 'running') unless
+  MCP_ALLOW_SKIP_CLAIM=true; MCP_COMPLETE_MODE=done completes to 'done'
+  instead of the review path.
+- Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
+  8 KB) — they are summaries; use ticket_get for depth.
+- REST completion does not record created_cards; create follow-ups
+  explicitly with ticket_create.
+
+Rules:
+- Never touch the live Hermes install tree (~/.hermes).
+- Ask before deploy/publish: ticket_block("approval-required: ...").
+- Don't create tickets for yourself; assign follow-ups to the right lane.`
+
+// HelpInput is the kanban_help tool input. It takes no arguments.
+type HelpInput struct{}
+
+// HelpOut is the kanban_help result: the full usage documentation.
+type HelpOut struct {
+	Text string `json:"text"`
+}
+
+// Help implements the kanban_help MCP tool.
+func (s *Server) Help(ctx context.Context, _ HelpInput) *ToolResult {
+	return renderResult(MaxHelpOutputBytes, false, HelpOut{Text: helpDoc})
+}

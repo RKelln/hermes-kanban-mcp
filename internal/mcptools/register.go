@@ -93,6 +93,10 @@ func Register(srv *mcp.Server, s *Server) {
 			"idempotency_key": propStr(),
 		}),
 		s.TicketCreate)
+
+	addTool(srv, "kanban_help", "Full usage docs for the kanban MCP tools; returns the complete workflow and lifecycle facts.",
+		obj(map[string]any{}),
+		s.Help)
 }
 
 func obj(props map[string]any) map[string]any {

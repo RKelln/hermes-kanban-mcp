@@ -251,7 +251,7 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 		names[tool.Name] = true
 	}
 	want := []string{"board_list", "ticket_list", "ticket_get", "ticket_claim",
-		"ticket_comment", "ticket_complete", "ticket_block", "ticket_create"}
+		"ticket_comment", "ticket_complete", "ticket_block", "ticket_create", "kanban_help"}
 	if len(names) != len(want) {
 		t.Errorf("tools/list has %d tools, want %d (%v)", len(names), len(want), names)
 	}
