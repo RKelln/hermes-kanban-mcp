@@ -51,6 +51,7 @@ type Run struct {
 	ID        int64  `json:"id"`
 	Status    string `json:"status"`
 	StartedAt int64  `json:"started_at"`
+	Summary   string `json:"summary,omitempty"`
 }
 
 // Links carries the parent/child task id lists of the ticket_get

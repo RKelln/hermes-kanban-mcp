@@ -147,23 +147,25 @@ type CommentOut struct {
 // warnings) are surfaced as counts plus the truncated flags, keeping the
 // result inside the hard 8 KB budget.
 type TicketGetOut struct {
-	ID            string          `json:"id"`
-	Title         string          `json:"title"`
-	Status        string          `json:"status"`
-	Assignee      string          `json:"assignee,omitempty"`
-	Priority      int             `json:"priority"`
-	ClaimExpires  int64           `json:"claim_expires,omitempty"`
-	BlockReason   string          `json:"block_reason,omitempty"`
-	BlockKind     string          `json:"block_kind,omitempty"`
-	Body          string          `json:"body,omitempty"`
-	Comments      []CommentOut    `json:"comments,omitempty"`
-	EventsCount   int             `json:"events_count"`
-	RunsCount     int             `json:"runs_count"`
-	AttachmentsN  int             `json:"attachments_count"`
-	LinksParents  int             `json:"links_parents"`
-	LinksChildren int             `json:"links_children"`
-	WarningsCount int             `json:"warnings_count"`
-	Truncated     TruncationFlags `json:"truncated"`
+	ID             string          `json:"id"`
+	Title          string          `json:"title"`
+	Status         string          `json:"status"`
+	Assignee       string          `json:"assignee,omitempty"`
+	Priority       int             `json:"priority"`
+	ClaimExpires   int64           `json:"claim_expires,omitempty"`
+	BlockReason    string          `json:"block_reason,omitempty"`
+	BlockKind      string          `json:"block_kind,omitempty"`
+	LatestSummary  string          `json:"latest_summary,omitempty"`
+	LastRunSummary string          `json:"last_run_summary,omitempty"`
+	Body           string          `json:"body,omitempty"`
+	Comments       []CommentOut    `json:"comments,omitempty"`
+	EventsCount    int             `json:"events_count"`
+	RunsCount      int             `json:"runs_count"`
+	AttachmentsN   int             `json:"attachments_count"`
+	LinksParents   int             `json:"links_parents"`
+	LinksChildren  int             `json:"links_children"`
+	WarningsCount  int             `json:"warnings_count"`
+	Truncated      TruncationFlags `json:"truncated"`
 }
 
 // TruncationFlags reports which fields were clipped so the calling model
@@ -184,6 +186,7 @@ type taskDetailEnvelope struct {
 		WorkspaceKind string   `json:"workspace_kind,omitempty"`
 		BranchName    string   `json:"branch_name,omitempty"`
 		Parents       []string `json:"parents,omitempty"`
+		LatestSummary string   `json:"latest_summary,omitempty"`
 	} `json:"task"`
 	Comments    []kanban.Comment  `json:"comments"`
 	Events      []json.RawMessage `json:"events"`
@@ -229,10 +232,18 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		ClaimExpires:  t.ClaimExpires,
 		BlockReason:   truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
 		BlockKind:     t.BlockKind,
+		LatestSummary: truncateToRunes(t.LatestSummary, MaxBlockedReasonChars),
 		EventsCount:   len(env.Events),
 		RunsCount:     len(env.Runs),
 		AttachmentsN:  len(env.Attachments),
 		WarningsCount: len(env.Warnings),
+	}
+	// The REST API does not carry block_reason on the task dict — block
+	// reasons live in the run summaries (e.g. "review-required: ...").
+	// Surface the last run's summary so blocked tickets are never
+	// reason-less through the MCP surface.
+	if len(env.Runs) > 0 {
+		out.LastRunSummary = truncateToRunes(env.Runs[len(env.Runs)-1].Summary, MaxBlockedReasonChars)
 	}
 	if env.Links != nil {
 		out.LinksParents = len(env.Links.Parents)
