@@ -199,10 +199,12 @@ echo "  ok: no leaked credentials in the journal"
 echo "secret hygiene: git grep for committed secret values"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || fail "secret hygiene cannot run — not inside a git repository (git grep needs a work tree)"
-if git grep -nE '(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[^ ]' -- ':!*.example' | grep -q .; then
+if git grep -nE '(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[^ ]' -- ':!*.example' \
+    | grep -vE '=<[^>]+>' | grep -q .; then
     fail "secret hygiene git grep found a committed secret value (a secret variable name followed by an equals sign and a value)"
 fi
 echo "  ok: no committed secret values in the repository"
+echo "  note: doc placeholders like MCP_BEARER_TOKEN=<token> are excluded from the scan"
 
 echo
 echo "smoke test passed: steps 1-7 and secret hygiene checks all ok"

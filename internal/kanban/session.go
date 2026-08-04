@@ -26,10 +26,7 @@ const pluginMount = "/api/plugins/kanban/"
 // the session will start receiving 401s, which the tool layer surfaces
 // as auth errors. Proactive re-login on 401 is future work.
 func NewSessionClient(baseURL, username, password string) (*http.Client, error) {
-	root := strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(root, pluginMount) {
-		root = strings.TrimSuffix(root, pluginMount)
-	}
+	root := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), strings.TrimSuffix(pluginMount, "/"))
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, fmt.Errorf("create cookie jar: %w", err)
