@@ -1,0 +1,12 @@
+{
+  "mcp": {
+    "hermes-kanban": {
+      "type": "remote",
+      "url": "http://100.126.212.105:9130/mcp",
+      "headers": {
+        "Authorization": "Bearer <TOKEN>"
+      },
+      "enabled": true
+    }
+  }
+}
