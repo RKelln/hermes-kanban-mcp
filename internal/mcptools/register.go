@@ -119,6 +119,10 @@ func Register(srv *mcp.Server, s *Server) {
 		eventsSchema(),
 		s.TicketEvents)
 
+	addTool(srv, "review_queue", "Single-call scan for tickets awaiting human review across ALL boards: blocked tickets whose block_reason marks a review-required completion. One call replaces per-board ticket_list scans (the sweeper's rate-limit pressure).",
+		obj(map[string]any{}),
+		s.ReviewQueue)
+
 	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; all other fields optional.",
 		obj(map[string]any{
 			"board":           propStr(),

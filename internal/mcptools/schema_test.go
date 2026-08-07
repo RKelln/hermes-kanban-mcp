@@ -237,7 +237,7 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	nonPerTicket := []string{"board_list", "ticket_list", "ticket_create", "kanban_help"}
+	nonPerTicket := []string{"board_list", "ticket_list", "ticket_create", "kanban_help", "review_queue"}
 	for _, name := range nonPerTicket {
 		tool, ok := tools[name]
 		if !ok {

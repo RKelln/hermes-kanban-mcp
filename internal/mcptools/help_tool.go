@@ -19,6 +19,8 @@ MCP tools for a Hermes kanban board:
 - ticket_get      full detail (truncated); call when list summaries are thin
 - ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
     newer than since_event_id or empty on timeout (default 30s, max 120s)
+- review_queue    single-call scan for tickets awaiting human review across ALL
+    boards (blocked + review-required block_reason); replaces per-board scans
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
 - ticket_comment  log context/decisions as you work
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
@@ -47,7 +49,8 @@ Lifecycle facts:
   instead of the review path. review_tier=LOW completes direct to done;
   MEDIUM/HIGH default to review-gated (MCP_COMPLETE_MODE=done overrides).
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
-  8 KB, ticket_events 6 KB) — they are summaries; use ticket_get for depth.
+  8 KB, ticket_events 6 KB, review_queue 8 KB) — they are summaries; use
+  ticket_get for depth.
 - REST completion does not record created_cards; create follow-ups
   explicitly with ticket_create.
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the

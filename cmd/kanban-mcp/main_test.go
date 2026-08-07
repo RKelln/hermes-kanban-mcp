@@ -251,7 +251,7 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 		names[tool.Name] = true
 	}
 	want := []string{"board_list", "ticket_list", "ticket_get", "ticket_events",
-		"ticket_claim", "ticket_comment", "ticket_complete", "ticket_block", "ticket_create", "kanban_help"}
+		"ticket_claim", "ticket_comment", "ticket_complete", "ticket_block", "ticket_create", "kanban_help", "review_queue"}
 	for _, w := range want {
 		if !names[w] {
 			t.Errorf("tools/list is missing %s (have %v)", w, names)
