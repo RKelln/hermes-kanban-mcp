@@ -22,7 +22,8 @@ MCP tools for a Hermes kanban board:
     If the ticket has already left 'blocked' (verdict landed), returns
     IMMEDIATELY with its ticket_status instead of waiting the timeout.
 - review_queue    single-call scan for tickets awaiting human review across ALL
-    boards (blocked + review-required block_reason); replaces per-board scans
+    boards (blocked + review-required marker via block_reason or latest_summary);
+    replaces per-board scans
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
 - ticket_comment  log context/decisions as you work
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).

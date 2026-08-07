@@ -4,7 +4,8 @@ import glob
 import os
 import sys
 
-sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))
+sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))  # host fallback (may not exist)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo sweeper/ copy wins
 from review_sweeper import extract_findings, parse_verdict  # noqa: E402
 
 ok = True

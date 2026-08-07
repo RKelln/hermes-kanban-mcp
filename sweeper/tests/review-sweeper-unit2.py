@@ -6,7 +6,8 @@ import sys
 import tempfile
 import time
 
-sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))
+sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))  # host fallback (may not exist)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo sweeper/ copy wins
 import review_sweeper as rs  # noqa: E402
 
 failures = []

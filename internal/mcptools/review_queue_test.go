@@ -132,6 +132,50 @@ func TestReviewQueueSkipsBlockedNonReviewAndNonBlocked(t *testing.T) {
 	}
 }
 
+func TestReviewQueueMatchesLatestSummaryFallback(t *testing.T) {
+	// The live kanban API omits block_reason on the task dict (t_828c3b69);
+	// the review-required marker lives in latest_summary/last_run_summary.
+	// A blocked ticket whose summary carries "review-required: <summary>"
+	// must match even with no block_reason present.
+	reviewTasks := map[string]string{
+		"hermes-agent": reviewBoardBody(
+			`{"id":"t_summary","title":"S","status":"blocked","latest_summary":"review-required: shipped the widget"}`,
+			`{"id":"t_run","title":"R","status":"blocked","last_run_summary":"review-required: from the run"}`,
+			`{"id":"t_plain","title":"P","status":"blocked","latest_summary":"Waiting on the infra team"}`,
+			`{"id":"t_urgent","title":"U","status":"blocked","latest_summary":"review-required-urgent: still blocked"}`,
+			`{"id":"t_case","title":"C","status":"blocked","latest_summary":"  Review-required: mixed case"}`,
+		),
+	}
+	fake := reviewQueueFixture(t, []string{"hermes-agent"}, reviewTasks)
+	s := NewServer(fake.URL, "hermes-agent")
+
+	res := s.ReviewQueue(context.Background(), ReviewQueueInput{})
+	if res == nil || res.IsError {
+		t.Fatalf("ReviewQueue returned error result: %+v", res)
+	}
+	var out ReviewQueueOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if out.Total != 3 || len(out.Tickets) != 3 {
+		t.Fatalf("Total/len = %d/%d, want 3/3 (latest_summary, last_run_summary, and case-insensitive matches; not plain/urgent)", out.Total, len(out.Tickets))
+	}
+	got := map[string]bool{}
+	for _, it := range out.Tickets {
+		got[it.ID] = true
+	}
+	for _, want := range []string{"t_summary", "t_run", "t_case"} {
+		if !got[want] {
+			t.Errorf("missing match %q (have %v)", want, got)
+		}
+	}
+	for _, not := range []string{"t_plain", "t_urgent"} {
+		if got[not] {
+			t.Errorf("must NOT match %q (have %v)", not, got)
+		}
+	}
+}
+
 func TestReviewQueueBackendError(t *testing.T) {
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
