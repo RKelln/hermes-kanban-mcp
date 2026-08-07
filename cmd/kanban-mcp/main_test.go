@@ -252,12 +252,23 @@ func TestMCPServerInitializeAndToolsList(t *testing.T) {
 	}
 	want := []string{"board_list", "ticket_list", "ticket_get", "ticket_events",
 		"ticket_claim", "ticket_comment", "ticket_complete", "ticket_block", "ticket_create", "kanban_help"}
-	if len(names) != len(want) {
-		t.Errorf("tools/list has %d tools, want %d (%v)", len(names), len(want), names)
-	}
 	for _, w := range want {
 		if !names[w] {
 			t.Errorf("tools/list is missing %s (have %v)", w, names)
+		}
+	}
+	// Every exposed tool must be in the want list; a tool registered
+	// without being added here fails the wiring test.
+	for n := range names {
+		found := false
+		for _, w := range want {
+			if n == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("tools/list exposes unexpected tool %q (not in want list)", n)
 		}
 	}
 }

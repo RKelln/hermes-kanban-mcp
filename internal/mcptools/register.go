@@ -72,12 +72,12 @@ func eventsSchema() map[string]any {
 	return objReq(map[string]any{
 		"id":              propStr(),
 		"board":           propStr(),
-		"since_event_id":  propInt(),
-		"timeout_seconds": propInt(),
+		"since_event_id":  map[string]any{"type": "integer", "minimum": 0, "default": 0},
+		"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxEventsTimeoutSeconds, "default": defaultEventsTimeoutSeconds},
 	}, "id", "board")
 }
 
-// Register installs all ten tools on the MCP server and wires the
+// Register installs all tools on the MCP server and wires the
 // known-board slug cache to the Server's backend.
 func Register(srv *mcp.Server, s *Server) {
 	SetBoardLister(s)

@@ -188,11 +188,11 @@ func TestBlockSchemaProperties(t *testing.T) {
 }
 
 // TestRegisterWiresRequiredSchemas drives the actual Register() through a
-// live client session and asserts that the six per-ticket tools expose
-// required ["id","board"] on the wire, and that the four non-per-ticket
-// tools do not declare id/board as required. This is the registration-
-// wiring test: it catches a schema swapped or mis-wired inside Register()
-// that the isolated schema-function tests cannot.
+// live client session and asserts that the per-ticket tools expose
+// required ["id","board"] on the wire, and that the non-per-ticket tools
+// do not declare id/board as required. This is the registration-wiring
+// test: it catches a schema swapped or mis-wired inside Register() that
+// the isolated schema-function tests cannot.
 func TestRegisterWiresRequiredSchemas(t *testing.T) {
 	ctx := context.Background()
 
@@ -248,9 +248,17 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	// Sanity: all ten tools are present.
-	if len(tools) != 10 {
-		t.Errorf("registered %d tools, want 10", len(tools))
+	// Every registered tool must be covered by one of the two lists
+	// above; a tool added to Register() without a list here fails the
+	// wiring test rather than silently passing an uncategorized schema.
+	covered := make(map[string]bool, len(perTicket)+len(nonPerTicket))
+	for _, name := range append(append([]string{}, perTicket...), nonPerTicket...) {
+		covered[name] = true
+	}
+	for name := range tools {
+		if !covered[name] {
+			t.Errorf("registered tool %q is not covered by the per-ticket/non-per-ticket lists", name)
+		}
 	}
 }
 

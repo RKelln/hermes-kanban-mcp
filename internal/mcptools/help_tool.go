@@ -13,7 +13,7 @@ const MaxHelpOutputBytes = 8 * 1024
 // they ask.
 const helpDoc = `# hermes-kanban MCP — usage
 
-10 tools for a Hermes kanban board:
+MCP tools for a Hermes kanban board:
 - board_list      orient: boards + per-status task counts
 - ticket_list     summary view; filters: status[], assignee, limit (max 50)
 - ticket_get      full detail (truncated); call when list summaries are thin
@@ -30,10 +30,10 @@ const helpDoc = `# hermes-kanban MCP — usage
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
 
-The six per-ticket tools (ticket_events/claim/comment/get/complete/block)
-require both board and id; the strict schema rejects calls missing either.
-The Go layer still resolves a configured default board when board is
-omitted by a permissive client.
+The per-ticket tools (ticket_events/claim/comment/get/complete/block)
+require both board and id; the strict schema rejects calls missing
+either. The Go layer still resolves a configured default board when
+board is omitted by a permissive client.
 
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
 ticket_comment -> ticket_complete.

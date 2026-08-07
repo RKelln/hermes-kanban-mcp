@@ -28,7 +28,7 @@ const (
 // Server is the shared write-tool backend handle: the kanban REST base
 // URL, the default board slug, and the HTTP client used for every
 // backend request. register.go constructs one Server from config and
-// hands it to all ten tools.
+// hands it to every registered tool.
 type Server struct {
 	baseURL      string
 	defaultBoard string

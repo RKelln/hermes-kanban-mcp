@@ -1,6 +1,6 @@
 # AGENTS.md — hermes-kanban-mcp
 
-Go MCP server exposing a Hermes kanban board as 10 MCP tools for remote agents. Single static binary, streamable HTTP at `/mcp`, bearer auth.
+Go MCP server exposing a Hermes kanban board as MCP tools for remote agents. Single static binary, streamable HTTP at `/mcp`, bearer auth.
 
 ## Build / verify
 

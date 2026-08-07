@@ -162,8 +162,10 @@ func TestTE_EmptyTimeout(t *testing.T) {
 	if len(out.Events) != 0 {
 		t.Errorf("expected no events, got %d", len(out.Events))
 	}
-	if elapsed < 2*time.Second {
-		t.Logf("timeout elapsed in %v (expected >= 2s)", elapsed)
+	// Must actually wait ~timeout_seconds (generous bound; regression
+	// that returns immediately would trip this).
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("timeout returned after %v, want >= ~2s (immediate return regression)", elapsed)
 	}
 }
 
@@ -282,12 +284,139 @@ func TestTE_Budget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal result: %v", err)
 	}
-	if len(raw) > MaxToolResultBytes {
-		t.Errorf("result size %d exceeds MaxToolResultBytes %d", len(raw), MaxToolResultBytes)
+	if len(raw) > MaxTicketEventsOutputBytes {
+		t.Errorf("result size %d exceeds MaxTicketEventsOutputBytes %d", len(raw), MaxTicketEventsOutputBytes)
+	}
+	// The result text must be parseable JSON (M1 regression).
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("result text is not valid JSON: %v (text=%q)", err, res.Content[0].Text)
+	}
+	if !out.Truncated {
+		t.Errorf("expected Truncated true when > maxReturnedEvents matched, got false")
+	}
+	if len(out.Events) > maxReturnedEvents {
+		t.Errorf("returned %d events, want <= %d", len(out.Events), maxReturnedEvents)
+	}
+}
+
+func TestTE_MidPollTransientRetry(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	// Backend that serves one 500 mid-poll then recovers with a new event.
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		n := calls.Add(1)
+		if n == 2 { // first poll (after initial fetch) fails transiently
+			w.WriteHeader(http.StatusInternalServerError)
+			io_WriteString(w, `{"detail":"boom"}`)
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+			"comments": []json.RawMessage{},
+			"events":   []json.RawMessage{mkEvent(99, "blocked", 9999, "verdict")},
+			"runs":     []json.RawMessage{},
+		})
+		io_WriteString(w, string(payload))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := NewServer(srv.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 5})
+	if res == nil || res.IsError {
+		t.Fatalf("expected success despite transient mid-poll error, got: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(out.Events) != 1 || out.Events[0].ID != 99 {
+		t.Errorf("events = %+v, want the recovered verdict event", out.Events)
+	}
+}
+
+func TestTE_MidPollDefinitiveErrorAborts(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	// Backend that serves a 404 on the second request: definitive error
+	// must abort immediately, not keep polling.
+	var calls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		if calls.Add(1) == 2 {
+			w.WriteHeader(http.StatusNotFound)
+			io_WriteString(w, `{"detail":"not found"}`)
+			return
+		}
+		payload, _ := json.Marshal(map[string]any{
+			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+			"comments": []json.RawMessage{},
+			"events":   []json.RawMessage{},
+			"runs":     []json.RawMessage{},
+		})
+		io_WriteString(w, string(payload))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	s := NewServer(srv.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 5})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected IsError on definitive mid-poll 404, got: %+v", res)
+	}
+	if !strings.Contains(res.Content[0].Text, "not_found") {
+		t.Errorf("error = %q, want a not_found error", res.Content[0].Text)
+	}
+}
+
+func TestTE_ContextCancelled(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 100 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+	b.setEvents([]json.RawMessage{}) // never delivers
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(50 * time.Millisecond)
+		}
+		cancel()
+	}()
+
+	res := s.TicketEvents(ctx, TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 30})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected IsError on context cancellation, got: %+v", res)
+	}
+	if !strings.Contains(res.Content[0].Text, "context canceled") {
+		t.Errorf("error = %q, want a context canceled error", res.Content[0].Text)
 	}
 }
 
 func restorePollInterval(t *testing.T) {
 	t.Helper()
-	eventsPollInterval = 1 * time.Second
+	t.Cleanup(func() { eventsPollInterval = 1 * time.Second })
 }
