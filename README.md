@@ -22,7 +22,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `ticket_create` | Create a ticket (title required; parents supported) |
   | `kanban_help` | Full MCP-native usage + lifecycle contract |
 
-- The per-ticket tools (`ticket_events`/`claim`/`comment`/`get`/`complete`/`block`) declare `id` and `board` **required** in their JSON Schema, so strict MCP clients fail fast on omission. The Go layer still resolves a configured default board when a permissive client omits it.
+- All board-taking tools (`ticket_events`/`claim`/`comment`/`get`/`complete`/`block`/`list`/`create`) reject an omitted `board` — it is never silently defaulted, so multi-board setups can't land tickets in the wrong queue. The per-ticket tools also declare `id` and `board` **required** in their JSON Schema, so strict MCP clients fail fast on omission.
 
 - **Static bearer auth** (custom middleware: constant-time compare, exact JSON 401 contract for opencode) + per-IP rate limiter.
 - **Single static binary**, Go 1.25+, official `modelcontextprotocol/go-sdk` v1.7.0.
@@ -42,7 +42,7 @@ The binary resolves the CLI via `HERMES_BIN` (default `hermes`). Claim TTL is ~1
 - `MCP_ALLOW_SKIP_CLAIM=true` — `ticket_complete` skips its claim guard (it refuses to complete an unclaimed ticket otherwise).
 - `MCP_COMPLETE_MODE=done` — complete to `done` instead of the default review-gated path (comment + `review-required` block). Applies to `review_tier` `MEDIUM`/`HIGH`/omitted; an explicit `review_tier: "LOW"` always completes to `done`.
 - `MCP_COMMENT_AUTHOR` — default comment author.
-- `KANBAN_DEFAULT_BOARD` — board used when a tool call omits `board`.
+- `KANBAN_DEFAULT_BOARD` — board slug surfaced by `board_list` (informational only; board-taking tools reject an omitted `board`).
 - `KANBAN_BASE_URL`, `KANBAN_USERNAME`, `KANBAN_PASSWORD` — the kanban REST backend + dashboard credentials. Note: the login route lives at the **dashboard root** (`/auth/password-login`), not under the plugin mount — the server strips the mount prefix before logging in.
 
 Typed blocks (`dependency|needs_input|capability|transient`) route through the hardened CLI path when available; when the CLI is unavailable they fall back to an untyped REST block with `kind_applied=false` in the result.

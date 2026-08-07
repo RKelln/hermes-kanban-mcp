@@ -22,8 +22,9 @@ go build ./... && go vet ./... && go test -race ./...
 Project work is tracked on the Hermes kanban board `hermes-agent` via the kanban MCP
 tools (`hermes-kanban-*`).
 
-- **Always pass `board: "hermes-agent"` on every kanban MCP call.** Omitting the board 
-  silently lands tickets in the wrong queue.
+- **Always pass `board: "hermes-agent"` on every kanban MCP call.** An omitted `board`
+  is rejected by the tools (never silently defaulted), so forgetting it fails loudly
+  instead of landing tickets in the wrong queue.
 - **Capture the ticket `id` from the `ticket_create` response (`t_<hex>`) and reuse it
   verbatim on every subsequent call.** Every per-ticket call — `ticket_claim`,
   `ticket_comment`, `ticket_get`, `ticket_complete`, `ticket_block` — requires BOTH
@@ -40,7 +41,7 @@ tools (`hermes-kanban-*`).
 - Workflow: `ticket_create` (lands `ready`; `triage: true` for triage) → `ticket_claim`
   right before editing (ready→running) → `ticket_comment` as you work → push → record the
   commit SHA in a ticket comment → `ticket_complete`. Completion is review-gated: the
-  ticket lands `blocked` (review-required) for a human to flip, not `done`.
+  ticket lands `blocked` (review-required) for review, not `done`.
 - **Wait for the review** — completing review-gated work leaves the ticket `blocked`. Poll
   `ticket_events` (long-poll: pass the last seen event id, returns on new events) or
   `ticket_get` until it leaves `blocked`: `done` → the review passed → merge your branch to

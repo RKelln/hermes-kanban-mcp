@@ -25,7 +25,9 @@ type Config struct {
 	KanbanPassword string
 	// MCPBearerToken guards MCP tool calls. Required, min 16 chars. Env: MCP_BEARER_TOKEN.
 	MCPBearerToken string
-	// KanbanDefaultBoard is the board slug used when a request omits one. Env: KANBAN_DEFAULT_BOARD.
+	// KanbanDefaultBoard is the board slug surfaced as informational by
+	// board_list. Board-taking tools reject an omitted board, so this is
+	// no longer used as a fallback. Env: KANBAN_DEFAULT_BOARD.
 	KanbanDefaultBoard string
 	// HermesBin is the hermes CLI binary invoked for hermes-mediated operations. Env: HERMES_BIN.
 	HermesBin string

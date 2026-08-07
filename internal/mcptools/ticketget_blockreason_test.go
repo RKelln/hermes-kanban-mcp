@@ -32,7 +32,7 @@ func TestTicketGetSurfacesBlockReason(t *testing.T) {
 
 	s := NewServer(fake.URL, "hermes-agent")
 	SetBoardLister(s) // production wiring installs the Server itself via Register
-	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: "hermes-agent"})
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: testBoard})
 	if res == nil || res.IsError {
 		t.Fatalf("TicketGet returned error result: %+v", res)
 	}
@@ -78,7 +78,7 @@ func TestTicketGetPreservesReviewRefs(t *testing.T) {
 
 	s := NewServer(fake.URL, "hermes-agent")
 	SetBoardLister(s)
-	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: "hermes-agent"})
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: testBoard})
 	if res == nil || res.IsError {
 		t.Fatalf("TicketGet returned error result: %+v", res)
 	}
@@ -113,7 +113,7 @@ func TestTGet_BranchNameSurfaced(t *testing.T) {
 
 	s := NewServer(fake.URL, "hermes-agent")
 	SetBoardLister(s)
-	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: "hermes-agent"})
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: testBoard})
 	if res == nil || res.IsError {
 		t.Fatalf("TicketGet returned error result: %+v", res)
 	}

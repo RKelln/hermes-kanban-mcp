@@ -86,13 +86,13 @@ func Register(srv *mcp.Server, s *Server) {
 		obj(map[string]any{"include_archived": propBool()}),
 		s.BoardList)
 
-	addTool(srv, "ticket_list", "List tickets on a board with optional status/assignee filters; summary-only, never full bodies.",
-		obj(map[string]any{
+	addTool(srv, "ticket_list", "List tickets on a board with optional status/assignee filters; summary-only, never full bodies. (board required)",
+		objReq(map[string]any{
 			"board":    propStr(),
 			"status":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"assignee": propStr(),
 			"limit":    propInt(),
-		}),
+		}, "board"),
 		s.TicketList)
 
 	addTool(srv, "ticket_get", "Fetch one ticket in full detail with truncation; the escape hatch for ticket_list summaries. (id and board required)",
@@ -123,8 +123,8 @@ func Register(srv *mcp.Server, s *Server) {
 		obj(map[string]any{}),
 		s.ReviewQueue)
 
-	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; all other fields optional.",
-		obj(map[string]any{
+	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; board required; all other fields optional.",
+		objReq(map[string]any{
 			"board":           propStr(),
 			"title":           propStr(),
 			"body":            propStr(),
@@ -135,7 +135,7 @@ func Register(srv *mcp.Server, s *Server) {
 			"skills":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"triage":          propBool(),
 			"idempotency_key": propStr(),
-		}),
+		}, "board"),
 		s.TicketCreate)
 
 	addTool(srv, "kanban_help", "Full usage docs for the kanban MCP tools; returns the complete workflow and lifecycle facts.",

@@ -172,11 +172,11 @@ RESP=$(extract_json "$BODY")
 missing=""
 for tool in board_list ticket_list ticket_get ticket_events ticket_claim \
             ticket_comment ticket_complete ticket_block ticket_create \
-            kanban_help; do
+            kanban_help review_queue; do
     grep -Fq "\"name\":\"$tool\"" <<<"$RESP" || missing="$missing $tool"
 done
 [[ -z $missing ]] || fail "step 6 tools/list is missing tool(s):$missing"
-echo "  ok: all tools present (board_list, ticket_list, ticket_get, ticket_events, ticket_claim, ticket_comment, ticket_complete, ticket_block, ticket_create, kanban_help)"
+echo "  ok: all tools present (board_list, ticket_list, ticket_get, ticket_events, ticket_claim, ticket_comment, ticket_complete, ticket_block, ticket_create, kanban_help, review_queue)"
 
 # --- 7. board_list includes hermes-agent -----------------------------------------
 echo "check 7/7: board_list includes hermes-agent"

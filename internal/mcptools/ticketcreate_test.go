@@ -43,9 +43,13 @@ func newRecServer(t *testing.T, status int, body string) (*httptest.Server, *[]r
 	return srv, &rec
 }
 
+// testBoard is the board slug the test servers are configured with. Call
+// sites pass it explicitly since the tools reject an omitted board.
+const testBoard = "hermes-agent"
+
 // newTestServer builds a mcptools.Server pointed at an httptest server.
 func newTestServer(srv *httptest.Server) *Server {
-	return NewServerWithClient(srv.Client(), srv.URL, "hermes-agent")
+	return NewServerWithClient(srv.Client(), srv.URL, testBoard)
 }
 
 // bodyKeys returns the sorted JSON keys of a captured request body.
@@ -70,7 +74,7 @@ func TestTC_CreateSuccess(t *testing.T) {
 	s := newTestServer(srv)
 
 	in := TicketCreateInput{
-		Board:          "hermes-agent",
+		Board:          testBoard,
 		Title:          "Fix the widget",
 		Body:           "details",
 		Assignee:       "ryan",
@@ -120,7 +124,7 @@ func TestTC_CreateOmitsZeroFields(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "Minimal"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "Minimal"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -131,17 +135,20 @@ func TestTC_CreateOmitsZeroFields(t *testing.T) {
 	}
 }
 
-func TestTC_CreateDefaultBoard(t *testing.T) {
+func TestTC_CreateOmittedBoardRejected(t *testing.T) {
 	srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_abc123","title":"T","status":"ready"}}`)
 	defer srv.Close()
 	s := NewServerWithClient(srv.Client(), srv.URL, "hermes-agent")
 
 	res := s.TicketCreate(context.Background(), TicketCreateInput{Title: "T"})
-	if res.IsError {
-		t.Fatalf("expected success, got: %s", res.Content[0].Text)
+	if !res.IsError {
+		t.Fatalf("expected IsError when board is omitted, got success")
 	}
-	if (*rec)[0].query != "board=hermes-agent" {
-		t.Errorf("query = %s, want board=hermes-agent (default board applied)", (*rec)[0].query)
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
+		t.Errorf("error = %q", res.Content[0].Text)
+	}
+	if len(*rec) != 0 {
+		t.Errorf("no request must be issued without a board, got %d", len(*rec))
 	}
 }
 
@@ -151,7 +158,7 @@ func TestTC_CreateSynthesizesIdempotencyKey(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "Some title", Body: body})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "Some title", Body: body})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -197,7 +204,7 @@ func TestTC_CreateKeepsSuppliedIdempotencyKey(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T", IdempotencyKey: "custom-key-01"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T", IdempotencyKey: "custom-key-01"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -216,7 +223,7 @@ func TestTC_Create422SchemaError(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 422, got success: %s", res.Content[0].Text)
 	}
@@ -234,7 +241,7 @@ func TestTC_Create422StringDetail(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
 	if !res.IsError || res.Content[0].Text != "schema error: boom" {
 		t.Errorf("got %q, want %q", res.Content[0].Text, "schema error: boom")
 	}
@@ -245,7 +252,7 @@ func TestTC_Create422NewlineCollapsed(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success")
 	}
@@ -259,7 +266,7 @@ func TestTC_CreateMissingTitle(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "   "})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "   "})
 	if !res.IsError {
 		t.Fatalf("expected IsError for whitespace title")
 	}
@@ -292,16 +299,16 @@ func TestTC_CreateInvalidBoard(t *testing.T) {
 	}
 }
 
-func TestTC_CreateNoBoardConfigured(t *testing.T) {
+func TestTC_CreateOmittedBoardRejectedNoDefault(t *testing.T) {
 	srv, rec := newRecServer(t, http.StatusOK, `{}`)
 	defer srv.Close()
 	s := NewServerWithClient(srv.Client(), srv.URL, "") // no default board
 
 	res := s.TicketCreate(context.Background(), TicketCreateInput{Title: "T"})
 	if !res.IsError {
-		t.Fatalf("expected IsError when no board is resolvable")
+		t.Fatalf("expected IsError when board is omitted")
 	}
-	if res.Content[0].Text != "invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD" {
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
 		t.Errorf("error = %q", res.Content[0].Text)
 	}
 	if len(*rec) != 0 {
@@ -315,7 +322,7 @@ func TestTC_CreateInvalidParent(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketCreate(context.Background(), TicketCreateInput{
-		Board:   "hermes-agent",
+		Board:   testBoard,
 		Title:   "T",
 		Parents: []string{"t_good", "bad id!"},
 	})
@@ -335,7 +342,7 @@ func TestTC_CreateBackend500(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 500")
 	}
@@ -351,7 +358,7 @@ func TestTC_CreateTransportError(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	s := NewServerWithClient(client, deadURL, "hermes-agent")
 
-	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: "hermes-agent", Title: "T"})
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
 	if !res.IsError {
 		t.Fatalf("expected IsError on transport failure")
 	}

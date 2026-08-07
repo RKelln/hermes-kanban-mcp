@@ -11,7 +11,7 @@ import (
 )
 
 // TicketCreateInput is the ticket_create tool input. Board is optional
-// (defaults to KANBAN_DEFAULT_BOARD); title is required; every other
+// (board required); title is required; every other
 // field is optional. Only the fields below are accepted — the tool
 // never forwards other POST fields to the backend.
 type TicketCreateInput struct {
@@ -60,10 +60,7 @@ type createTaskBody struct {
 func (s *Server) TicketCreate(ctx context.Context, in TicketCreateInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
@@ -157,10 +154,7 @@ type commentBody struct {
 func (s *Server) TicketComment(ctx context.Context, in TicketCommentInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
@@ -279,10 +273,7 @@ const completeNote = "REST completion does not record created_cards; create foll
 func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)

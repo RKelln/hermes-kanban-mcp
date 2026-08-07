@@ -79,7 +79,7 @@ func TestPerTicketSchemasRequired(t *testing.T) {
 	}
 }
 
-func TestNonPerTicketSchemasNoIDRequired(t *testing.T) {
+func TestNonPerTicketSchemasBoardRequired(t *testing.T) {
 	boardList := obj(map[string]any{"include_archived": propBool()})
 	if r := objSchemaRequired(boardList); r != nil {
 		t.Errorf("board_list required = %v, want nil", r)
@@ -90,17 +90,20 @@ func TestNonPerTicketSchemasNoIDRequired(t *testing.T) {
 		t.Errorf("kanban_help required = %v, want nil", r)
 	}
 
-	ticketList := obj(map[string]any{
+	// ticket_list and ticket_create take a board and reject one that is
+	// omitted, so board is required in their schemas (matching the Go
+	// layer's rejection).
+	ticketList := objReq(map[string]any{
 		"board":    propStr(),
 		"status":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"assignee": propStr(),
 		"limit":    propInt(),
-	})
-	if r := objSchemaRequired(ticketList); r != nil {
-		t.Errorf("ticket_list required = %v, want nil", r)
+	}, "board")
+	if r := objSchemaRequired(ticketList); !reflect.DeepEqual(r, []string{"board"}) {
+		t.Errorf("ticket_list required = %v, want [board]", r)
 	}
 
-	ticketCreate := obj(map[string]any{
+	ticketCreate := objReq(map[string]any{
 		"board":           propStr(),
 		"title":           propStr(),
 		"body":            propStr(),
@@ -111,9 +114,9 @@ func TestNonPerTicketSchemasNoIDRequired(t *testing.T) {
 		"skills":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"triage":          propBool(),
 		"idempotency_key": propStr(),
-	})
-	if r := objSchemaRequired(ticketCreate); r != nil {
-		t.Errorf("ticket_create required = %v, want nil", r)
+	}, "board")
+	if r := objSchemaRequired(ticketCreate); !reflect.DeepEqual(r, []string{"board"}) {
+		t.Errorf("ticket_create required = %v, want [board]", r)
 	}
 }
 
@@ -237,8 +240,22 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	nonPerTicket := []string{"board_list", "ticket_list", "ticket_create", "kanban_help", "review_queue"}
-	for _, name := range nonPerTicket {
+	// ticket_list and ticket_create take a board and reject one that is
+	// omitted, so board is required in their schemas (matching the Go
+	// layer).
+	boardRequired := []string{"ticket_list", "ticket_create"}
+	for _, name := range boardRequired {
+		tool, ok := tools[name]
+		if !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+		if req := schemaRequired(tool.InputSchema); !reflect.DeepEqual(req, []string{"board"}) {
+			t.Errorf("%s required = %v, want [board]", name, req)
+		}
+	}
+
+	noRequired := []string{"board_list", "kanban_help", "review_queue"}
+	for _, name := range noRequired {
 		tool, ok := tools[name]
 		if !ok {
 			t.Fatalf("tool %q not registered", name)
@@ -248,16 +265,16 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	// Every registered tool must be covered by one of the two lists
+	// Every registered tool must be covered by one of the three lists
 	// above; a tool added to Register() without a list here fails the
 	// wiring test rather than silently passing an uncategorized schema.
-	covered := make(map[string]bool, len(perTicket)+len(nonPerTicket))
-	for _, name := range append(append([]string{}, perTicket...), nonPerTicket...) {
+	covered := make(map[string]bool, len(perTicket)+len(boardRequired)+len(noRequired))
+	for _, name := range append(append(append([]string{}, perTicket...), boardRequired...), noRequired...) {
 		covered[name] = true
 	}
 	for name := range tools {
 		if !covered[name] {
-			t.Errorf("registered tool %q is not covered by the per-ticket/non-per-ticket lists", name)
+			t.Errorf("registered tool %q is not covered by the per-ticket/board-required/no-required lists", name)
 		}
 	}
 }
