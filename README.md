@@ -64,7 +64,8 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 - `deploy/install.md` — install steps + opencode remote-MCP configuration snippet
 - `scripts/smoke.sh` — end-to-end smoke + secret-hygiene checks
 - `cmd/kanban-mcp/probe` — read-only live probe CLI
+- `sweeper/` — the review-sweeper cron job (Python) that reviews `review-required` tickets end-to-end; see `sweeper/README.md` + `deploy/review-sweeper.md`
 
 ## Status
 
-Implementation complete and smoke-verified (2026-08-03): all tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), `ticket_events` (2026-08), required id+board schemas, the `review_tier` completion knob, and the single-call `review_queue` scan (2026-08). The Hermes-side follow-ups (REST claim endpoint on the kanban plugin, typed blocks/created_cards over REST) are tracked as backlog on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).
+Implementation complete and smoke-verified (2026-08-03): all tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), `ticket_events` (2026-08), required id+board schemas, the `review_tier` completion knob, the single-call `review_queue` scan (2026-08), and the review-sweeper cron job adopted into `sweeper/` (2026-08). The Hermes-side follow-ups (REST claim endpoint on the kanban plugin, typed blocks/created_cards over REST) are tracked as backlog on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).

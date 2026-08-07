@@ -1,0 +1,4 @@
+review-sweeper: saved reviewer output (synthetic fixture for apply-path-test.py)
+- src/app.go:214 — nil deref — expected: guard before use
+- tests: 3 new cases added and passing
+VERDICT: APPROVE
