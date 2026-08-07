@@ -10,6 +10,13 @@
 
 # logs
 *.log
+# keep the checked-in sweeper fixture (a synthetic saved-review log) despite *.log
+!sweeper/reviews/
+!sweeper/reviews/*.log
+
+# python (sweeper/)
+__pycache__/
+*.pyc
 
 # editor/OS
 .DS_Store
