@@ -13,10 +13,12 @@ const MaxHelpOutputBytes = 8 * 1024
 // they ask.
 const helpDoc = `# hermes-kanban MCP — usage
 
-9 tools for a Hermes kanban board:
+10 tools for a Hermes kanban board:
 - board_list      orient: boards + per-status task counts
 - ticket_list     summary view; filters: status[], assignee, limit (max 50)
 - ticket_get      full detail (truncated); call when list summaries are thin
+- ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
+    newer than since_event_id or empty on timeout (default 30s, max 120s)
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
 - ticket_comment  log context/decisions as you work
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
@@ -28,10 +30,10 @@ const helpDoc = `# hermes-kanban MCP — usage
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
 
-The five per-ticket tools (ticket_claim/comment/get/complete/block) require
-both board and id; the strict schema rejects calls missing either. The Go
-layer still resolves a configured default board when board is omitted by a
-permissive client.
+The six per-ticket tools (ticket_events/claim/comment/get/complete/block)
+require both board and id; the strict schema rejects calls missing either.
+The Go layer still resolves a configured default board when board is
+omitted by a permissive client.
 
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
 ticket_comment -> ticket_complete.
@@ -51,6 +53,9 @@ Lifecycle facts:
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the
   review block carries the refs; a ticket reaching review with no sha is
   a workflow violation, not a code-review finding.
+- ticket_events is stateless long-polling: pass the last seen event id as
+  since_event_id to wait for the next verdict; empty + timed_out means
+  nothing new arrived.
 
 Rules:
 - Never touch the live Hermes install tree (~/.hermes).

@@ -1,6 +1,6 @@
 # hermes-kanban-mcp
 
-> **⚠️ EARLY — IMPLEMENTED, NOT YET STABLE.** This repository started as a 2026-08 design-phase experiment and is now a working implementation: all 9 MCP tools implemented, tested (`go vet` + `go test -race` green), and smoke-verified against a live Hermes kanban board. It is still young — expect API adjustments and breaking changes while it hardens. Use at your own risk; no support implied.
+> **⚠️ EARLY — IMPLEMENTED, NOT YET STABLE.** This repository started as a 2026-08 design-phase experiment and is now a working implementation: all 10 MCP tools implemented, tested (`go vet` + `go test -race` green), and smoke-verified against a live Hermes kanban board. It is still young — expect API adjustments and breaking changes while it hardens. Use at your own risk; no support implied.
 
 Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode agents (or any MCP client) over streamable HTTP.
 
@@ -13,6 +13,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `board_list` | List boards (slug, name, per-status counts) |
   | `ticket_list` | List tickets with status/assignee filters; summary-only, never full bodies |
   | `ticket_get` | Full ticket detail with truncation + size budgets |
+  | `ticket_events` | Long-poll a ticket's events; returns events newer than since_event_id or empty on timeout |
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`) |
   | `ticket_comment` | Append a comment |
   | `ticket_complete` | Complete a ticket — **review-gated by default**, with a `review_tier` knob (`LOW` completes direct) |
@@ -20,7 +21,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `ticket_create` | Create a ticket (title required; parents supported) |
   | `kanban_help` | Full MCP-native usage + lifecycle contract |
 
-- The five per-ticket tools (`ticket_claim`/`comment`/`get`/`complete`/`block`) declare `id` and `board` **required** in their JSON Schema, so strict MCP clients fail fast on omission. The Go layer still resolves a configured default board when a permissive client omits it.
+- The six per-ticket tools (`ticket_events`/`claim`/`comment`/`get`/`complete`/`block`) declare `id` and `board` **required** in their JSON Schema, so strict MCP clients fail fast on omission. The Go layer still resolves a configured default board when a permissive client omits it.
 
 - **Static bearer auth** (custom middleware: constant-time compare, exact JSON 401 contract for opencode) + per-IP rate limiter.
 - **Single static binary**, Go 1.25+, official `modelcontextprotocol/go-sdk` v1.7.0.
@@ -65,4 +66,4 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 
 ## Status
 
-Implementation complete and smoke-verified (2026-08-03): all 9 tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), required id+board schemas, and the `review_tier` completion knob. The Hermes-side follow-ups (REST claim endpoint on the kanban plugin, typed blocks/created_cards over REST) are tracked as backlog on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).
+Implementation complete and smoke-verified (2026-08-03): all 10 tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), `ticket_events` (2026-08), required id+board schemas, and the `review_tier` completion knob. The Hermes-side follow-ups (REST claim endpoint on the kanban plugin, typed blocks/created_cards over REST) are tracked as backlog on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).

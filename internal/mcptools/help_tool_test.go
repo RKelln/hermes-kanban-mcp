@@ -21,7 +21,7 @@ func TestHelpReturnsUsageDoc(t *testing.T) {
 		t.Fatalf("Help result is not decodable JSON: %v", err)
 	}
 	lower := strings.ToLower(out.Text)
-	for _, want := range []string{"ticket_claim", "review-gated", "ticket_complete", "mcp_complete_mode", "ticket_create"} {
+	for _, want := range []string{"ticket_events", "ticket_claim", "review-gated", "ticket_complete", "mcp_complete_mode", "ticket_create"} {
 		if !strings.Contains(lower, want) {
 			t.Errorf("help doc is missing %q", want)
 		}

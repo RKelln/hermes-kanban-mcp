@@ -68,8 +68,16 @@ func blockSchema() map[string]any {
 		"kind":   map[string]any{"type": "string", "enum": []string{"dependency", "needs_input", "capability", "transient"}},
 	}, "id", "board")
 }
+func eventsSchema() map[string]any {
+	return objReq(map[string]any{
+		"id":              propStr(),
+		"board":           propStr(),
+		"since_event_id":  propInt(),
+		"timeout_seconds": propInt(),
+	}, "id", "board")
+}
 
-// Register installs all nine tools on the MCP server and wires the
+// Register installs all ten tools on the MCP server and wires the
 // known-board slug cache to the Server's backend.
 func Register(srv *mcp.Server, s *Server) {
 	SetBoardLister(s)
@@ -106,6 +114,10 @@ func Register(srv *mcp.Server, s *Server) {
 	addTool(srv, "ticket_block", "Block a ticket; typed kinds (dependency|needs_input|capability|transient) via the CLI with untyped REST fallback. (id and board required)",
 		blockSchema(),
 		s.TicketBlock)
+
+	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...); returns events newer than since_event_id or empty on timeout. Long-polls up to timeout_seconds (default 30, max 120). (id and board required)",
+		eventsSchema(),
+		s.TicketEvents)
 
 	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; all other fields optional.",
 		obj(map[string]any{

@@ -60,6 +60,7 @@ func TestPerTicketSchemasRequired(t *testing.T) {
 		{"getSchema", getSchema()},
 		{"completeSchema", completeSchema()},
 		{"blockSchema", blockSchema()},
+		{"eventsSchema", eventsSchema()},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -187,7 +188,7 @@ func TestBlockSchemaProperties(t *testing.T) {
 }
 
 // TestRegisterWiresRequiredSchemas drives the actual Register() through a
-// live client session and asserts that the five per-ticket tools expose
+// live client session and asserts that the six per-ticket tools expose
 // required ["id","board"] on the wire, and that the four non-per-ticket
 // tools do not declare id/board as required. This is the registration-
 // wiring test: it catches a schema swapped or mis-wired inside Register()
@@ -224,7 +225,7 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		tools[tool.Name] = tool
 	}
 
-	perTicket := []string{"ticket_claim", "ticket_comment", "ticket_get", "ticket_complete", "ticket_block"}
+	perTicket := []string{"ticket_events", "ticket_claim", "ticket_comment", "ticket_get", "ticket_complete", "ticket_block"}
 	for _, name := range perTicket {
 		tool, ok := tools[name]
 		if !ok {
@@ -247,9 +248,9 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	// Sanity: all nine tools are present.
-	if len(tools) != 9 {
-		t.Errorf("registered %d tools, want 9", len(tools))
+	// Sanity: all ten tools are present.
+	if len(tools) != 10 {
+		t.Errorf("registered %d tools, want 10", len(tools))
 	}
 }
 
