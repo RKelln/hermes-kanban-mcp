@@ -22,18 +22,23 @@ type Board struct {
 }
 
 // TaskSummary is the lightweight ticket projection used by list/create
-// flows. The MCP layer re-serializes it, so optional fields carry
-// omitempty to drop empty keys.
+// flows and the review_queue board scan. The MCP layer re-serializes it,
+// so optional fields carry omitempty to drop empty keys. LatestSummary
+// and LastRunSummary are decoded because the live API omits block_reason
+// (t_828c3b69) and review-required tickets are identified by the
+// "review-required: ..." marker carried in those summaries.
 type TaskSummary struct {
-	ID           string `json:"id"`
-	Title        string `json:"title"`
-	Status       string `json:"status"`
-	Assignee     string `json:"assignee,omitempty"`
-	Priority     int    `json:"priority"`
-	ClaimLock    string `json:"claim_lock,omitempty"`
-	ClaimExpires int64  `json:"claim_expires,omitempty"`
-	BlockReason  string `json:"block_reason,omitempty"`
-	BlockKind    string `json:"block_kind,omitempty"`
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Status         string `json:"status"`
+	Assignee       string `json:"assignee,omitempty"`
+	Priority       int    `json:"priority"`
+	ClaimLock      string `json:"claim_lock,omitempty"`
+	ClaimExpires   int64  `json:"claim_expires,omitempty"`
+	BlockReason    string `json:"block_reason,omitempty"`
+	BlockKind      string `json:"block_kind,omitempty"`
+	LatestSummary  string `json:"latest_summary,omitempty"`
+	LastRunSummary string `json:"last_run_summary,omitempty"`
 }
 
 // Comment is the MCP-layer comment projection. CreatedAt is a unix

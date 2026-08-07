@@ -119,7 +119,7 @@ func Register(srv *mcp.Server, s *Server) {
 		eventsSchema(),
 		s.TicketEvents)
 
-	addTool(srv, "review_queue", "Single-call scan for tickets awaiting human review across ALL boards: blocked tickets whose block_reason marks a review-required completion. One call replaces per-board ticket_list scans (the sweeper's rate-limit pressure).",
+	addTool(srv, "review_queue", "Single-call scan for tickets awaiting human review across ALL boards: blocked tickets whose review-required marker (block_reason or latest_summary) marks a review-required completion. One call replaces per-board ticket_list scans (the sweeper's rate-limit pressure).",
 		obj(map[string]any{}),
 		s.ReviewQueue)
 

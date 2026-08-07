@@ -16,11 +16,13 @@ import (
 	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
-// reviewRequiredPrefix is the block_reason prefix ticket_complete stamps
-// on review-gated completions ("review-required: <summary>"). A blocked
-// ticket whose reason matches this prefix is awaiting human review. The
-// colon binds the boundary so an unrelated reason like
-// "review-required-urgent" never matches.
+// reviewRequiredPrefix is the marker ticket_complete stamps on
+// review-gated completions ("review-required: <summary>"). It appears in
+// block_reason and, since the live API omits block_reason, in the
+// latest_summary/last_run_summary fields. A blocked ticket whose reason
+// or summary matches this prefix is awaiting human review. The colon
+// binds the boundary so an unrelated marker like "review-required-urgent"
+// never matches.
 const reviewRequiredPrefix = "review-required"
 
 // MaxReviewQueueOutputBytes caps the marshalled review_queue result. It
@@ -63,10 +65,11 @@ type ReviewQueueOut struct {
 }
 
 // ReviewQueue implements the review_queue MCP tool: every board's blocked
-// tickets whose block_reason marks a review-required completion, in one
-// call. Tickets are ordered by board slug, then by priority (highest
-// first) then id, so the ordering is deterministic and the cap keeps the
-// highest-priority items.
+// tickets whose review-required marker (block_reason, or latest_summary
+// when the live API omits block_reason) marks a review-required
+// completion, in one call. Tickets are ordered by board slug, then by
+// priority (highest first) then id, so the ordering is deterministic and
+// the cap keeps the highest-priority items.
 func (s *Server) ReviewQueue(ctx context.Context, _ ReviewQueueInput) *ToolResult {
 	boards, err := s.ListBoards(ctx, false)
 	if err != nil {
@@ -123,11 +126,34 @@ func (s *Server) ReviewQueue(ctx context.Context, _ ReviewQueueInput) *ToolResul
 }
 
 // isReviewRequired reports whether a task is awaiting human review: its
-// status is blocked and its block_reason carries the review-required
-// prefix (colon-bounded) stamped by ticket_complete.
+// status is blocked and any of its review-required markers (block_reason,
+// latest_summary, or last_run_summary — the live API omits block_reason,
+// so the summaries carry the "review-required: <summary>" stamp) carries
+// the review-required prefix. Matching is case-insensitive and
+// whitespace-trimmed, mirroring the sweeper's REVIEW_REQUIRED_RE, and the
+// colon binds the boundary so "review-required-urgent" never matches.
 func isReviewRequired(t *kanban.TaskSummary) bool {
-	return t.Status == "blocked" &&
-		(t.BlockReason == reviewRequiredPrefix || strings.HasPrefix(t.BlockReason, reviewRequiredPrefix+":"))
+	if t.Status != "blocked" {
+		return false
+	}
+	for _, s := range []string{t.BlockReason, t.LatestSummary, t.LastRunSummary} {
+		if hasReviewRequiredPrefix(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasReviewRequiredPrefix reports whether s starts with the
+// review-required marker ("review-required" or "review-required: ..."),
+// ignoring leading whitespace and case.
+func hasReviewRequiredPrefix(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	return lower == reviewRequiredPrefix || strings.HasPrefix(lower, reviewRequiredPrefix+":")
 }
 
 // renderReviewQueue renders a review_queue result within

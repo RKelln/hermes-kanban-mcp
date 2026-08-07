@@ -497,9 +497,15 @@ def is_review_required(detail: dict) -> bool:
 
 
 def ticket_blob(detail: dict) -> str:
-    """Everything the branch/repo extractors search."""
-    bits = [detail.get("block_reason") or "", detail.get("body") or "",
-            detail.get("latest_summary") or "", detail.get("last_run_summary") or ""]
+    """Everything the branch/repo extractors search.
+
+    Order matters: latest_summary/last_run_summary come FIRST. The MCP
+    detail carries NO block_reason/repo/branch/sha fields (bridge gap) —
+    the real refs live in the kernel's run summaries. Reading them first
+    means a real 'branch: feat/t_xxx' in the summary beats fixture prose
+    or stale body text that mentions an old branch."""
+    bits = [detail.get("latest_summary") or "", detail.get("last_run_summary") or "",
+            detail.get("block_reason") or "", detail.get("body") or ""]
     for c in detail.get("comments") or []:
         bits.append(c.get("body") or "")
     return "\n".join(bits)
@@ -1015,6 +1021,9 @@ def process_one(mcp, rest_client, board, tid, detail, fp, conf, args):
     base = base or "main"
 
     if branch and repo and not branch_on_github(repo, branch):
+        print("review-sweeper: warn: %s/%s: branch %r not on origin for %r — push pending? "
+              "retry next tick (stale summary refs surface here, not as a silent skip)"
+              % (board, tid, branch, repo))
         return True  # push pending; silent retry next tick
     # branch without a repo: the reviewer (now ALWAYS spawned with terminal)
     # tries to locate the code from the ticket context and ESCALATEs if it

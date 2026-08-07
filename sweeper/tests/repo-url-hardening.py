@@ -124,5 +124,19 @@ check("repo-normalized", rs._norm_repo(repo_raw), "RKelln/hermes-kanban-mcp")
 check("repo-bare", rs.extract_repo("repository: RKelln/x"), "RKelln/x")
 check("repo-https", rs._norm_repo(rs.extract_repo("clone https://github.com/RKelln/x.git now")), "RKelln/x")
 
+# --- ticket_blob ordering (2026-08-07 SCOPE ADD from t_d8dfdc4b) ---
+# The MCP detail carries NO block_reason/repo/branch/sha fields; the real
+# refs live in latest_summary/last_run_summary. The blob must put those
+# summaries FIRST so the real ref beats fixture prose or stale body text
+# that mentions an old branch.
+detail = {
+    "body": "AC: verify branch: feat/t_STALE-foo and repo: github.com/RKelln/stale.git",
+    "latest_summary": "review-required: ... | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/t_real-branch; sha: 0123456789abcdef",
+}
+blob = rs.ticket_blob(detail)
+check("blob-summary-branch-wins", rs.extract_branch(blob), "feat/t_real-branch")
+check("blob-summary-repo-wins", rs.extract_repo(blob), "github.com/RKelln/hermes-kanban-mcp")
+check("blob-normalized-repo", rs._norm_repo(rs.extract_repo(blob)), "RKelln/hermes-kanban-mcp")
+
 print("\n%s" % ("ALL PASS" if not failures else "FAILURES: %s" % failures))
 sys.exit(1 if failures else 0)

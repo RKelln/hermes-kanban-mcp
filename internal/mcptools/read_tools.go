@@ -187,7 +187,6 @@ type taskDetailEnvelope struct {
 		WorkspaceKind string   `json:"workspace_kind,omitempty"`
 		BranchName    string   `json:"branch_name,omitempty"`
 		Parents       []string `json:"parents,omitempty"`
-		LatestSummary string   `json:"latest_summary,omitempty"`
 	} `json:"task"`
 	Comments    []kanban.Comment  `json:"comments"`
 	Events      []json.RawMessage `json:"events"`
