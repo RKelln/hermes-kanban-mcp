@@ -6,11 +6,12 @@
 
 ## Workflow (extremely succinct)
 
+0. **Always pass `board` and `id`** — the per-ticket tools (`ticket_claim`/`comment`/`get`/`complete`/`block`) require both in their schema. Capture the `id` from the `ticket_create` response and reuse it verbatim.
 1. **Orient** — `board_list` first. Then `ticket_list` (status filters; summaries only).
 2. **Read** — `ticket_get` for full detail on a ticket you'll touch (bodies are truncated; use it when you need more).
 3. **Claim before work** — `ticket_claim` (`ready → running`, TTL ~15m). Never edit without claiming. Re-claim if it expired.
 4. **Track** — `ticket_comment` for decisions/context as you work.
-5. **Finish** — `ticket_complete` with a summary. **It's review-gated** by default: it blocks the ticket with `review-required:` and a human reviews. `review_tier: "LOW"` completes direct to done; `"MEDIUM"` (default) / `"HIGH"` stay review-gated. `MCP_COMPLETE_MODE=done` also forces done for MEDIUM/HIGH. Only use done semantics when the task body explicitly says done is fine.
+5. **Finish** — `ticket_complete` with a summary. **It's review-gated** by default: it blocks the ticket with `review-required:` and a human reviews. `review_tier: "LOW"` completes direct to done; `"MEDIUM"` (default) / `"HIGH"` stay review-gated. `MCP_COMPLETE_MODE=done` also forces done for MEDIUM/HIGH. Only use done semantics when the task body explicitly says done is fine. Push before completing and record the repo/branch/commit on the ticket.
 6. **Blockers** — `ticket_block` with a reason; typed kinds: `dependency | needs_input | capability | transient`. Never silently stall.
 
 ## Rules

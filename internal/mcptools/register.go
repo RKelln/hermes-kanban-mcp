@@ -66,7 +66,7 @@ func blockSchema() map[string]any {
 	}, "id", "board")
 }
 
-// Register installs all eight tools on the MCP server and wires the
+// Register installs all nine tools on the MCP server and wires the
 // known-board slug cache to the Server's backend.
 func Register(srv *mcp.Server, s *Server) {
 	SetBoardLister(s)

@@ -14,7 +14,7 @@
 #   4. GET /mcp with no token returns 401.
 #   5. POST /mcp initialize with the correct token returns 200 with an
 #      inline-JSON or inline-SSE result.
-#   6. tools/list exposes all 8 kanban tools.
+#   6. tools/list exposes all 9 kanban tools.
 #   7. board_list includes the hermes-agent board.
 #
 # Then secret-hygiene checks: a scan of the kanban-mcp journal (last
@@ -161,8 +161,8 @@ echo "  ok: initialize returned 200 ($ct, serverInfo present)"
 BODY="$WORKDIR/notif-body"; HDR="$WORKDIR/notif-hdr"
 mcp_req good '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$BODY" "$HDR" >/dev/null || true
 
-# --- 6. tools/list exposes all 8 kanban tools -----------------------------------
-echo "check 6/7: tools/list exposes all 8 kanban tools"
+# --- 6. tools/list exposes all 9 kanban tools -----------------------------------
+echo "check 6/7: tools/list exposes all 9 kanban tools"
 BODY="$WORKDIR/s6-body"; HDR="$WORKDIR/s6-hdr"
 LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 code=$(mcp_req good "$LIST" "$BODY" "$HDR") \
@@ -171,11 +171,11 @@ code=$(mcp_req good "$LIST" "$BODY" "$HDR") \
 RESP=$(extract_json "$BODY")
 missing=""
 for tool in board_list ticket_list ticket_get ticket_claim ticket_comment \
-            ticket_complete ticket_block ticket_create; do
+            ticket_complete ticket_block ticket_create kanban_help; do
     grep -Fq "\"name\":\"$tool\"" <<<"$RESP" || missing="$missing $tool"
 done
 [[ -z $missing ]] || fail "step 6 tools/list is missing tool(s):$missing"
-echo "  ok: all 8 tools present (board_list, ticket_list, ticket_get, ticket_claim, ticket_comment, ticket_complete, ticket_block, ticket_create)"
+echo "  ok: all 9 tools present (board_list, ticket_list, ticket_get, ticket_claim, ticket_comment, ticket_complete, ticket_block, ticket_create, kanban_help)"
 
 # --- 7. board_list includes hermes-agent -----------------------------------------
 echo "check 7/7: board_list includes hermes-agent"

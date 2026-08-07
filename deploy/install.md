@@ -152,9 +152,9 @@ URL=http://127.0.0.1:9130 MCP_BEARER_TOKEN=<token> scripts/smoke.sh
 
 The script asserts, in order: `/healthz` → 200; unauthenticated and
 wrong-token `/mcp` calls → 401 with a JSON body and `WWW-Authenticate: Bearer`;
-an `initialize` with the correct token → 200; `tools/list` → all 8 tool names
+an `initialize` with the correct token → 200; `tools/list` → all 9 tool names
 (`board_list, ticket_list, ticket_get, ticket_claim, ticket_comment,
-ticket_complete, ticket_block, ticket_create`); `board_list` → includes
+ticket_complete, ticket_block, ticket_create, kanban_help`); `board_list` → includes
 `hermes-agent`. It also runs the secret-hygiene checks (no bearer token,
 password, or set-cookie in recent journald output; no real secrets in git). It
 exits non-zero with the failing step named.
@@ -194,7 +194,7 @@ On the machine running opencode, add the server to
 chmod 0600 ~/.config/opencode/opencode.json
 ```
 
-After editing, restart opencode and confirm the 8 `kanban_*` tools are listed
+After editing, restart opencode and confirm the 9 `hermes-kanban-*` tools are listed
 in a session.
 
 ## Rollback

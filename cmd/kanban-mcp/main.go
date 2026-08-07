@@ -102,7 +102,7 @@ func main() {
 // wrapped inside it — auth runs before limiting, so a bad token gets a
 // 401 even when the bucket is empty. The MCP server is created once and
 // handed to the Streamable HTTP handler's getServer closure, which is
-// the canonical single-server wiring from the design. All eight tools
+// the canonical single-server wiring from the design. All nine tools
 // are registered via mcptools.Register.
 func newMux(cfg *config.Config, logger *slog.Logger, toolServer *mcptools.Server) http.Handler {
 	rl := httpauth.NewRateLimiter(cfg.MCPRateLimit, httpauth.DefaultBurst)

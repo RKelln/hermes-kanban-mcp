@@ -13,7 +13,7 @@ const MaxHelpOutputBytes = 8 * 1024
 // they ask.
 const helpDoc = `# hermes-kanban MCP — usage
 
-8 tools for a Hermes kanban board:
+9 tools for a Hermes kanban board:
 - board_list      orient: boards + per-status task counts
 - ticket_list     summary view; filters: status[], assignee, limit (max 50)
 - ticket_get      full detail (truncated); call when list summaries are thin
@@ -25,10 +25,15 @@ const helpDoc = `# hermes-kanban MCP — usage
     for MEDIUM/HIGH.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
+- kanban_help     this doc
+
+The five per-ticket tools (ticket_claim/comment/get/complete/block) require
+both board and id; the strict schema rejects calls missing either. The Go
+layer still resolves a configured default board when board is omitted by a
+permissive client.
 
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
-ticket_comment -> ticket_complete. An omitted 'board' defaults to the
-server's configured board.
+ticket_comment -> ticket_complete.
 
 Lifecycle facts:
 - Claims are kernel-enforced: a ticket with an open parent stays 'todo';
