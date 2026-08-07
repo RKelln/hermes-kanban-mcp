@@ -47,7 +47,7 @@ Lifecycle facts:
   instead of the review path. review_tier=LOW completes direct to done;
   MEDIUM/HIGH default to review-gated (MCP_COMPLETE_MODE=done overrides).
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
-  8 KB) — they are summaries; use ticket_get for depth.
+  8 KB, ticket_events 6 KB) — they are summaries; use ticket_get for depth.
 - REST completion does not record created_cards; create follow-ups
   explicitly with ticket_create.
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the
@@ -55,7 +55,9 @@ Lifecycle facts:
   a workflow violation, not a code-review finding.
 - ticket_events is stateless long-polling: pass the last seen event id as
   since_event_id to wait for the next verdict; empty + timed_out means
-  nothing new arrived.
+  nothing new arrived. When truncated is set, some events were dropped to
+  the size cap — fall back to ticket_get rather than advancing the cursor
+  past unseen events.
 
 Rules:
 - Never touch the live Hermes install tree (~/.hermes).

@@ -304,7 +304,8 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 	defer restorePollInterval(t)
 	eventsPollInterval = 50 * time.Millisecond
 
-	// Backend that serves one 500 mid-poll then recovers with a new event.
+	// Backend: call 1 (initial fetch) empty, call 2 (first poll) 500,
+	// call 3 (retry) recovers with a new event.
 	var calls atomic.Int64
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -313,16 +314,25 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
 			return
 		}
-		n := calls.Add(1)
-		if n == 2 { // first poll (after initial fetch) fails transiently
+		switch calls.Add(1) {
+		case 2:
 			w.WriteHeader(http.StatusInternalServerError)
 			io_WriteString(w, `{"detail":"boom"}`)
+			return
+		case 3:
+			payload, _ := json.Marshal(map[string]any{
+				"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+				"comments": []json.RawMessage{},
+				"events":   []json.RawMessage{mkEvent(99, "blocked", 9999, "verdict")},
+				"runs":     []json.RawMessage{},
+			})
+			io_WriteString(w, string(payload))
 			return
 		}
 		payload, _ := json.Marshal(map[string]any{
 			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
 			"comments": []json.RawMessage{},
-			"events":   []json.RawMessage{mkEvent(99, "blocked", 9999, "verdict")},
+			"events":   []json.RawMessage{},
 			"runs":     []json.RawMessage{},
 		})
 		io_WriteString(w, string(payload))
@@ -343,6 +353,12 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 	}
 	if len(out.Events) != 1 || out.Events[0].ID != 99 {
 		t.Errorf("events = %+v, want the recovered verdict event", out.Events)
+	}
+	// The retry mechanism must actually fire: the 500 on call 2 is
+	// retried on call 3, which returns the event. A naive error-swallow
+	// that never re-polls would still surface the event, so pin >= 3.
+	if n := calls.Load(); n < 3 {
+		t.Errorf("backend calls = %d, want >= 3 (proves a retry happened after the 500)", n)
 	}
 }
 
@@ -385,6 +401,11 @@ func TestTE_MidPollDefinitiveErrorAborts(t *testing.T) {
 	}
 	if !strings.Contains(res.Content[0].Text, "not_found") {
 		t.Errorf("error = %q, want a not_found error", res.Content[0].Text)
+	}
+	// A definitive 404 must abort without retrying: initial fetch (call 1)
+	// plus the failing poll (call 2), no call 3.
+	if n := calls.Load(); n != 2 {
+		t.Errorf("backend calls = %d, want 2 (definitive error must abort, not retry)", n)
 	}
 }
 
