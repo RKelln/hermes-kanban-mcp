@@ -139,5 +139,21 @@ check("blob-summary-branch-wins", rs.extract_branch(blob), "feat/t_real-branch")
 check("blob-summary-repo-wins", rs.extract_repo(blob), "github.com/RKelln/hermes-kanban-mcp")
 check("blob-normalized-repo", rs._norm_repo(rs.extract_repo(blob)), "RKelln/hermes-kanban-mcp")
 
+# --- process_one summary-first extraction (t_83954395 regression) ---
+# Summary-first extraction must yield the REAL branch from
+# latest_summary, never the body fixture prose. Mirrors the t_d8dfdc4b
+# case (body carried 'branch: feat/t_abc-foo' while the summary carried
+# the real feat/t_d8dfdc4b-extraction-fixes ref).
+detail2 = {
+    "body": "Implemented on feat/t_abc-foo.\nRepo: github.com/RKelln/stale.git",
+    "latest_summary": "review-required: Applied fixes | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/t_d8dfdc4b-extraction-fixes; sha: ac57f6d",
+}
+blob2 = rs.ticket_blob(detail2)
+reason2 = detail2.get("latest_summary") or detail2.get("last_run_summary") or ""
+check("p1-summary-branch-wins", rs.extract_branch(reason2) or rs.extract_branch(blob2),
+      "feat/t_d8dfdc4b-extraction-fixes")
+check("p1-summary-repo-wins", rs.extract_repo(reason2) or rs.extract_repo(blob2),
+      "github.com/RKelln/hermes-kanban-mcp")
+
 print("\n%s" % ("ALL PASS" if not failures else "FAILURES: %s" % failures))
 sys.exit(1 if failures else 0)

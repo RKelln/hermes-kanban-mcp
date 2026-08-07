@@ -1011,13 +1011,18 @@ def main(argv) -> int:
 def process_one(mcp, rest_client, board, tid, detail, fp, conf, args):
     """Review one ticket. Returns True on success or a warning string."""
     blob = ticket_blob(detail)
-    branch = extract_branch(blob)
-    sha = extract_sha(blob)
+    # The MCP detail carries NO block_reason/repo/branch/sha fields (bridge
+    # gap); the real refs live in the kernel's run summaries. Extract from
+    # the summaries first, with the full blob (body/comments) as fallback
+    # so a real summary ref always beats ticket-body fixture prose.
+    reason = detail.get("latest_summary") or detail.get("last_run_summary") or ""
+    branch = extract_branch(reason) or extract_branch(blob)
+    sha = extract_sha(reason) or extract_sha(blob)
     # conf (per-board repo map) is authoritative; ticket text is the fallback
     # so a repo spelled out in the body still wins when the board is unmapped.
     repo, base = repo_for_board(board, conf)
     if not repo:
-        repo = extract_repo(blob)
+        repo = extract_repo(reason) or extract_repo(blob)
     base = base or "main"
 
     if branch and repo and not branch_on_github(repo, branch):
