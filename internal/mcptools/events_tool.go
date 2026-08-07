@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	defaultEventsTimeoutSeconds = 30
-	maxEventsTimeoutSeconds     = 120
+	defaultEventsTimeoutSeconds = 120
+	maxEventsTimeoutSeconds     = 900
 	maxReturnedEvents           = 25
 	maxEventNoteChars           = 200
 	// maxConsecutivePollErrors is how many transient backend failures in
@@ -30,8 +30,9 @@ var eventsPollInterval = 1 * time.Second
 
 // TicketEventsInput is the ticket_events tool input. id and board are
 // required; since_event_id defaults to 0 (only events with id >
-// since_event_id are returned); timeout_seconds defaults to 30 and is
-// capped at maxEventsTimeoutSeconds.
+// since_event_id are returned); timeout_seconds defaults to 120 and is
+// capped at 900 (15 minutes) — long enough to cover a full automated
+// review cycle without re-polling.
 type TicketEventsInput struct {
 	ID             string `json:"id"`
 	Board          string `json:"board"`
