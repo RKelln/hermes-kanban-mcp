@@ -41,6 +41,11 @@ tools (`hermes-kanban-*`).
   right before editing (ready→running) → `ticket_comment` as you work → push → record the
   commit SHA in a ticket comment → `ticket_complete`. Completion is review-gated: the
   ticket lands `blocked` (review-required) for a human to flip, not `done`.
+- **Wait for the review** — completing review-gated work leaves the ticket `blocked`. Poll
+  `ticket_events` (long-poll: pass the last seen event id, returns on new events) or
+  `ticket_get` until it leaves `blocked`: `done` → the review passed → merge your branch to
+  main (the reviewer never merges); `ready` → REQUEST CHANGES → re-claim, fix, re-complete;
+  still `blocked` → ESCALATED → surface to the human; do not re-loop.
 - **Push BEFORE `ticket_complete`.** The review gate reads the pushed commit. After
   pushing, comment the repo + branch + commit SHA + changed files on the ticket so the
   reviewer can resolve it. A ticket in review with no commit ref is unreviewable.
