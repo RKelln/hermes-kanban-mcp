@@ -17,14 +17,34 @@ go build ./... && go vet ./... && go test -race ./...
 - Deploy artifacts: `deploy/` (systemd unit, env template, install docs). The claim shell-out needs `HERMES_BIN` + `User=experimance` + the `ReadWritePaths` carve-out for `~/.hermes/kanban*`.
 - **Tool registration: `addTool` adapts internally — pass the raw Server method, NEVER `adapt[...](s.Method)`.** The call signature is `addTool(srv, name, desc, schema, s.SomeTool)`; wrapping again is a compile error (`cannot infer In`). This bit three times during the kanban_help addition.
 
-## This project's own kanban workflow
+## Kanban (shared board)
 
-Dev tickets for this repo live on the `hermes-agent` kanban board (dashboard `http://experimance:9119/kanban`). When working a ticket:
+Project work is tracked on the Hermes kanban board `hermes-agent` via the kanban MCP
+tools (`hermes-kanban-*`).
 
-1. `board_list` / `ticket_list` to orient; `ticket_get` for full detail
-2. `ticket_claim` **before** editing (ready→running, TTL ~15m)
-3. `ticket_comment` for context as you work
-4. `ticket_complete` when done — **review-gated by default** (comment + review-required block)
-5. `ticket_block` for blockers (typed kinds: dependency|needs_input|capability|transient)
+- **Always pass `board: "hermes-agent"` on every kanban MCP call.** Omitting the board 
+  silently lands tickets in the wrong queue.
+- **Capture the ticket `id` from the `ticket_create` response (`t_<hex>`) and reuse it
+  verbatim on every subsequent call.** Every per-ticket call — `ticket_claim`,
+  `ticket_comment`, `ticket_get`, `ticket_complete`, `ticket_block` — requires BOTH
+  `board` and `id`. Omitting `id` fails the call with `invalid ticket id`; do not guess,
+  truncate, or reconstruct it. If a call errors, `ticket_list`/`ticket_get` to recover the
+  id before retrying.
+- Orient with `board_list`; read with `ticket_list`/`ticket_get`; `kanban_help` is the
+  lifecycle contract.
+- Tickets must be self-contained: **Goal** · **Acceptance** (verification commands +
+  expected output) · **File scope** (exact paths) · **Constraints** (standing rules) ·
+  **Source** (repo, who asked, when, requirement verbatim — never a pointer to a file outside the repo).
+- Work on a **feature branch**, never `main`: `git checkout -b <type>/<ticket-id>-<desc>`.
+  The human merges to main during review; the agent does not self-merge.
+- Workflow: `ticket_create` (lands `ready`; `triage: true` for triage) → `ticket_claim`
+  right before editing (ready→running) → `ticket_comment` as you work → push → record the
+  commit SHA in a ticket comment → `ticket_complete`. Completion is review-gated: the
+  ticket lands `blocked` (review-required) for a human to flip, not `done`.
+- **Push BEFORE `ticket_complete`.** The review gate reads the pushed commit. After
+  pushing, comment the repo + branch + commit SHA + changed files on the ticket so the
+  reviewer can resolve it. A ticket in review with no commit ref is unreviewable.
+- **Claims TTL ~15 min.** Re-claim before `ticket_complete` if yours expired — completion
+  refuses an unclaimed ticket.
+- Never put credentials in ticket bodies — write `***`.
 
-Prohibited: touching the live `~/.hermes` install tree, SSH to framework, pushing without approval.
