@@ -23,7 +23,7 @@ const helpDoc = `# hermes-kanban MCP — usage
     review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
     (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
     for MEDIUM/HIGH. repo/branch/sha are optional structured refs folded
-    verbatim into the review-required block_reason.
+    into the review-required block_reason (trimmed; single-line).
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc

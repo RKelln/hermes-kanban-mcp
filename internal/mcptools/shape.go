@@ -31,6 +31,14 @@ const (
 	// list output.
 	MaxBlockedReasonChars = 120
 
+	// MaxRunSummaryChars truncates the latest/last run summary surfaced
+	// in ticket_get output. It is larger than MaxBlockedReasonChars so a
+	// review-required block_reason carrying the structured repo/branch/sha
+	// suffix (which the kernel records in run summaries) survives
+	// read-back intact: the sha tail must not be cut off, or reviewers on
+	// hosts without the checkout cannot resolve the commit.
+	MaxRunSummaryChars = 512
+
 	// MaxTicketBodyChars truncates the ticket body in get output.
 	MaxTicketBodyChars = 4000
 

@@ -203,8 +203,8 @@ func (s *Server) postComment(ctx context.Context, board, id, body, author string
 // review_tier is one of LOW|MEDIUM|HIGH, default MEDIUM when
 // empty/omitted — LOW completes to done directly, MEDIUM/HIGH stay
 // review-gated (subject to MCP_COMPLETE_MODE override). repo, branch,
-// and sha are optional structured refs folded verbatim into the review
-// block_reason and comment; they are ignored in done mode.
+// and sha are optional structured refs folded into the review
+// block_reason and comment (trimmed, single-line); ignored in done mode.
 type TicketCompleteInput struct {
 	ID         string `json:"id"`
 	Board      string `json:"board"`
@@ -292,6 +292,24 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	}
 	if strings.TrimSpace(in.Summary) == "" {
 		return ErrorResult("invalid_input: summary required")
+	}
+
+	// Structured refs are folded verbatim into the persisted block_reason
+	// and the comment, so enforce generous single-line length caps up
+	// front: oversized or multiline refs are rejected before any HTTP
+	// call, keeping the backend record bounded and single-line.
+	for _, r := range []struct {
+		name string
+		val  string
+		max  int
+	}{
+		{"repo", in.Repo, maxRepoChars},
+		{"branch", in.Branch, maxBranchChars},
+		{"sha", in.SHA, maxSHAChars},
+	} {
+		if len([]rune(r.val)) > r.max {
+			return ErrorResult("invalid_input: %s exceeds %d characters", r.name, r.max)
+		}
 	}
 
 	// Review tier: LOW forces done directly; MEDIUM/HIGH/empty use the
@@ -386,50 +404,60 @@ func completeCommentBody(summary, result, metadata string) string {
 	return b.String()
 }
 
-// completeRefSuffix renders the structured repo/branch/sha suffix
-// appended to the review-required block_reason, or "" when all three
-// are empty. Rendered verbatim (no parsing, no reformatting).
-func completeRefSuffix(repo, branch, sha string) string {
-	repo = strings.TrimSpace(repo)
-	branch = strings.TrimSpace(branch)
-	sha = strings.TrimSpace(sha)
-	if repo == "" && branch == "" && sha == "" {
-		return ""
+// Ref length caps: refs are folded verbatim into the persisted
+// block_reason and the comment, so unbounded values could bloat the
+// backend record. Reasonable generous ceilings keep the structured
+// reason single-line without rejecting legitimate values.
+const (
+	maxRepoChars   = 256
+	maxBranchChars = 256
+	maxSHAChars    = 64
+)
+
+// completeRefParts returns the present refs in canonical order (repo,
+// branch, sha), trimmed of surrounding whitespace and with CR/LF
+// collapsed to spaces so the structured block_reason stays single-line.
+func completeRefParts(repo, branch, sha string) []string {
+	clean := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.ReplaceAll(s, "\r", " ")
+		s = strings.ReplaceAll(s, "\n", " ")
+		return s
 	}
 	var parts []string
-	if repo != "" {
-		parts = append(parts, "repo: "+repo)
+	if r := clean(repo); r != "" {
+		parts = append(parts, "repo: "+r)
 	}
-	if branch != "" {
-		parts = append(parts, "branch: "+branch)
+	if b := clean(branch); b != "" {
+		parts = append(parts, "branch: "+b)
 	}
-	if sha != "" {
-		parts = append(parts, "sha: "+sha)
+	if sh := clean(sha); sh != "" {
+		parts = append(parts, "sha: "+sh)
+	}
+	return parts
+}
+
+// completeRefSuffix renders the structured repo/branch/sha suffix
+// appended to the review-required block_reason, or "" when all three
+// are empty. Rendered from completeRefParts (trimmed, newlines
+// collapsed to spaces, canonical order); never splits a rune.
+func completeRefSuffix(repo, branch, sha string) string {
+	parts := completeRefParts(repo, branch, sha)
+	if len(parts) == 0 {
+		return ""
 	}
 	return " | " + strings.Join(parts, "; ")
 }
 
 // completeCommentRefs returns the multiline structured ref block for the
 // review comment, or "" when all three fields are empty. One line per
-// present field, verbatim.
+// present field, in canonical order (trimmed, newlines collapsed).
 func completeCommentRefs(repo, branch, sha string) string {
-	repo = strings.TrimSpace(repo)
-	branch = strings.TrimSpace(branch)
-	sha = strings.TrimSpace(sha)
-	if repo == "" && branch == "" && sha == "" {
+	parts := completeRefParts(repo, branch, sha)
+	if len(parts) == 0 {
 		return ""
 	}
-	var lines []string
-	if repo != "" {
-		lines = append(lines, "repo: "+repo)
-	}
-	if branch != "" {
-		lines = append(lines, "branch: "+branch)
-	}
-	if sha != "" {
-		lines = append(lines, "sha: "+sha)
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(parts, "\n")
 }
 
 // firstRunes returns at most n runes of s without splitting a multibyte

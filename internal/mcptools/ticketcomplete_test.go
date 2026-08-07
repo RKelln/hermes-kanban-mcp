@@ -773,7 +773,7 @@ func TestTComplete_ReviewTierCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestTComplete_ReviewRefsVerbatum(t *testing.T) {
+func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
 	srv, rec := runnableRecServer(t)
@@ -807,14 +807,9 @@ func TestTComplete_ReviewRefsVerbatum(t *testing.T) {
 	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sent.Body, "repo: github.com/RKelln/hermes-kanban-mcp") {
-		t.Errorf("comment missing repo line: %q", sent.Body)
-	}
-	if !strings.Contains(sent.Body, "branch: feat/x") {
-		t.Errorf("comment missing branch line: %q", sent.Body)
-	}
-	if !strings.Contains(sent.Body, "sha: abc123def") {
-		t.Errorf("comment missing sha line: %q", sent.Body)
+	wantComment := "s\nrepo: github.com/RKelln/hermes-kanban-mcp\nbranch: feat/x\nsha: abc123def"
+	if sent.Body != wantComment {
+		t.Errorf("comment body = %q, want %q", sent.Body, wantComment)
 	}
 
 	out := decodeCompleteOut(t, res)
@@ -890,11 +885,8 @@ func TestTComplete_ReviewRefsPartial(t *testing.T) {
 	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sent.Body, "sha: abc123") {
-		t.Errorf("comment missing sha line: %q", sent.Body)
-	}
-	if strings.Contains(sent.Body, "repo:") || strings.Contains(sent.Body, "branch:") {
-		t.Errorf("comment has repo/branch lines when only sha given: %q", sent.Body)
+	if sent.Body != "s\nsha: abc123" {
+		t.Errorf("comment body = %q, want 's\\nsha: abc123'", sent.Body)
 	}
 }
 
@@ -944,5 +936,105 @@ func TestTComplete_DoneModeRefsIgnored(t *testing.T) {
 	}
 	if out["sha"] != "abc123" {
 		t.Errorf("out sha = %v", out["sha"])
+	}
+}
+
+func TestTComplete_ReviewTierLowRefsIgnored(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:         "t_x1",
+		Summary:    "s",
+		ReviewTier: "LOW",
+		Repo:       "github.com/RKelln/hermes-kanban-mcp",
+		Branch:     "feat/x",
+		SHA:        "abc123",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	patch := (*rec)[2]
+	var pb map[string]any
+	if err := json.Unmarshal([]byte(patch.body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if pb["status"] != "done" {
+		t.Errorf("PATCH status = %v, want done (LOW)", pb["status"])
+	}
+	if _, ok := pb["block_reason"]; ok {
+		t.Errorf("block_reason must not be present for review_tier LOW")
+	}
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Body != "s" {
+		t.Errorf("LOW-mode comment = %q, want summary only (refs ignored on the wire)", sent.Body)
+	}
+	out := decodeCompleteOut(t, res)
+	if out["final_status"] != "done" || out["sha"] != "abc123" {
+		t.Errorf("output = %v, want done path echoing refs", out)
+	}
+}
+
+func TestTComplete_RefsCollapseNewlines(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "s",
+		Repo:    "acme/\nprod",
+		Branch:  "feat/x",
+		SHA:     "abc123",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if reason := pb["block_reason"].(string); strings.ContainsAny(reason, "\r\n") {
+		t.Errorf("block_reason must stay single-line, got %q", reason)
+	}
+	if !strings.Contains(pb["block_reason"].(string), "repo: acme/ prod") {
+		t.Errorf("block_reason = %q, want newline collapsed to space", pb["block_reason"])
+	}
+}
+
+func TestTComplete_RefsLengthCaps(t *testing.T) {
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	cases := []struct {
+		name string
+		refs TicketCompleteInput
+	}{
+		{"repo", TicketCompleteInput{ID: "t_x1", Summary: "s", Repo: strings.Repeat("a", 257)}},
+		{"branch", TicketCompleteInput{ID: "t_x1", Summary: "s", Branch: strings.Repeat("b", 257)}},
+		{"sha", TicketCompleteInput{ID: "t_x1", Summary: "s", SHA: strings.Repeat("c", 65)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := s.TicketComplete(context.Background(), tc.refs)
+			if !res.IsError {
+				t.Fatalf("expected IsError for oversized %s", tc.name)
+			}
+			if !strings.HasPrefix(res.Content[0].Text, "invalid_input: "+tc.name+" exceeds ") {
+				t.Errorf("error = %q, want invalid_input: %s exceeds", res.Content[0].Text, tc.name)
+			}
+		})
+	}
+	if len(*rec) != 0 {
+		t.Errorf("no backend request must be issued for oversized refs, got %d", len(*rec))
 	}
 }

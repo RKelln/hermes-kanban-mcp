@@ -233,7 +233,7 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		ClaimExpires:  t.ClaimExpires,
 		BlockReason:   truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
 		BlockKind:     t.BlockKind,
-		LatestSummary: truncateToRunes(t.LatestSummary, MaxBlockedReasonChars),
+		LatestSummary: truncateToRunes(t.LatestSummary, MaxRunSummaryChars),
 		BranchName:    t.BranchName,
 		EventsCount:   len(env.Events),
 		RunsCount:     len(env.Runs),
@@ -245,7 +245,7 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	// Surface the last run's summary so blocked tickets are never
 	// reason-less through the MCP surface.
 	if len(env.Runs) > 0 {
-		out.LastRunSummary = truncateToRunes(env.Runs[len(env.Runs)-1].Summary, MaxBlockedReasonChars)
+		out.LastRunSummary = truncateToRunes(env.Runs[len(env.Runs)-1].Summary, MaxRunSummaryChars)
 	}
 	if env.Links != nil {
 		out.LinksParents = len(env.Links.Parents)
