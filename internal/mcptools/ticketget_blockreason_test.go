@@ -53,9 +53,14 @@ func TestTicketGetSurfacesBlockReason(t *testing.T) {
 // suffix, which the kernel records in the run summary. ticket_get's
 // read-back budget (MaxRunSummaryChars) must be large enough that the
 // sha tail survives, so a reviewer on a host without the checkout can
-// still resolve the commit.
+// still resolve the commit. Uses the maximum ref lengths the length-cap
+// validation allows, so the budget is proven at the worst case.
 func TestTicketGetPreservesReviewRefs(t *testing.T) {
-	reason := "review-required: s | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/t_2f781966-structured-commit; sha: 0123456789abcdef0123456789abcdef01234567"
+	sha := "0123456789abcdef0123456789abcdef01234567"
+	reason := "review-required: " + strings.Repeat("s", 100) +
+		" | repo: " + strings.Repeat("r", 256) +
+		"; branch: " + strings.Repeat("b", 256) +
+		"; sha: " + sha
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "/boards") {
@@ -81,7 +86,7 @@ func TestTicketGetPreservesReviewRefs(t *testing.T) {
 	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	shaTail := "sha: 0123456789abcdef0123456789abcdef01234567"
+	shaTail := "sha: " + sha
 	if !strings.Contains(out.LatestSummary, shaTail) {
 		t.Errorf("LatestSummary truncated the sha tail: %q", out.LatestSummary)
 	}

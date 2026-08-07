@@ -294,7 +294,7 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		return ErrorResult("invalid_input: summary required")
 	}
 
-	// Structured refs are folded verbatim into the persisted block_reason
+	// Structured refs are folded (trimmed, single-line) into the persisted block_reason
 	// and the comment, so enforce generous single-line length caps up
 	// front: oversized or multiline refs are rejected before any HTTP
 	// call, keeping the backend record bounded and single-line.
@@ -364,7 +364,7 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		comment = completeCommentBody(in.Summary, in.Result, in.Metadata)
 		patchBody = completeReviewBody{
 			Status:      "blocked",
-			BlockReason: "review-required: " + firstRunes(in.Summary, 100) + completeRefSuffix(in.Repo, in.Branch, in.SHA),
+			BlockReason: "review-required: " + firstRunes(collapseLineBreaks(in.Summary), 100) + completeRefSuffix(in.Repo, in.Branch, in.SHA),
 		}
 		if refs := completeCommentRefs(in.Repo, in.Branch, in.SHA); refs != "" {
 			comment += "\n" + refs
@@ -404,7 +404,7 @@ func completeCommentBody(summary, result, metadata string) string {
 	return b.String()
 }
 
-// Ref length caps: refs are folded verbatim into the persisted
+// Ref length caps: refs are folded (trimmed, single-line) into the persisted
 // block_reason and the comment, so unbounded values could bloat the
 // backend record. Reasonable generous ceilings keep the structured
 // reason single-line without rejecting legitimate values.
@@ -414,15 +414,21 @@ const (
 	maxSHAChars    = 64
 )
 
+// collapseLineBreaks replaces CR/LF with spaces so a value folds into a
+// single line. Used to keep the review-required block_reason single-line
+// regardless of how summary or the refs were supplied.
+func collapseLineBreaks(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
 // completeRefParts returns the present refs in canonical order (repo,
 // branch, sha), trimmed of surrounding whitespace and with CR/LF
 // collapsed to spaces so the structured block_reason stays single-line.
 func completeRefParts(repo, branch, sha string) []string {
 	clean := func(s string) string {
-		s = strings.TrimSpace(s)
-		s = strings.ReplaceAll(s, "\r", " ")
-		s = strings.ReplaceAll(s, "\n", " ")
-		return s
+		return strings.TrimSpace(collapseLineBreaks(s))
 	}
 	var parts []string
 	if r := clean(repo); r != "" {

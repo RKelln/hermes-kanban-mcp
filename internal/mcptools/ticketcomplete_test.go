@@ -1010,6 +1010,33 @@ func TestTComplete_RefsCollapseNewlines(t *testing.T) {
 	}
 }
 
+func TestTComplete_SummaryNewlineCollapsed(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "shipped\ninjected\rpayload",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	reason, _ := pb["block_reason"].(string)
+	if strings.ContainsAny(reason, "\r\n") {
+		t.Errorf("block_reason must stay single-line even with newlines in summary, got %q", reason)
+	}
+	if !strings.Contains(reason, "shipped injected payload") {
+		t.Errorf("block_reason = %q, want newlines collapsed to spaces", reason)
+	}
+}
+
 func TestTComplete_RefsLengthCaps(t *testing.T) {
 	srv, rec := runnableRecServer(t)
 	defer srv.Close()

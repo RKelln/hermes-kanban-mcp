@@ -99,7 +99,7 @@ func Register(srv *mcp.Server, s *Server) {
 		commentSchema(),
 		s.TicketComment)
 
- 	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block. (id and board required)",
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block. (id and board required)",
 		completeSchema(),
 		s.TicketComplete)
 

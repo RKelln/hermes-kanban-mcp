@@ -32,12 +32,12 @@ const (
 	MaxBlockedReasonChars = 120
 
 	// MaxRunSummaryChars truncates the latest/last run summary surfaced
-	// in ticket_get output. It is larger than MaxBlockedReasonChars so a
-	// review-required block_reason carrying the structured repo/branch/sha
-	// suffix (which the kernel records in run summaries) survives
-	// read-back intact: the sha tail must not be cut off, or reviewers on
-	// hosts without the checkout cannot resolve the commit.
-	MaxRunSummaryChars = 512
+	// in ticket_get output. It must be large enough to hold a
+	// review-required block_reason at the maximum legal ref lengths
+	// (summary[:100] + " | repo: X; branch: Y; sha: Z" with each ref at
+	// its length cap ≈ 719 runes), so the sha tail survives read-back
+	// for reviewers on hosts without the checkout.
+	MaxRunSummaryChars = 1024
 
 	// MaxTicketBodyChars truncates the ticket body in get output.
 	MaxTicketBodyChars = 4000
