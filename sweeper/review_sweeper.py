@@ -75,10 +75,17 @@ PEAK_UTC_HOURS = set(range(1, 4)) | set(range(6, 10))  # DS double-price windows
 
 REVIEW_REQUIRED_RE = re.compile(r"review-required", re.IGNORECASE)
 BRANCH_RE = re.compile(
-    r"(?:branch[\s:]+|Created branch\s+|branch_name[\s:]+|branch_name=)([A-Za-z0-9_.\-/]+)"
+    # A real ref contains a slash (feat/t_xxx); the loose 'branch <word>' form
+    # matched arbitrary prose ('branch check', 'branch ref') and silently broke
+    # the branch gate. Require the slash-form, prefer the structured field.
+    r"(?:branch_name[=:]\s*|branch[=:]\s*|Created branch\s+|branch\s+)"
+    r"([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)"
 )
 REPO_RE = re.compile(
-    r"(?:github\.com/|repo[\s:]+|repository[\s:]+)([A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+)"
+    # Multi-segment capture (github.com/owner/repo full path, or owner/repo);
+    # _norm_repo() strips prefixes/.git afterwards.
+    r"(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/|github\.com/|repo[=:]\s*|repository[=:]\s*)"
+    r"([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)"
 )
 SHA_RE = re.compile(
     r"(?:commit|sha|sha1|revision)[\s:=]+([0-9a-fA-F]{7,40})(?=[\s,.);]|$)"
