@@ -51,11 +51,14 @@ type EventOut struct {
 // TicketEventsOut is the ticket_events success result. Truncated is set
 // when events were dropped to fit the size budget or the maxReturnedEvents
 // cap, so callers know to fall back to ticket_get rather than trusting a
-// cursor that skipped unseen events.
+// cursor that skipped unseen events. TicketStatus is the ticket's current
+// status on the last fetch; when it is set and not "blocked" the ticket has
+// left review and the poll returned immediately (no further waiting).
 type TicketEventsOut struct {
-	Events    []EventOut `json:"events,omitempty"`
-	TimedOut  bool       `json:"timed_out"`
-	Truncated bool       `json:"truncated,omitempty"`
+	Events       []EventOut `json:"events,omitempty"`
+	TimedOut     bool       `json:"timed_out"`
+	Truncated    bool       `json:"truncated,omitempty"`
+	TicketStatus string     `json:"ticket_status,omitempty"`
 }
 
 // rawEvent is the per-event wire shape inside the task detail envelope's
@@ -70,9 +73,13 @@ type rawEvent struct {
 // TicketEvents implements the ticket_events MCP tool: long-poll a
 // ticket's event log, returning events with id > since_event_id or an
 // empty timed_out result when nothing new arrives within
-// timeout_seconds. Transient backend failures during the wait are retried
-// (up to maxConsecutivePollErrors in a row) so a single blip does not
-// discard the caller's wait; definitive failures (4xx) abort immediately.
+// timeout_seconds. When the ticket has already left "blocked" (e.g. a
+// review verdict landed before the call), it returns immediately with
+// ticket_status set instead of waiting the timeout — the caller learns
+// the outcome without burning the long-poll. Transient backend failures
+// during the wait are retried (up to maxConsecutivePollErrors in a row)
+// so a single blip does not discard the caller's wait; definitive
+// failures (4xx) abort immediately.
 //
 // Note on the timeout budget: the immediate first fetch runs before the
 // deadline starts, so wall-clock can exceed timeout_seconds by up to one
@@ -107,13 +114,18 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	ticker := time.NewTicker(eventsPollInterval)
 	defer ticker.Stop()
 
-	events, err := s.GetTaskEvents(ctx, board, in.ID)
+	events, status, err := s.GetTaskEvents(ctx, board, in.ID)
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
 	collected, truncated := collectEvents(events, in.SinceEventID)
 	if len(collected) > 0 {
-		return renderEvents(collected, truncated, false)
+		return renderEvents(collected, truncated, false, status)
+	}
+	if status != "" && status != "blocked" {
+		// The ticket has already left review: return instantly so the
+		// caller learns the verdict instead of waiting out the timeout.
+		return renderEvents(nil, false, false, status)
 	}
 
 	var pollErrs int
@@ -123,9 +135,9 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			return ErrorResult("%s", ctx.Err())
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return renderEvents(nil, truncated, true)
+				return renderEvents(nil, truncated, true, status)
 			}
-			events, err := s.GetTaskEvents(ctx, board, in.ID)
+			events, status, err := s.GetTaskEvents(ctx, board, in.ID)
 			if err != nil {
 				if !transientPollError(err) {
 					return ErrorResult("%s", RestErrorMessage(err))
@@ -139,7 +151,10 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			pollErrs = 0
 			collected, truncated = collectEvents(events, in.SinceEventID)
 			if len(collected) > 0 {
-				return renderEvents(collected, truncated, false)
+				return renderEvents(collected, truncated, false, status)
+			}
+			if status != "" && status != "blocked" {
+				return renderEvents(nil, false, false, status)
 			}
 		}
 	}
@@ -158,13 +173,15 @@ func transientPollError(err error) bool {
 
 // GetTaskEvents fetches the raw events array for a ticket from the
 // kanban REST backend. It reuses the taskDetailEnvelope decode path
-// already exercised by TicketGet.
-func (s *Server) GetTaskEvents(ctx context.Context, board, id string) ([]json.RawMessage, error) {
+// already exercised by TicketGet. It also returns the task's current
+// status so the long-poll can short-circuit once the ticket leaves
+// blocked.
+func (s *Server) GetTaskEvents(ctx context.Context, board, id string) ([]json.RawMessage, string, error) {
 	var env taskDetailEnvelope
 	if err := s.doJSON(ctx, "GET", "/tasks/"+url.PathEscape(id), url.Values{"board": []string{board}}, nil, &env); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return env.Events, nil
+	return env.Events, env.Task.Status, nil
 }
 
 // collectEvents decodes raw JSON events, filters to those with id >
@@ -216,8 +233,8 @@ func collectEvents(raw []json.RawMessage, sinceID int64) ([]EventOut, bool) {
 // (max-legal notes on many events), shortens notes and then drops the
 // oldest events, with Truncated set, re-marshalling each pass until it
 // fits.
-func renderEvents(events []EventOut, truncated, timedOut bool) *ToolResult {
-	out := TicketEventsOut{Events: events, TimedOut: timedOut, Truncated: truncated}
+func renderEvents(events []EventOut, truncated, timedOut bool, status string) *ToolResult {
+	out := TicketEventsOut{Events: events, TimedOut: timedOut, Truncated: truncated, TicketStatus: status}
 	if tr := eventResult(out); tr != nil {
 		return tr
 	}
@@ -234,7 +251,7 @@ func renderEvents(events []EventOut, truncated, timedOut bool) *ToolResult {
 			}
 		}
 		if changed {
-			if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true}); tr != nil {
+			if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, TicketStatus: status}); tr != nil {
 				return tr
 			}
 			continue
@@ -244,12 +261,12 @@ func renderEvents(events []EventOut, truncated, timedOut bool) *ToolResult {
 			break
 		}
 		work = work[len(work)/2:]
-		if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true}); tr != nil {
+		if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, TicketStatus: status}); tr != nil {
 			return tr
 		}
 	}
 	// Pathological: nothing fit. Emit the smallest valid result.
-	return eventResult(TicketEventsOut{TimedOut: timedOut, Truncated: true})
+	return eventResult(TicketEventsOut{TimedOut: timedOut, Truncated: true, TicketStatus: status})
 }
 
 // eventResult renders out as a non-error ToolResult whose marshalled

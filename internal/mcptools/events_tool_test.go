@@ -17,6 +17,10 @@ import (
 // without locks.
 type eventsBackend struct {
 	events atomic.Pointer[[]json.RawMessage]
+	// status is the task status served to the client; long-poll tests keep
+	// it "blocked" so the poll actually waits, while the instant-return
+	// tests set it to a terminal status.
+	status atomic.Pointer[string]
 	// tickCount tracks how many task GETs have been served.
 	tickCount atomic.Int64
 	// server is the httptest server wrapping this backend.
@@ -26,6 +30,7 @@ type eventsBackend struct {
 func newEventsBackend() *eventsBackend {
 	b := &eventsBackend{}
 	b.events.Store(&[]json.RawMessage{})
+	b.status.Store(strPtr("blocked"))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -38,8 +43,12 @@ func newEventsBackend() *eventsBackend {
 		if events == nil {
 			events = &[]json.RawMessage{}
 		}
+		status := "blocked"
+		if s := b.status.Load(); s != nil {
+			status = *s
+		}
 		payload, _ := json.Marshal(map[string]any{
-			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+			"task":     map[string]any{"id": "t_1", "title": "T", "status": status},
 			"comments": []json.RawMessage{},
 			"events":   *events,
 			"runs":     []json.RawMessage{},
@@ -53,6 +62,12 @@ func newEventsBackend() *eventsBackend {
 func (b *eventsBackend) setEvents(events []json.RawMessage) {
 	b.events.Store(&events)
 }
+
+func (b *eventsBackend) setStatus(status string) {
+	b.status.Store(strPtr(status))
+}
+
+func strPtr(s string) *string { return &s }
 
 func (b *eventsBackend) close() {
 	b.server.Close()
@@ -316,7 +331,7 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 			return
 		case 3:
 			payload, _ := json.Marshal(map[string]any{
-				"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+				"task":     map[string]any{"id": "t_1", "title": "T", "status": "blocked"},
 				"comments": []json.RawMessage{},
 				"events":   []json.RawMessage{mkEvent(99, "blocked", 9999, "verdict")},
 				"runs":     []json.RawMessage{},
@@ -325,7 +340,7 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 			return
 		}
 		payload, _ := json.Marshal(map[string]any{
-			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+			"task":     map[string]any{"id": "t_1", "title": "T", "status": "blocked"},
 			"comments": []json.RawMessage{},
 			"events":   []json.RawMessage{},
 			"runs":     []json.RawMessage{},
@@ -377,7 +392,7 @@ func TestTE_MidPollDefinitiveErrorAborts(t *testing.T) {
 			return
 		}
 		payload, _ := json.Marshal(map[string]any{
-			"task":     map[string]any{"id": "t_1", "title": "T", "status": "running"},
+			"task":     map[string]any{"id": "t_1", "title": "T", "status": "blocked"},
 			"comments": []json.RawMessage{},
 			"events":   []json.RawMessage{},
 			"runs":     []json.RawMessage{},
@@ -435,4 +450,121 @@ func TestTE_ContextCancelled(t *testing.T) {
 func restorePollInterval(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() { eventsPollInterval = 1 * time.Second })
+}
+
+func TestTE_InstantReturnWhenAlreadyDone(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 100 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	// The ticket is already done: no events pending, status done. The
+	// poll must return immediately with the status, not wait out the
+	// timeout.
+	b.setEvents([]json.RawMessage{})
+	b.setStatus("done")
+
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30}
+	start := time.Now()
+	res := s.TicketEvents(context.Background(), input)
+	elapsed := time.Since(start)
+
+	if res == nil || res.IsError {
+		t.Fatalf("TicketEvents returned error: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if out.TicketStatus != "done" {
+		t.Errorf("TicketStatus = %q, want done", out.TicketStatus)
+	}
+	if out.TimedOut {
+		t.Errorf("TimedOut = true, want false (instant return, not timeout)")
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("returned after %v, want immediate (did not short-circuit)", elapsed)
+	}
+	// Only the initial fetch happens; no polling ticks.
+	if n := b.tickCount.Load(); n != 1 {
+		t.Errorf("backend calls = %d, want 1 (instant return must not keep polling)", n)
+	}
+}
+
+func TestTE_InstantReturnWhenReadyMidPoll(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{})
+	// Flip to ready after the first poll so the short-circuit fires mid-wait.
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		b.setStatus("ready")
+	}()
+
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30}
+	res := s.TicketEvents(context.Background(), input)
+	if res == nil || res.IsError {
+		t.Fatalf("TicketEvents returned error: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if out.TicketStatus != "ready" {
+		t.Errorf("TicketStatus = %q, want ready", out.TicketStatus)
+	}
+	if out.TimedOut {
+		t.Errorf("TimedOut = true, want false")
+	}
+}
+
+func TestTE_BlockedStillLongPolls(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 100 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	// Status stays blocked and no events arrive: must wait out the
+	// timeout and report timed_out with no ticket_status short-circuit.
+	b.setEvents([]json.RawMessage{})
+	b.setStatus("blocked")
+
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+	start := time.Now()
+	res := s.TicketEvents(context.Background(), input)
+	elapsed := time.Since(start)
+
+	if res == nil || res.IsError {
+		t.Fatalf("TicketEvents returned error: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !out.TimedOut {
+		t.Errorf("TimedOut = false, want true (blocked ticket must long-poll to timeout)")
+	}
+	if out.TicketStatus != "blocked" {
+		t.Errorf("TicketStatus = %q, want blocked (last fetch status on timeout)", out.TicketStatus)
+	}
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("returned after %v, want ~2s long-poll (blocked ticket must not short-circuit)", elapsed)
+	}
 }
