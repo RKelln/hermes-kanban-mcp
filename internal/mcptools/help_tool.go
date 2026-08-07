@@ -22,7 +22,8 @@ const helpDoc = `# hermes-kanban MCP — usage
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
     review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
     (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
-    for MEDIUM/HIGH.
+    for MEDIUM/HIGH. repo/branch/sha are optional structured refs folded
+    verbatim into the review-required block_reason.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
@@ -47,6 +48,9 @@ Lifecycle facts:
   8 KB) — they are summaries; use ticket_get for depth.
 - REST completion does not record created_cards; create follow-ups
   explicitly with ticket_create.
+- Push the commit BEFORE ticket_complete and pass repo/branch/sha so the
+  review block carries the refs; a ticket reaching review with no sha is
+  a workflow violation, not a code-review finding.
 
 Rules:
 - Never touch the live Hermes install tree (~/.hermes).

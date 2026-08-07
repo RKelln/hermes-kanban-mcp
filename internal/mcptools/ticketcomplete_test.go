@@ -772,3 +772,177 @@ func TestTComplete_ReviewTierCaseInsensitive(t *testing.T) {
 		t.Errorf("review_tier = %v, want canonical LOW", out["review_tier"])
 	}
 }
+
+func TestTComplete_ReviewRefsVerbatum(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "s",
+		Repo:    "github.com/RKelln/hermes-kanban-mcp",
+		Branch:  "feat/x",
+		SHA:     "abc123def",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	if len(*rec) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(*rec))
+	}
+
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	wantReason := "review-required: s | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/x; sha: abc123def"
+	if pb["block_reason"] != wantReason {
+		t.Errorf("block_reason = %q, want %q", pb["block_reason"], wantReason)
+	}
+
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sent.Body, "repo: github.com/RKelln/hermes-kanban-mcp") {
+		t.Errorf("comment missing repo line: %q", sent.Body)
+	}
+	if !strings.Contains(sent.Body, "branch: feat/x") {
+		t.Errorf("comment missing branch line: %q", sent.Body)
+	}
+	if !strings.Contains(sent.Body, "sha: abc123def") {
+		t.Errorf("comment missing sha line: %q", sent.Body)
+	}
+
+	out := decodeCompleteOut(t, res)
+	if out["repo"] != "github.com/RKelln/hermes-kanban-mcp" {
+		t.Errorf("out repo = %v, want github.com/RKelln/hermes-kanban-mcp", out["repo"])
+	}
+	if out["branch"] != "feat/x" {
+		t.Errorf("out branch = %v, want feat/x", out["branch"])
+	}
+	if out["sha"] != "abc123def" {
+		t.Errorf("out sha = %v, want abc123def", out["sha"])
+	}
+}
+
+func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if pb["block_reason"] != "review-required: s" {
+		t.Errorf("block_reason = %q, want exact 'review-required: s'", pb["block_reason"])
+	}
+
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Body != "s" {
+		t.Errorf("comment body = %q, want exact 's'", sent.Body)
+	}
+}
+
+func TestTComplete_ReviewRefsPartial(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "s",
+		SHA:     "abc123",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	wantReason := "review-required: s | sha: abc123"
+	if pb["block_reason"] != wantReason {
+		t.Errorf("block_reason = %q, want %q", pb["block_reason"], wantReason)
+	}
+
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sent.Body, "sha: abc123") {
+		t.Errorf("comment missing sha line: %q", sent.Body)
+	}
+	if strings.Contains(sent.Body, "repo:") || strings.Contains(sent.Body, "branch:") {
+		t.Errorf("comment has repo/branch lines when only sha given: %q", sent.Body)
+	}
+}
+
+func TestTComplete_DoneModeRefsIgnored(t *testing.T) {
+	t.Setenv("MCP_COMPLETE_MODE", "done")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:      "t_x1",
+		Summary: "s",
+		Repo:    "github.com/RKelln/hermes-kanban-mcp",
+		Branch:  "feat/x",
+		SHA:     "abc123",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+
+	patch := (*rec)[2]
+	var pb map[string]any
+	if err := json.Unmarshal([]byte(patch.body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if pb["status"] != "done" {
+		t.Errorf("PATCH status = %v, want done", pb["status"])
+	}
+	if _, ok := pb["block_reason"]; ok {
+		t.Errorf("block_reason must not be present in done mode PATCH")
+	}
+
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.Body != "s" {
+		t.Errorf("done-mode comment = %q, want summary only", sent.Body)
+	}
+
+	out := decodeCompleteOut(t, res)
+	if out["repo"] != "github.com/RKelln/hermes-kanban-mcp" {
+		t.Errorf("out repo = %v", out["repo"])
+	}
+	if out["branch"] != "feat/x" {
+		t.Errorf("out branch = %v", out["branch"])
+	}
+	if out["sha"] != "abc123" {
+		t.Errorf("out sha = %v", out["sha"])
+	}
+}

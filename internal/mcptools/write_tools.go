@@ -202,7 +202,9 @@ func (s *Server) postComment(ctx context.Context, board, id, body, author string
 // folded into the review comment and, in done mode, the PATCH body;
 // review_tier is one of LOW|MEDIUM|HIGH, default MEDIUM when
 // empty/omitted — LOW completes to done directly, MEDIUM/HIGH stay
-// review-gated (subject to MCP_COMPLETE_MODE override).
+// review-gated (subject to MCP_COMPLETE_MODE override). repo, branch,
+// and sha are optional structured refs folded verbatim into the review
+// block_reason and comment; they are ignored in done mode.
 type TicketCompleteInput struct {
 	ID         string `json:"id"`
 	Board      string `json:"board"`
@@ -210,19 +212,25 @@ type TicketCompleteInput struct {
 	Result     string `json:"result"`
 	Metadata   string `json:"metadata"`
 	ReviewTier string `json:"review_tier"`
+	Repo       string `json:"repo"`
+	Branch     string `json:"branch"`
+	SHA        string `json:"sha"`
 }
 
 // TicketCompleteOut is the ticket_complete success projection: the
 // ticket id, the final status the PATCH requested, whether a human
-// review is required, the effective review tier, and the fixed note
+// review is required, the effective review tier, the fixed note
 // warning that a REST completion bypasses the kernel's created_cards
-// audit gate.
+// audit gate, and the structured refs echoed from the input.
 type TicketCompleteOut struct {
 	ID             string `json:"id"`
 	FinalStatus    string `json:"final_status"`
 	ReviewRequired bool   `json:"review_required"`
 	ReviewTier     string `json:"review_tier"`
 	Note           string `json:"note"`
+	Repo           string `json:"repo,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	SHA            string `json:"sha,omitempty"`
 }
 
 // completeReviewBody is the review-mode PATCH /tasks/{id} body: a plain
@@ -321,6 +329,9 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		ID:         in.ID,
 		ReviewTier: reviewTier,
 		Note:       completeNote,
+		Repo:       in.Repo,
+		Branch:     in.Branch,
+		SHA:        in.SHA,
 	}
 	comment := in.Summary
 	if doneMode {
@@ -335,7 +346,10 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		comment = completeCommentBody(in.Summary, in.Result, in.Metadata)
 		patchBody = completeReviewBody{
 			Status:      "blocked",
-			BlockReason: "review-required: " + firstRunes(in.Summary, 100),
+			BlockReason: "review-required: " + firstRunes(in.Summary, 100) + completeRefSuffix(in.Repo, in.Branch, in.SHA),
+		}
+		if refs := completeCommentRefs(in.Repo, in.Branch, in.SHA); refs != "" {
+			comment += "\n" + refs
 		}
 		out.FinalStatus = "blocked"
 		out.ReviewRequired = true
@@ -370,6 +384,52 @@ func completeCommentBody(summary, result, metadata string) string {
 		b.WriteString(metadata)
 	}
 	return b.String()
+}
+
+// completeRefSuffix renders the structured repo/branch/sha suffix
+// appended to the review-required block_reason, or "" when all three
+// are empty. Rendered verbatim (no parsing, no reformatting).
+func completeRefSuffix(repo, branch, sha string) string {
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	sha = strings.TrimSpace(sha)
+	if repo == "" && branch == "" && sha == "" {
+		return ""
+	}
+	var parts []string
+	if repo != "" {
+		parts = append(parts, "repo: "+repo)
+	}
+	if branch != "" {
+		parts = append(parts, "branch: "+branch)
+	}
+	if sha != "" {
+		parts = append(parts, "sha: "+sha)
+	}
+	return " | " + strings.Join(parts, "; ")
+}
+
+// completeCommentRefs returns the multiline structured ref block for the
+// review comment, or "" when all three fields are empty. One line per
+// present field, verbatim.
+func completeCommentRefs(repo, branch, sha string) string {
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	sha = strings.TrimSpace(sha)
+	if repo == "" && branch == "" && sha == "" {
+		return ""
+	}
+	var lines []string
+	if repo != "" {
+		lines = append(lines, "repo: "+repo)
+	}
+	if branch != "" {
+		lines = append(lines, "branch: "+branch)
+	}
+	if sha != "" {
+		lines = append(lines, "sha: "+sha)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // firstRunes returns at most n runes of s without splitting a multibyte

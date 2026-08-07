@@ -55,6 +55,9 @@ func completeSchema() map[string]any {
 		"result":      propStr(),
 		"metadata":    propStr(),
 		"review_tier": map[string]any{"type": "string", "enum": []string{"LOW", "MEDIUM", "HIGH"}},
+		"repo":        propStr(),
+		"branch":      propStr(),
+		"sha":         propStr(),
 	}, "id", "board")
 }
 func blockSchema() map[string]any {
@@ -96,7 +99,7 @@ func Register(srv *mcp.Server, s *Server) {
 		commentSchema(),
 		s.TicketComment)
 
-	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. (id and board required)",
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs included verbatim in the review block. (id and board required)",
 		completeSchema(),
 		s.TicketComplete)
 

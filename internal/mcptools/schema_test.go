@@ -154,10 +154,10 @@ func TestGetSchemaProperties(t *testing.T) {
 
 func TestCompleteSchemaProperties(t *testing.T) {
 	props := objSchemaProps(completeSchema())
-	if len(props) != 6 {
-		t.Errorf("completeSchema has %d properties, want 6", len(props))
+	if len(props) != 9 {
+		t.Errorf("completeSchema has %d properties, want 9", len(props))
 	}
-	for _, key := range []string{"board", "id", "summary", "result", "metadata", "review_tier"} {
+	for _, key := range []string{"board", "id", "summary", "result", "metadata", "review_tier", "repo", "branch", "sha"} {
 		if props[key] == nil {
 			t.Errorf("completeSchema missing property %q", key)
 		}

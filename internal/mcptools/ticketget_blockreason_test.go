@@ -48,6 +48,37 @@ func TestTicketGetSurfacesBlockReason(t *testing.T) {
 	}
 }
 
+func TestTGet_BranchNameSurfaced(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		io_WriteString(w, `{
+			"task": {"id": "t_x1", "title": "T", "status": "running", "branch_name": "feat/x"},
+			"comments": [],
+			"events": [],
+			"runs": []
+		}`)
+	}))
+	defer fake.Close()
+
+	s := NewServer(fake.URL, "hermes-agent")
+	SetBoardLister(s)
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1", Board: "hermes-agent"})
+	if res == nil || res.IsError {
+		t.Fatalf("TicketGet returned error result: %+v", res)
+	}
+	var out TicketGetOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if out.BranchName != "feat/x" {
+		t.Errorf("BranchName = %q, want feat/x", out.BranchName)
+	}
+}
+
 func io_WriteString(w http.ResponseWriter, s string) {
 	_, _ = w.Write([]byte(s))
 }

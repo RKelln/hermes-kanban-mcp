@@ -157,6 +157,7 @@ type TicketGetOut struct {
 	BlockKind      string          `json:"block_kind,omitempty"`
 	LatestSummary  string          `json:"latest_summary,omitempty"`
 	LastRunSummary string          `json:"last_run_summary,omitempty"`
+	BranchName     string          `json:"branch_name,omitempty"`
 	Body           string          `json:"body,omitempty"`
 	Comments       []CommentOut    `json:"comments,omitempty"`
 	EventsCount    int             `json:"events_count"`
@@ -233,6 +234,7 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		BlockReason:   truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
 		BlockKind:     t.BlockKind,
 		LatestSummary: truncateToRunes(t.LatestSummary, MaxBlockedReasonChars),
+		BranchName:    t.BranchName,
 		EventsCount:   len(env.Events),
 		RunsCount:     len(env.Runs),
 		AttachmentsN:  len(env.Attachments),
