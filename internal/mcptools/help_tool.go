@@ -18,7 +18,9 @@ MCP tools for a Hermes kanban board:
 - ticket_list     summary view; filters: status[], assignee, limit (max 50)
 - ticket_get      full detail (truncated); call when list summaries are thin
 - ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
-    newer than since_event_id or empty on timeout (default 120s, max 15m)
+    newer than since_event_id or empty on timeout (default 120s, max 15m).
+    If the ticket has already left 'blocked' (verdict landed), returns
+    IMMEDIATELY with its ticket_status instead of waiting the timeout.
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required block_reason); replaces per-board scans
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)

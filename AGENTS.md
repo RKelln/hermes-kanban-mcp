@@ -44,7 +44,8 @@ tools (`hermes-kanban-*`).
   ticket lands `blocked` (review-required) for review, not `done`.
 - **Wait for the review** — completing review-gated work leaves the ticket `blocked`. Poll
   `ticket_events` with the last seen event id (default long-poll is 120s, max 15m — one call
-  covers a full review cycle), or `ticket_get`, until it leaves `blocked`: `done` → the review
+  covers a full review cycle; if the ticket already left `blocked` it returns instantly with
+  its `ticket_status`), or `ticket_get`, until it leaves `blocked`: `done` → the review
   passed → merge your branch to main (the reviewer never merges); `ready` → REQUEST CHANGES →
   re-claim, fix, re-complete; still `blocked` → ESCALATED → surface to the human; do not re-loop.
 - **Push BEFORE `ticket_complete`.** The review gate reads the pushed commit. After
