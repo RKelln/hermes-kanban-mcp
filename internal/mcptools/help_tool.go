@@ -19,7 +19,10 @@ const helpDoc = `# hermes-kanban MCP — usage
 - ticket_get      full detail (truncated); call when list summaries are thin
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
 - ticket_comment  log context/decisions as you work
-- ticket_complete finish; REVIEW-GATED by default (comment + review-required block)
+- ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
+    review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
+    (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
+    for MEDIUM/HIGH.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 
@@ -33,7 +36,8 @@ Lifecycle facts:
   them (children promote immediately).
 - ticket_complete refuses an unclaimed ticket (must be 'running') unless
   MCP_ALLOW_SKIP_CLAIM=true; MCP_COMPLETE_MODE=done completes to 'done'
-  instead of the review path.
+  instead of the review path. review_tier=LOW completes direct to done;
+  MEDIUM/HIGH default to review-gated (MCP_COMPLETE_MODE=done overrides).
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
   8 KB) — they are summaries; use ticket_get for depth.
 - REST completion does not record created_cards; create follow-ups

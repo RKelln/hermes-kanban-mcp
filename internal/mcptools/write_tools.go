@@ -199,23 +199,29 @@ func (s *Server) postComment(ctx context.Context, board, id, body, author string
 // TicketCompleteInput is the ticket_complete tool input. id and summary
 // are required; board is optional (defaults to the server's configured
 // board); result and metadata are optional free-form strings that are
-// folded into the review comment and, in done mode, the PATCH body.
+// folded into the review comment and, in done mode, the PATCH body;
+// review_tier is one of LOW|MEDIUM|HIGH, default MEDIUM when
+// empty/omitted — LOW completes to done directly, MEDIUM/HIGH stay
+// review-gated (subject to MCP_COMPLETE_MODE override).
 type TicketCompleteInput struct {
-	ID       string `json:"id"`
-	Board    string `json:"board"`
-	Summary  string `json:"summary"`
-	Result   string `json:"result"`
-	Metadata string `json:"metadata"`
+	ID         string `json:"id"`
+	Board      string `json:"board"`
+	Summary    string `json:"summary"`
+	Result     string `json:"result"`
+	Metadata   string `json:"metadata"`
+	ReviewTier string `json:"review_tier"`
 }
 
 // TicketCompleteOut is the ticket_complete success projection: the
 // ticket id, the final status the PATCH requested, whether a human
-// review is required, and the fixed note warning that a REST
-// completion bypasses the kernel's created_cards audit gate.
+// review is required, the effective review tier, and the fixed note
+// warning that a REST completion bypasses the kernel's created_cards
+// audit gate.
 type TicketCompleteOut struct {
 	ID             string `json:"id"`
 	FinalStatus    string `json:"final_status"`
 	ReviewRequired bool   `json:"review_required"`
+	ReviewTier     string `json:"review_tier"`
 	Note           string `json:"note"`
 }
 
@@ -247,7 +253,8 @@ const completeNote = "REST completion does not record created_cards; create foll
 
 // TicketComplete implements the ticket_complete MCP tool: post the
 // completion comment, then PATCH /tasks/{id} to the final status.
-// Behaviour is keyed on the MCP_COMPLETE_MODE environment variable
+// Behaviour is keyed on review_tier (LOW completes direct to done) and,
+// for MEDIUM/HIGH/omitted, the MCP_COMPLETE_MODE environment variable
 // (default "review"): review posts a comment with the summary plus
 // result/metadata rendered compactly, then blocks the ticket with
 // reason "review-required: <summary[:100]>"; done posts the summary
@@ -279,6 +286,24 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		return ErrorResult("invalid_input: summary required")
 	}
 
+	// Review tier: LOW forces done directly; MEDIUM/HIGH/empty use the
+	// existing MCP_COMPLETE_MODE behaviour (default review-gated).
+	reviewTier := strings.ToUpper(strings.TrimSpace(in.ReviewTier))
+	if reviewTier == "" {
+		reviewTier = "MEDIUM"
+	}
+	switch reviewTier {
+	case "LOW", "MEDIUM", "HIGH":
+	default:
+		return ErrorResult("invalid_input: review_tier must be one of LOW|MEDIUM|HIGH, got %q", in.ReviewTier)
+	}
+	var doneMode bool
+	if reviewTier == "LOW" {
+		doneMode = true
+	} else {
+		doneMode = strings.EqualFold(os.Getenv("MCP_COMPLETE_MODE"), "done")
+	}
+
 	// Claim guard: without explicit opt-out, only tickets the
 	// dispatcher has actually started (status running) may be
 	// completed. GetTask is a read, so a guard failure never mutates.
@@ -291,14 +316,11 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		return ErrorResult("ticket is %s and unclaimed; call ticket_claim first (or set MCP_ALLOW_SKIP_CLAIM=true)", ts.Status)
 	}
 
-	// Completion mode: anything other than an explicit "done" defaults
-	// to the review-gated path.
-	doneMode := strings.EqualFold(os.Getenv("MCP_COMPLETE_MODE"), "done")
-
 	var patchBody any
 	out := TicketCompleteOut{
-		ID:   in.ID,
-		Note: completeNote,
+		ID:         in.ID,
+		ReviewTier: reviewTier,
+		Note:       completeNote,
 	}
 	comment := in.Summary
 	if doneMode {

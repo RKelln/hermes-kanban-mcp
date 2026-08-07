@@ -66,8 +66,8 @@ func Register(srv *mcp.Server, s *Server) {
 		obj(map[string]any{"board": propStr(), "id": propStr(), "body": propStr(), "author": propStr()}),
 		s.TicketComment)
 
-	addTool(srv, "ticket_complete", "Complete a ticket: review-gated by default (comment + review-required block), or done via MCP_COMPLETE_MODE=done.",
-		obj(map[string]any{"board": propStr(), "id": propStr(), "summary": propStr(), "result": propStr(), "metadata": propStr()}),
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH.",
+		obj(map[string]any{"board": propStr(), "id": propStr(), "summary": propStr(), "result": propStr(), "metadata": propStr(), "review_tier": map[string]any{"type": "string", "enum": []string{"LOW", "MEDIUM", "HIGH"}}}),
 		s.TicketComplete)
 
 	addTool(srv, "ticket_block", "Block a ticket; typed kinds (dependency|needs_input|capability|transient) via the CLI with untyped REST fallback.",
