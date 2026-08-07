@@ -115,7 +115,7 @@ func Register(srv *mcp.Server, s *Server) {
 		blockSchema(),
 		s.TicketBlock)
 
-	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...); returns events newer than since_event_id or empty on timeout. Long-polls up to timeout_seconds (default 30, max 120). (id and board required)",
+	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...); returns events newer than since_event_id or empty on timeout. Long-polls up to timeout_seconds (default 120, max 900). (id and board required)",
 		eventsSchema(),
 		s.TicketEvents)
 

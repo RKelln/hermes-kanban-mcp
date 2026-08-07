@@ -12,7 +12,7 @@
 3. **Claim before work** — `ticket_claim` (`ready → running`, TTL ~15m). Never edit without claiming. Re-claim if it expired.
 4. **Track** — `ticket_comment` for decisions/context as you work.
 5. **Finish** — `ticket_complete` with a summary. **It's review-gated** by default: it blocks the ticket with `review-required:` and a human reviews. `review_tier: "LOW"` completes direct to done; `"MEDIUM"` (default) / `"HIGH"` stay review-gated. `MCP_COMPLETE_MODE=done` also forces done for MEDIUM/HIGH. Only use done semantics when the task body explicitly says done is fine. Push before completing and record the repo/branch/commit on the ticket.
-6. **Wait for the review** — long-poll `ticket_events` (`timeout_seconds: 120`, pass the last seen event id) or `ticket_get` until the ticket leaves `blocked`: `done` → merge your branch to main (the reviewer never merges); `ready` → REQUEST CHANGES → re-claim, fix, re-complete; still `blocked` → ESCALATED → surface to the human; do not re-loop.
+6. **Wait for the review** — long-poll `ticket_events` (default 120s, max 15m; pass the last seen event id) or `ticket_get` until the ticket leaves `blocked`: `done` → merge your branch to main (the reviewer never merges); `ready` → REQUEST CHANGES → re-claim, fix, re-complete; still `blocked` → ESCALATED → surface to the human; do not re-loop.
 7. **Blockers** — `ticket_block` with a reason; typed kinds: `dependency | needs_input | capability | transient`. Never silently stall.
 
 ## Rules
