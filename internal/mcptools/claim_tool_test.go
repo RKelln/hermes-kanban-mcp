@@ -112,13 +112,12 @@ func (b *claimBackend) patches() []claimReq {
 	return out
 }
 
-// newClaimToolServer wires a mcptools.Server to a scripted backend with
-// default board "hermes-agent".
+// newClaimToolServer wires a mcptools.Server to a scripted backend.
 func newClaimToolServer(t *testing.T, backend *claimBackend) *Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(backend.handler))
 	t.Cleanup(srv.Close)
-	return NewServerWithClient(srv.Client(), srv.URL, "hermes-agent")
+	return NewServerWithClient(srv.Client(), srv.URL, testBoard)
 }
 
 // installFakeBin points HERMES_BIN at the testdata fake CLI and forces a
@@ -163,7 +162,7 @@ func TestTC_ClaimSuccess(t *testing.T) {
 	}
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
@@ -198,7 +197,7 @@ func TestTC_ClaimFailure(t *testing.T) {
 	backend.orders["task-fail"] = []string{`{"task":{"id":"task-fail","title":"T","status":"ready"}}`}
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-fail"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-fail", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -217,7 +216,7 @@ func TestTC_ClaimTimeout(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	res := s.TicketClaim(ctx, TicketClaimInput{ID: "task-hang"})
+	res := s.TicketClaim(ctx, TicketClaimInput{ID: "task-hang", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -232,7 +231,7 @@ func TestTC_ClaimBinaryMissing(t *testing.T) {
 	backend.orders["task-ok"] = []string{`{"task":{"id":"task-ok","title":"T","status":"ready"}}`}
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -252,7 +251,7 @@ func TestTC_ClaimValidation(t *testing.T) {
 	backend := newClaimBackend()
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "a b"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "a b", Board: testBoard})
 	if !res.IsError || res.Content[0].Text != `invalid_input: invalid ticket id "a b"` {
 		t.Errorf("bad id: got %q", res.Content[0].Text)
 	}
@@ -260,7 +259,7 @@ func TestTC_ClaimValidation(t *testing.T) {
 	if !res.IsError || res.Content[0].Text != `invalid_input: invalid board "BOGUS"` {
 		t.Errorf("bad board: got %q", res.Content[0].Text)
 	}
-	res = s.TicketClaim(context.Background(), TicketClaimInput{ID: "a;rm -rf /"})
+	res = s.TicketClaim(context.Background(), TicketClaimInput{ID: "a;rm -rf /", Board: testBoard})
 	if !res.IsError {
 		t.Errorf("injection id: expected IsError, got %q", res.Content[0].Text)
 	}
@@ -286,7 +285,7 @@ func TestTC_ClaimPreflightRejects(t *testing.T) {
 	}
 	for id, want := range cases {
 		t.Run(id, func(t *testing.T) {
-			res := s.TicketClaim(context.Background(), TicketClaimInput{ID: id})
+			res := s.TicketClaim(context.Background(), TicketClaimInput{ID: id, Board: testBoard})
 			if !res.IsError || res.Content[0].Text != want {
 				t.Errorf("error = %q, want %q", res.Content[0].Text, want)
 			}
@@ -308,7 +307,7 @@ func TestTC_ClaimAlreadyClaimed(t *testing.T) {
 	}
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-running"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-running", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -326,7 +325,7 @@ func TestTC_ClaimGetTaskFailure(t *testing.T) {
 	backend := newClaimBackend() // no orders: every GET 404s
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-missing"})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-missing", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -341,7 +340,7 @@ func TestTC_BlockTypedCLI(t *testing.T) {
 	backend := newClaimBackend()
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Reason: "need info", Kind: "needs_input"})
+	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Reason: "need info", Kind: "needs_input", Board: testBoard})
 	out := decodeOut[TicketBlockOut](t, res)
 	if out.ID != "task-ok" || out.Status != "blocked" || !out.KindApplied {
 		t.Errorf("out = %+v, want id task-ok status blocked kind_applied true", out)
@@ -363,7 +362,7 @@ func TestTC_BlockUntypedREST(t *testing.T) {
 	backend := newClaimBackend()
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-blk", Reason: "just because"})
+	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-blk", Reason: "just because", Board: testBoard})
 	out := decodeOut[TicketBlockOut](t, res)
 	if out.ID != "task-blk" || out.Status != "blocked" || out.KindApplied {
 		t.Errorf("out = %+v, want id task-blk status blocked kind_applied false", out)
@@ -395,7 +394,7 @@ func TestTC_BlockFallbackWhenCLIUnavailable(t *testing.T) {
 	backend := newClaimBackend()
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-blk", Reason: "waiting", Kind: "dependency"})
+	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-blk", Reason: "waiting", Kind: "dependency", Board: testBoard})
 	out := decodeOut[TicketBlockOut](t, res)
 	if out.KindApplied {
 		t.Errorf("kind_applied = true, want false (fallback)")
@@ -420,7 +419,7 @@ func TestTC_BlockCLIFailure(t *testing.T) {
 
 	// task-fail exits 1 with stderr; that is a genuine CLI failure, NOT
 	// an unavailability, so no REST fallback may engage.
-	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-fail", Reason: "r", Kind: "transient"})
+	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-fail", Reason: "r", Kind: "transient", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
@@ -438,15 +437,15 @@ func TestTC_BlockValidation(t *testing.T) {
 	backend := newClaimBackend()
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Reason: "r", Kind: "bogus"})
+	res := s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Reason: "r", Kind: "bogus", Board: testBoard})
 	if !res.IsError || res.Content[0].Text != "invalid block kind: bogus" {
 		t.Errorf("bad kind: got %q, want %q", res.Content[0].Text, "invalid block kind: bogus")
 	}
-	res = s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Kind: "needs_input"})
+	res = s.TicketBlock(context.Background(), TicketBlockInput{ID: "task-ok", Kind: "needs_input", Board: testBoard})
 	if !res.IsError || res.Content[0].Text != "invalid_input: reason required" {
 		t.Errorf("missing reason: got %q", res.Content[0].Text)
 	}
-	res = s.TicketBlock(context.Background(), TicketBlockInput{ID: "x;rm -rf /", Reason: "r", Kind: "dependency"})
+	res = s.TicketBlock(context.Background(), TicketBlockInput{ID: "x;rm -rf /", Reason: "r", Kind: "dependency", Board: testBoard})
 	if !res.IsError || res.Content[0].Text != `invalid_input: invalid ticket id "x;rm -rf /"` {
 		t.Errorf("bad id: got %q", res.Content[0].Text)
 	}

@@ -91,7 +91,7 @@ func TestTE_ReturnsEventsAfterCursor(t *testing.T) {
 	}
 	b.setEvents(base)
 
-	input := TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 2}
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
 	res := s.TicketEvents(context.Background(), input)
 	if res == nil || res.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res)
@@ -114,7 +114,7 @@ func TestTE_ReturnsEventsAfterCursor(t *testing.T) {
 	}
 
 	// since_event_id=2 should return only event 3
-	input2 := TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 2, TimeoutSeconds: 2}
+	input2 := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 2, TimeoutSeconds: 2}
 	res2 := s.TicketEvents(context.Background(), input2)
 	if res2 == nil || res2.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res2)
@@ -144,7 +144,7 @@ func TestTE_EmptyTimeout(t *testing.T) {
 	// No events ever.
 	b.setEvents([]json.RawMessage{})
 
-	input := TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 2}
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
 	start := time.Now()
 	res := s.TicketEvents(context.Background(), input)
 	elapsed := time.Since(start)
@@ -192,7 +192,7 @@ func TestTE_ReturnsEarlyWhenEventArrives(t *testing.T) {
 		})
 	}()
 
-	input := TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 10}
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 10}
 	start := time.Now()
 	res := s.TicketEvents(context.Background(), input)
 	elapsed := time.Since(start)
@@ -234,18 +234,13 @@ func TestTE_Validation(t *testing.T) {
 		input TicketEventsInput
 	}{
 		{"bad board", TicketEventsInput{ID: "t_1", Board: "Bad Board!", TimeoutSeconds: 1}},
-		{"bad id", TicketEventsInput{ID: "bad id!", Board: "hermes-agent", TimeoutSeconds: 1}},
-		{"empty id", TicketEventsInput{ID: "", Board: "hermes-agent", TimeoutSeconds: 1}},
-		{"empty board and no default", TicketEventsInput{ID: "t_1", Board: "", TimeoutSeconds: 1}},
+		{"bad id", TicketEventsInput{ID: "bad id!", Board: testBoard, TimeoutSeconds: 1}},
+		{"empty id", TicketEventsInput{ID: "", Board: testBoard, TimeoutSeconds: 1}},
+		{"empty board", TicketEventsInput{ID: "t_1", Board: "", TimeoutSeconds: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Use a fresh Server with no default board for the "empty board" case.
-			sv := s
-			if tt.name == "empty board and no default" {
-				sv = NewServerWithClient(nil, b.server.URL, "")
-			}
-			res := sv.TicketEvents(context.Background(), tt.input)
+			res := s.TicketEvents(context.Background(), tt.input)
 			if res == nil || !res.IsError {
 				t.Fatalf("expected error result, got: %+v", res)
 			}
@@ -274,7 +269,7 @@ func TestTE_Budget(t *testing.T) {
 	}
 	b.setEvents(events)
 
-	input := TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 2}
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
 	res := s.TicketEvents(context.Background(), input)
 	if res == nil || res.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res)
@@ -343,7 +338,7 @@ func TestTE_MidPollTransientRetry(t *testing.T) {
 	s := NewServer(srv.URL, "hermes-agent")
 	SetBoardLister(s)
 
-	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 5})
+	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 5})
 	if res == nil || res.IsError {
 		t.Fatalf("expected success despite transient mid-poll error, got: %+v", res)
 	}
@@ -395,7 +390,7 @@ func TestTE_MidPollDefinitiveErrorAborts(t *testing.T) {
 	s := NewServer(srv.URL, "hermes-agent")
 	SetBoardLister(s)
 
-	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 5})
+	res := s.TicketEvents(context.Background(), TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 5})
 	if res == nil || !res.IsError {
 		t.Fatalf("expected IsError on definitive mid-poll 404, got: %+v", res)
 	}
@@ -428,7 +423,7 @@ func TestTE_ContextCancelled(t *testing.T) {
 		cancel()
 	}()
 
-	res := s.TicketEvents(ctx, TicketEventsInput{ID: "t_1", Board: "hermes-agent", SinceEventID: 0, TimeoutSeconds: 30})
+	res := s.TicketEvents(ctx, TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30})
 	if res == nil || !res.IsError {
 		t.Fatalf("expected IsError on context cancellation, got: %+v", res)
 	}

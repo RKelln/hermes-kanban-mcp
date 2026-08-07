@@ -82,10 +82,7 @@ type rawEvent struct {
 func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)

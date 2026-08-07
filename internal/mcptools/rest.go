@@ -38,7 +38,8 @@ type Server struct {
 // NewServer builds a Server with a default 15s-timeout client. baseURL
 // is the kanban REST base including the plugin prefix (e.g.
 // http://127.0.0.1:9119/api/plugins/kanban); a trailing slash is
-// tolerated. defaultBoard is used when a tool call omits board.
+// tolerated. defaultBoard is informational only (surfaced by
+// board_list); board-taking tools reject an omitted board.
 func NewServer(baseURL, defaultBoard string) *Server {
 	return &Server{
 		baseURL:      strings.TrimRight(baseURL, "/"),
@@ -60,7 +61,8 @@ func NewServerWithClient(client *http.Client, baseURL, defaultBoard string) *Ser
 	}
 }
 
-// DefaultBoard returns the board slug used when a tool call omits one.
+// DefaultBoard returns the configured default board slug (informational
+// only; board-taking tools reject an omitted board).
 func (s *Server) DefaultBoard() string {
 	return s.defaultBoard
 }

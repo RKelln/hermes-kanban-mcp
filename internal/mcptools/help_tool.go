@@ -34,8 +34,9 @@ MCP tools for a Hermes kanban board:
 
 The per-ticket tools (ticket_events/claim/comment/get/complete/block)
 require both board and id; the strict schema rejects calls missing
-either. The Go layer still resolves a configured default board when
-board is omitted by a permissive client.
+either. ticket_list and ticket_create also require board — an omitted
+board is rejected, never silently defaulted, so multi-board setups can't
+land tickets in the wrong queue.
 
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
 ticket_comment -> ticket_complete.

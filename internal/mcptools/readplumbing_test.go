@@ -324,3 +324,37 @@ func TestReadToolErrorFormatting(t *testing.T) {
 		t.Errorf("text = %q, want %q", text.Text, want)
 	}
 }
+
+func TestTicketListOmittedBoardRejected(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no backend request must be issued for an omitted board, got %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer fake.Close()
+
+	s := NewServerWithClient(fake.Client(), fake.URL, testBoard)
+	res := s.TicketList(context.Background(), TicketListInput{})
+	if res == nil || !res.IsError {
+		t.Fatalf("TicketList with omitted board: expected error result, got %+v", res)
+	}
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
+		t.Errorf("error = %q", res.Content[0].Text)
+	}
+}
+
+func TestTicketGetOmittedBoardRejected(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no backend request must be issued for an omitted board, got %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer fake.Close()
+
+	s := NewServerWithClient(fake.Client(), fake.URL, testBoard)
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_x1"})
+	if res == nil || !res.IsError {
+		t.Fatalf("TicketGet with omitted board: expected error result, got %+v", res)
+	}
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
+		t.Errorf("error = %q", res.Content[0].Text)
+	}
+}

@@ -18,9 +18,9 @@ import (
 
 // --- ticket_list ---
 
-// TicketListInput is the ticket_list tool input. Board defaults to the
-// configured default board; status filters client-side against the
-// verified status vocabulary; limit clamps to MaxTicketListLimit.
+// TicketListInput is the ticket_list tool input. Board is required;
+// status filters client-side against the verified status vocabulary;
+// limit clamps to MaxTicketListLimit.
 type TicketListInput struct {
 	Board    string   `json:"board"`
 	Status   []string `json:"status"`
@@ -61,7 +61,7 @@ type boardResponse struct {
 func (s *Server) TicketList(ctx context.Context, in TicketListInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
@@ -129,8 +129,8 @@ func containsStatus(list []string, s string) bool {
 
 // --- ticket_get ---
 
-// TicketGetInput is the ticket_get tool input. ID is required; board
-// defaults to the configured default board.
+// TicketGetInput is the ticket_get tool input. Board and ID are both
+// required.
 type TicketGetInput struct {
 	Board string `json:"board"`
 	ID    string `json:"id"`
@@ -202,7 +202,7 @@ type taskDetailEnvelope struct {
 func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)

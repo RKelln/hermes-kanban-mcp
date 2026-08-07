@@ -29,7 +29,7 @@ import (
 const maxCLIErrorRunes = 200
 
 // TicketClaimInput is the ticket_claim tool input. ID is required; board
-// defaults to the configured KANBAN_DEFAULT_BOARD. Worker is accepted
+// required; board is required; worker is accepted
 // for forward compatibility but never passed to the CLI: as of 2026-08
 // `hermes kanban claim` defines no assignee flag, and inventing one is
 // forbidden.
@@ -65,10 +65,7 @@ const claimNote = "claim TTL ~15m; re-claim via ticket_claim if it expires"
 func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
@@ -112,7 +109,7 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 }
 
 // TicketBlockInput is the ticket_block tool input. ID and reason are
-// required; board defaults to the configured KANBAN_DEFAULT_BOARD; kind
+// required; board required; kind
 // is one of dependency|needs_input|capability|transient.
 type TicketBlockInput struct {
 	ID     string `json:"id"`
@@ -153,10 +150,7 @@ const fallbackBlockNote = "typed kind unavailable; recorded as untyped block"
 func (s *Server) TicketBlock(ctx context.Context, in TicketBlockInput) *ToolResult {
 	board := in.Board
 	if board == "" {
-		board = s.defaultBoard
-	}
-	if board == "" {
-		return ErrorResult("invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD")
+		return ErrorResult("invalid_input: board required; pass board")
 	}
 	if err := ValidateBoardSlug(board); err != nil {
 		return ErrorResult("invalid_input: %v", err)

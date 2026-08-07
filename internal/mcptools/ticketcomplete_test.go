@@ -47,9 +47,10 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
 	srv, rec := runnableRecServer(t)
 	defer srv.Close()
-	s := newTestServer(srv) // default board hermes-agent
+	s := newTestServer(srv) // server default board testBoard (board passed explicitly below)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:    testBoard,
 		ID:       "t_x1",
 		Summary:  "Shipped the widget",
 		Result:   "3 tests passed",
@@ -110,7 +111,7 @@ func TestTComplete_ReviewExplicitEnv(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -129,7 +130,7 @@ func TestTComplete_ReviewOmitsEmptyResultMetadata(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "just summary"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "just summary"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -149,6 +150,7 @@ func TestTComplete_DoneMode(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:    testBoard,
 		ID:       "t_x1",
 		Summary:  "Done and dusted",
 		Result:   "all green",
@@ -195,7 +197,7 @@ func TestTComplete_DoneOmitsEmptyFields(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -209,7 +211,7 @@ func TestTComplete_ClaimGuard(t *testing.T) {
 	for _, status := range []string{"triage", "todo", "scheduled", "ready", "review", "blocked", "done", "archived", ""} {
 		srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_x1","title":"T","status":"`+status+`"}}`)
 		s := newTestServer(srv)
-		res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+		res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 		srv.Close()
 		if !res.IsError {
 			t.Errorf("status %q: expected IsError from claim guard", status)
@@ -232,7 +234,7 @@ func TestTComplete_SkipClaimReview(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if res.IsError {
 		t.Fatalf("expected success with skip-claim, got IsError: %s", res.Content[0].Text)
 	}
@@ -252,7 +254,7 @@ func TestTComplete_SkipClaimDone(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if res.IsError {
 		t.Fatalf("expected success with skip-claim, got IsError: %s", res.Content[0].Text)
 	}
@@ -271,7 +273,7 @@ func TestTComplete_CommentAuthorFromEnv(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -290,7 +292,7 @@ func TestTComplete_SummaryRequired(t *testing.T) {
 	s := newTestServer(srv)
 
 	for _, summary := range []string{"", "   ", "\n\t "} {
-		res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: summary})
+		res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: summary})
 		if !res.IsError {
 			t.Errorf("summary %q: expected IsError", summary)
 			continue
@@ -310,7 +312,7 @@ func TestTComplete_InvalidID(t *testing.T) {
 	s := newTestServer(srv)
 
 	for _, id := range []string{"", "t id", "t_ab@c", "t_ab/c", strings.Repeat("a", 65)} {
-		res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: id, Summary: "s"})
+		res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: id, Summary: "s"})
 		if !res.IsError {
 			t.Errorf("id %q: expected IsError", id)
 			continue
@@ -346,16 +348,16 @@ func TestTComplete_InvalidBoard(t *testing.T) {
 	}
 }
 
-func TestTComplete_NoBoardConfigured(t *testing.T) {
+func TestTComplete_OmittedBoardRejected(t *testing.T) {
 	srv, rec := runnableRecServer(t)
 	defer srv.Close()
 	s := NewServerWithClient(srv.Client(), srv.URL, "")
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
 	if !res.IsError {
-		t.Fatalf("expected IsError when no board is resolvable")
+		t.Fatalf("expected IsError when board is omitted")
 	}
-	if res.Content[0].Text != "invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD" {
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
 		t.Errorf("error = %q", res.Content[0].Text)
 	}
 	if len(*rec) != 0 {
@@ -368,7 +370,7 @@ func TestTComplete_GetTask404(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_missing", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_missing", Summary: "s"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 404 GetTask")
 	}
@@ -397,7 +399,7 @@ func TestTComplete_CommentBackend422(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 422 on the comment POST")
 	}
@@ -430,7 +432,7 @@ func TestTComplete_PatchBackend500(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 500 on the PATCH")
 	}
@@ -452,7 +454,7 @@ func TestTComplete_TransportError(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	s := NewServerWithClient(client, deadURL, "hermes-agent")
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "s"})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if !res.IsError {
 		t.Fatalf("expected IsError on transport failure")
 	}
@@ -470,7 +472,7 @@ func TestTComplete_SummaryTruncated100Runes(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: summary})
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: summary})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
@@ -495,9 +497,9 @@ func TestTComplete_ErrorsOneLine(t *testing.T) {
 
 	results := []*ToolResult{
 		s.TicketComplete(context.Background(), TicketCompleteInput{Board: "BAD BOARD", ID: "t_x1", Summary: "s"}),
-		s.TicketComplete(context.Background(), TicketCompleteInput{ID: "bad id!", Summary: "s"}),
-		s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_x1", Summary: "  "}),
-		s.TicketComplete(context.Background(), TicketCompleteInput{ID: "t_missing", Summary: "s"}),
+		s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "bad id!", Summary: "s"}),
+		s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "  "}),
+		s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_missing", Summary: "s"}),
 	}
 	for i, res := range results {
 		if !res.IsError {
@@ -521,6 +523,7 @@ func TestTComplete_SizeInvariant(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: strings.Repeat("s", 1500),
 		Result:  strings.Repeat("r", 500),
@@ -541,6 +544,7 @@ func TestTComplete_ReviewTierLowCompletesDone(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "Low tier done",
 		Result:     "all good",
@@ -589,6 +593,7 @@ func TestTComplete_ReviewTierLowOverridesReviewEnv(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "Override test",
 		ReviewTier: "LOW",
@@ -617,6 +622,7 @@ func TestTComplete_ReviewTierMediumDefaultReview(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "Medium tier test",
 	})
@@ -649,6 +655,7 @@ func TestTComplete_ReviewTierHigh(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "High risk change",
 		ReviewTier: "HIGH",
@@ -676,6 +683,7 @@ func TestTComplete_InvalidReviewTier(t *testing.T) {
 
 	for _, tier := range []string{"EXTREME", " EXTREME "} {
 		res := s.TicketComplete(context.Background(), TicketCompleteInput{
+			Board:      testBoard,
 			ID:         "t_x1",
 			Summary:    "s",
 			ReviewTier: tier,
@@ -702,6 +710,7 @@ func TestTComplete_ReviewTierWhitespaceNormalized(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "ws test",
 		ReviewTier: "  LOW ",
@@ -729,6 +738,7 @@ func TestTComplete_ReviewTierHighWithDoneEnv(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "high + env done",
 		ReviewTier: "HIGH",
@@ -753,6 +763,7 @@ func TestTComplete_ReviewTierCaseInsensitive(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "case test",
 		ReviewTier: "low",
@@ -781,6 +792,7 @@ func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "s",
 		Repo:    "github.com/RKelln/hermes-kanban-mcp",
@@ -832,6 +844,7 @@ func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "s",
 	})
@@ -864,6 +877,7 @@ func TestTComplete_ReviewRefsPartial(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "s",
 		SHA:     "abc123",
@@ -897,6 +911,7 @@ func TestTComplete_DoneModeRefsIgnored(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "s",
 		Repo:    "github.com/RKelln/hermes-kanban-mcp",
@@ -947,6 +962,7 @@ func TestTComplete_ReviewTierLowRefsIgnored(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:      testBoard,
 		ID:         "t_x1",
 		Summary:    "s",
 		ReviewTier: "LOW",
@@ -989,6 +1005,7 @@ func TestTComplete_RefsCollapseNewlines(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "s",
 		Repo:    "acme/\nprod",
@@ -1018,6 +1035,7 @@ func TestTComplete_SummaryNewlineCollapsed(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
 		ID:      "t_x1",
 		Summary: "shipped\ninjected\rpayload",
 	})
@@ -1046,9 +1064,9 @@ func TestTComplete_RefsLengthCaps(t *testing.T) {
 		name string
 		refs TicketCompleteInput
 	}{
-		{"repo", TicketCompleteInput{ID: "t_x1", Summary: "s", Repo: strings.Repeat("a", 257)}},
-		{"branch", TicketCompleteInput{ID: "t_x1", Summary: "s", Branch: strings.Repeat("b", 257)}},
-		{"sha", TicketCompleteInput{ID: "t_x1", Summary: "s", SHA: strings.Repeat("c", 65)}},
+		{"repo", TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s", Repo: strings.Repeat("a", 257)}},
+		{"branch", TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s", Branch: strings.Repeat("b", 257)}},
+		{"sha", TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s", SHA: strings.Repeat("c", 65)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

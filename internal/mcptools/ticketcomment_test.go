@@ -23,7 +23,7 @@ func TestTCM_CommentSuccess(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{
-		Board:  "hermes-agent",
+		Board:  testBoard,
 		ID:     "t_abc123",
 		Body:   "Ship it",
 		Author: "alice",
@@ -74,7 +74,7 @@ func TestTCM_AuthorDefaultsToEnv(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{
-		Board: "hermes-agent",
+		Board: testBoard,
 		ID:    "t_abc123",
 		Body:  "hi",
 	})
@@ -97,7 +97,7 @@ func TestTCM_AuthorEnvUnsetSendsEmpty(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{
-		Board: "hermes-agent",
+		Board: testBoard,
 		ID:    "t_abc123",
 		Body:  "hi",
 	})
@@ -120,7 +120,7 @@ func TestTCM_ExplicitAuthorBeatsEnv(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{
-		Board:  "hermes-agent",
+		Board:  testBoard,
 		ID:     "t_abc123",
 		Body:   "hi",
 		Author: "alice",
@@ -137,17 +137,20 @@ func TestTCM_ExplicitAuthorBeatsEnv(t *testing.T) {
 	}
 }
 
-func TestTCM_DefaultBoard(t *testing.T) {
+func TestTCM_OmittedBoardRejected(t *testing.T) {
 	srv, rec := newRecServer(t, http.StatusOK, `{}`)
 	defer srv.Close()
 	s := NewServerWithClient(srv.Client(), srv.URL, "hermes-agent")
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{ID: "t_abc123", Body: "hi"})
-	if res.IsError {
-		t.Fatalf("expected success, got: %s", res.Content[0].Text)
+	if !res.IsError {
+		t.Fatalf("expected IsError when board is omitted, got success")
 	}
-	if (*rec)[0].query != "board=hermes-agent" {
-		t.Errorf("query = %s, want board=hermes-agent (default board applied)", (*rec)[0].query)
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
+		t.Errorf("error = %q", res.Content[0].Text)
+	}
+	if len(*rec) != 0 {
+		t.Errorf("no request must be issued without a board, got %d", len(*rec))
 	}
 }
 
@@ -157,7 +160,7 @@ func TestTCM_EmptyBodyRejected(t *testing.T) {
 	s := newTestServer(srv)
 
 	for _, body := range []string{"", "   ", "\n\t "} {
-		res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: "t_abc123", Body: body})
+		res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: "t_abc123", Body: body})
 		if !res.IsError {
 			t.Errorf("body %q: expected IsError", body)
 			continue
@@ -177,7 +180,7 @@ func TestTCM_InvalidID(t *testing.T) {
 	s := newTestServer(srv)
 
 	for _, id := range []string{"", "t id", "t_ab@c", "t_ab/c", strings.Repeat("a", 65)} {
-		res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: id, Body: "hi"})
+		res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: id, Body: "hi"})
 		if !res.IsError {
 			t.Errorf("id %q: expected IsError", id)
 			continue
@@ -213,16 +216,16 @@ func TestTCM_InvalidBoard(t *testing.T) {
 	}
 }
 
-func TestTCM_NoBoardConfigured(t *testing.T) {
+func TestTCM_OmittedBoardRejectedNoDefault(t *testing.T) {
 	srv, rec := newRecServer(t, http.StatusOK, `{}`)
 	defer srv.Close()
 	s := NewServerWithClient(srv.Client(), srv.URL, "") // no default board
 
 	res := s.TicketComment(context.Background(), TicketCommentInput{ID: "t_abc123", Body: "hi"})
 	if !res.IsError {
-		t.Fatalf("expected IsError when no board is resolvable")
+		t.Fatalf("expected IsError when board is omitted")
 	}
-	if res.Content[0].Text != "invalid_input: no board specified; pass board or set KANBAN_DEFAULT_BOARD" {
+	if res.Content[0].Text != "invalid_input: board required; pass board" {
 		t.Errorf("error = %q", res.Content[0].Text)
 	}
 	if len(*rec) != 0 {
@@ -236,7 +239,7 @@ func TestTCM_Backend422(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: "t_abc123", Body: "hi"})
+	res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: "t_abc123", Body: "hi"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 422, got success: %s", res.Content[0].Text)
 	}
@@ -250,7 +253,7 @@ func TestTCM_Backend404(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: "t_missing", Body: "hi"})
+	res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: "t_missing", Body: "hi"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 404")
 	}
@@ -264,7 +267,7 @@ func TestTCM_Backend500(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: "t_abc123", Body: "hi"})
+	res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: "t_abc123", Body: "hi"})
 	if !res.IsError {
 		t.Fatalf("expected IsError for 500")
 	}
@@ -280,7 +283,7 @@ func TestTCM_TransportError(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	s := NewServerWithClient(client, deadURL, "hermes-agent")
 
-	res := s.TicketComment(context.Background(), TicketCommentInput{Board: "hermes-agent", ID: "t_abc123", Body: "hi"})
+	res := s.TicketComment(context.Background(), TicketCommentInput{Board: testBoard, ID: "t_abc123", Body: "hi"})
 	if !res.IsError {
 		t.Fatalf("expected IsError on transport failure")
 	}
