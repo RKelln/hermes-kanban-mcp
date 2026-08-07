@@ -35,7 +35,7 @@ The binary resolves the CLI via `HERMES_BIN` (default `hermes`). Claim TTL is ~1
 
 **Related knobs** (env):
 - `MCP_ALLOW_SKIP_CLAIM=true` — `ticket_complete` skips its claim guard (it refuses to complete an unclaimed ticket otherwise).
-- `MCP_COMPLETE_MODE=done` — complete to `done` instead of the default review-gated path (comment + `review-required` block).
+- `MCP_COMPLETE_MODE=done` — complete to `done` instead of the default review-gated path (comment + `review-required` block). Applies to `review_tier` `MEDIUM`/`HIGH`/omitted; an explicit `review_tier: "LOW"` always completes to `done`.
 - `MCP_COMMENT_AUTHOR` — default comment author.
 - `KANBAN_DEFAULT_BOARD` — board used when a tool call omits `board`.
 - `KANBAN_BASE_URL`, `KANBAN_USERNAME`, `KANBAN_PASSWORD` — the kanban REST backend + dashboard credentials. Note: the login route lives at the **dashboard root** (`/auth/password-login`), not under the plugin mount — the server strips the mount prefix before logging in.

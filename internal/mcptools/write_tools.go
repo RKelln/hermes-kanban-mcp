@@ -295,7 +295,7 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	switch reviewTier {
 	case "LOW", "MEDIUM", "HIGH":
 	default:
-		return ErrorResult("invalid_input: review_tier must be one of LOW|MEDIUM|HIGH, got %q", in.ReviewTier)
+		return ErrorResult("invalid_input: review_tier must be one of LOW|MEDIUM|HIGH, got %q", reviewTier)
 	}
 	var doneMode bool
 	if reviewTier == "LOW" {

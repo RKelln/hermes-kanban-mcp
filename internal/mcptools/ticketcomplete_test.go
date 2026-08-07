@@ -631,9 +631,9 @@ func TestTComplete_ReviewTierMediumDefaultReview(t *testing.T) {
 	if pb["status"] != "blocked" {
 		t.Errorf("PATCH status = %v, want blocked", pb["status"])
 	}
-	reason := pb["block_reason"].(string)
-	if !strings.HasPrefix(reason, "review-required: ") {
-		t.Errorf("block_reason = %q, want prefix review-required:", reason)
+	reason, ok := pb["block_reason"].(string)
+	if !ok || !strings.HasPrefix(reason, "review-required: ") {
+		t.Errorf("block_reason = %v, want prefix review-required:", pb["block_reason"])
 	}
 	out := decodeCompleteOut(t, res)
 	if out["final_status"] != "blocked" || out["review_required"] != true || out["review_tier"] != "MEDIUM" {
@@ -674,20 +674,74 @@ func TestTComplete_InvalidReviewTier(t *testing.T) {
 	defer srv.Close()
 	s := newTestServer(srv)
 
-	res := s.TicketComplete(context.Background(), TicketCompleteInput{
-		ID:         "t_x1",
-		Summary:    "s",
-		ReviewTier: "EXTREME",
-	})
-	if !res.IsError {
-		t.Fatalf("expected IsError for invalid review_tier")
-	}
-	want := `invalid_input: review_tier must be one of LOW|MEDIUM|HIGH, got "EXTREME"`
-	if res.Content[0].Text != want {
-		t.Errorf("error = %q, want %q", res.Content[0].Text, want)
+	for _, tier := range []string{"EXTREME", " EXTREME "} {
+		res := s.TicketComplete(context.Background(), TicketCompleteInput{
+			ID:         "t_x1",
+			Summary:    "s",
+			ReviewTier: tier,
+		})
+		if !res.IsError {
+			t.Errorf("tier %q: expected IsError", tier)
+			continue
+		}
+		want := `invalid_input: review_tier must be one of LOW|MEDIUM|HIGH, got "EXTREME"`
+		if res.Content[0].Text != want {
+			t.Errorf("tier %q: error = %q, want %q", tier, res.Content[0].Text, want)
+		}
 	}
 	if len(*rec) != 0 {
 		t.Errorf("no backend request must be issued for invalid review_tier, got %d", len(*rec))
+	}
+}
+
+func TestTComplete_ReviewTierWhitespaceNormalized(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:         "t_x1",
+		Summary:    "ws test",
+		ReviewTier: "  LOW ",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if pb["status"] != "done" {
+		t.Errorf("PATCH status = %v, want done (whitespace-wrapped LOW)", pb["status"])
+	}
+	out := decodeCompleteOut(t, res)
+	if out["review_tier"] != "LOW" {
+		t.Errorf("review_tier = %v, want canonical LOW", out["review_tier"])
+	}
+}
+
+func TestTComplete_ReviewTierHighWithDoneEnv(t *testing.T) {
+	t.Setenv("MCP_COMPLETE_MODE", "done")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		ID:         "t_x1",
+		Summary:    "high + env done",
+		ReviewTier: "HIGH",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	var pb map[string]any
+	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+		t.Fatal(err)
+	}
+	if pb["status"] != "done" {
+		t.Errorf("PATCH status = %v, want done (HIGH follows MCP_COMPLETE_MODE=done)", pb["status"])
 	}
 }
 
