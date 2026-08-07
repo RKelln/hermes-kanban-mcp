@@ -1,8 +1,13 @@
 package mcptools
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestObjReqShape(t *testing.T) {
@@ -28,9 +33,8 @@ func TestObjReqEmptyRequired(t *testing.T) {
 	if s["type"] != "object" {
 		t.Errorf("type = %v, want object", s["type"])
 	}
-	req, ok := s["required"].([]string)
-	if !ok || len(req) != 0 {
-		t.Errorf("required = %v, want []", s["required"])
+	if _, ok := s["required"]; ok {
+		t.Errorf("required present without args = %v, want omitted so the JSON schema stays valid", s["required"])
 	}
 }
 
@@ -180,4 +184,90 @@ func TestBlockSchemaProperties(t *testing.T) {
 	if !reflect.DeepEqual(enum, []string{"dependency", "needs_input", "capability", "transient"}) {
 		t.Errorf("kind enum = %v", enum)
 	}
+}
+
+// TestRegisterWiresRequiredSchemas drives the actual Register() through a
+// live client session and asserts that the five per-ticket tools expose
+// required ["id","board"] on the wire, and that the four non-per-ticket
+// tools do not declare id/board as required. This is the registration-
+// wiring test: it catches a schema swapped or mis-wired inside Register()
+// that the isolated schema-function tests cannot.
+func TestRegisterWiresRequiredSchemas(t *testing.T) {
+	ctx := context.Background()
+
+	// A Server whose backend is never reached by a tools/list; any
+	// reachable URL is fine (defaultBoard is what matters here).
+	s := NewServer("http://127.0.0.1:1", "hermes-agent")
+	srv := mcp.NewServer(&mcp.Implementation{Name: "hermes-kanban-mcp", Version: "test"}, nil)
+	Register(srv, s)
+
+	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil)
+	httpSrv := httptest.NewServer(handler)
+	defer httpSrv.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             httpSrv.URL,
+		DisableStandaloneSSE: true,
+	}, &mcp.ClientSessionOptions{})
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer cs.Close()
+
+	res, err := cs.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	tools := make(map[string]*mcp.Tool, len(res.Tools))
+	for _, tool := range res.Tools {
+		tools[tool.Name] = tool
+	}
+
+	perTicket := []string{"ticket_claim", "ticket_comment", "ticket_get", "ticket_complete", "ticket_block"}
+	for _, name := range perTicket {
+		tool, ok := tools[name]
+		if !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+		req := schemaRequired(tool.InputSchema)
+		if !reflect.DeepEqual(req, []string{"id", "board"}) {
+			t.Errorf("%s required = %v, want [id board]", name, req)
+		}
+	}
+
+	nonPerTicket := []string{"board_list", "ticket_list", "ticket_create", "kanban_help"}
+	for _, name := range nonPerTicket {
+		tool, ok := tools[name]
+		if !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+		if req := schemaRequired(tool.InputSchema); len(req) != 0 {
+			t.Errorf("%s required = %v, want empty", name, req)
+		}
+	}
+
+	// Sanity: all nine tools are present.
+	if len(tools) != 9 {
+		t.Errorf("registered %d tools, want 9", len(tools))
+	}
+}
+
+// schemaRequired extracts the "required" array from a JSON Schema object.
+func schemaRequired(schema any) []string {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, ok := m["required"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }

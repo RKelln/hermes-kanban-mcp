@@ -128,7 +128,11 @@ func obj(props map[string]any) map[string]any {
 	return map[string]any{"type": "object", "properties": props}
 }
 func objReq(props map[string]any, required ...string) map[string]any {
-	return map[string]any{"type": "object", "properties": props, "required": required}
+	s := map[string]any{"type": "object", "properties": props}
+	if len(required) > 0 {
+		s["required"] = required
+	}
+	return s
 }
 func propStr() map[string]any  { return map[string]any{"type": "string"} }
 func propBool() map[string]any { return map[string]any{"type": "boolean", "default": false} }

@@ -48,3 +48,6 @@ tools (`hermes-kanban-*`).
   refuses an unclaimed ticket.
 - Never put credentials in ticket bodies — write `***`.
 
+Prohibited: touching the live `~/.hermes` install tree, SSH to framework, pushing without
+approval.
+
