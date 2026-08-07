@@ -7,8 +7,9 @@ test:
 # Python review-sweeper unit suite. Offline-only tests; the e2e setup/repro
 # scripts under sweeper/tests (review-sweeper-e2e-*.py, review-sweeper-repro.py)
 # need a live kanban board + host creds and are run manually on the host (see
-# deploy/review-sweeper.md). PYTHONPATH=sweeper resolves the module in-repo
-# (the tests were written against ~/.hermes/scripts on the host).
+# deploy/review-sweeper.md). The tests now resolve the module from the repo's
+# sweeper/ copy (repo-relative insert wins over the ~/.hermes/scripts host
+# fallback), so make test-sweeper exercises the pinned in-repo source.
 SWEEPER_UNIT_TESTS := sweeper/tests/repo-url-hardening.py \
 	sweeper/tests/review-sweeper-unit.py \
 	sweeper/tests/review-sweeper-unit2.py \

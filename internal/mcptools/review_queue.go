@@ -97,10 +97,11 @@ func (s *Server) ReviewQueue(ctx context.Context, _ ReviewQueueInput) *ToolResul
 					Status:   t.Status,
 					Assignee: t.Assignee,
 					Priority: t.Priority,
-					// Truncated like ticket_list (parity with today's
-					// per-board scans): the structured repo/branch/sha
-					// refs are resolved via ticket_get when needed.
-					BlockReason: truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
+					// Falls back to the summaries (the live API omits
+					// block_reason, so the reason lives in latest_summary).
+					// The structured repo/branch/sha refs are resolved via
+					// ticket_get when needed.
+					BlockReason: truncateToRunes(effectiveBlockReason(&t), MaxBlockedReasonChars),
 				})
 			}
 		}
@@ -154,6 +155,22 @@ func hasReviewRequiredPrefix(s string) bool {
 	}
 	lower := strings.ToLower(s)
 	return lower == reviewRequiredPrefix || strings.HasPrefix(lower, reviewRequiredPrefix+":")
+}
+
+// effectiveBlockReason returns the ticket's review-required reason for
+// display, preferring the explicit block_reason and falling back to the
+// summaries — the live API omits block_reason (t_828c3b69), so the
+// "review-required: <summary>" marker lives in latest_summary/
+// last_run_summary. Used to populate list/queue item BlockReason so
+// list-based tooling sees the reason even when block_reason is absent.
+func effectiveBlockReason(t *kanban.TaskSummary) string {
+	if t.BlockReason != "" {
+		return t.BlockReason
+	}
+	if t.LatestSummary != "" {
+		return t.LatestSummary
+	}
+	return t.LastRunSummary
 }
 
 // renderReviewQueue renders a review_queue result within

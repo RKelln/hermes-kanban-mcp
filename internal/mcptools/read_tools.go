@@ -102,7 +102,7 @@ func (s *Server) TicketList(ctx context.Context, in TicketListInput) *ToolResult
 				Status:      t.Status,
 				Assignee:    t.Assignee,
 				Priority:    t.Priority,
-				BlockReason: truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
+				BlockReason: truncateToRunes(effectiveBlockReason(&t), MaxBlockedReasonChars),
 			})
 		}
 	}

@@ -8,7 +8,8 @@ import os
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))
+sys.path.insert(0, os.path.expanduser("~/.hermes/scripts"))  # host fallback (may not exist)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo sweeper/ copy wins
 from review_sweeper import (  # noqa: E402
     extract_branch, extract_sha, load_conf, repo_for_board, stall_update,
 )

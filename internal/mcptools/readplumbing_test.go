@@ -342,6 +342,48 @@ func TestTicketListOmittedBoardRejected(t *testing.T) {
 	}
 }
 
+func TestTicketListPopulatesBlockReasonFromSummary(t *testing.T) {
+	// The live API omits block_reason (t_828c3b69); the reason lives in
+	// latest_summary. List items must surface it so list-based tooling can
+	// filter, per the ticket's fix option (a).
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/boards"):
+			io_WriteString(w, `{"boards":[{"slug":"hermes-agent","name":"Hermes Agent","counts":{}}]}`)
+		case strings.HasSuffix(r.URL.Path, "/board"):
+			io_WriteString(w, `{"columns":[{"name":"blocked","tasks":[`+
+				`{"id":"t_sum","title":"S","status":"blocked","latest_summary":"review-required: shipped it"},`+
+				`{"id":"t_reason","title":"R","status":"blocked","block_reason":"review-required: via reason"}`+
+				`]}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer fake.Close()
+
+	s := NewServerWithClient(fake.Client(), fake.URL, testBoard)
+	SetBoardLister(s)
+	res := s.TicketList(context.Background(), TicketListInput{Board: testBoard, Status: []string{"blocked"}})
+	if res == nil || res.IsError {
+		t.Fatalf("TicketList returned error result: %+v", res)
+	}
+	var out TicketListOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	byID := map[string]TicketListItem{}
+	for _, it := range out.Tickets {
+		byID[it.ID] = it
+	}
+	if got := byID["t_sum"].BlockReason; !strings.Contains(got, "review-required") {
+		t.Errorf("t_sum block_reason = %q, want the summary fallback (review-required...)", got)
+	}
+	if got := byID["t_reason"].BlockReason; !strings.Contains(got, "via reason") {
+		t.Errorf("t_reason block_reason = %q, want the explicit reason", got)
+	}
+}
+
 func TestTicketGetOmittedBoardRejected(t *testing.T) {
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no backend request must be issued for an omitted board, got %s %s", r.Method, r.URL.Path)

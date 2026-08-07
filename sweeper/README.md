@@ -85,13 +85,13 @@ make test-sweeper
 ```
 
 Runs the offline unit suite (verdict parser, repo/branch hardening, ledger +
-locks, conf/SHA/stall, apply-path). `PYTHONPATH=sweeper` resolves the module
-in-repo; where the host still has `~/.hermes/scripts/review_sweeper.py` the
-tests would prefer that installed copy, so the in-repo verify is authoritative
-on checkouts without it. `unit3.py` globs the host runtime reviews dir, so it
-is vacuous (exit 0) in-repo — not real coverage there. The
-`sweeper/tests/review-sweeper-e2e-*.py` and `*-repro.py` scripts need a live
-kanban board + host creds and are run manually on the host — see
+locks, conf/SHA/stall, apply-path). The tests resolve the module from the
+repo's `sweeper/` copy first (repo-relative sys.path insert), so `make
+test-sweeper` always exercises the pinned in-repo source even on the host
+where `~/.hermes/scripts/review_sweeper.py` still exists. `unit3.py` globs the
+host runtime reviews dir, so it is vacuous (exit 0) in-repo — not real coverage
+there. The `sweeper/tests/review-sweeper-e2e-*.py` and `*-repro.py` scripts
+need a live kanban board + host creds and are run manually on the host — see
 deploy/review-sweeper.md.
 
 Per-tick bound: the run processes at most `MAX_TICKETS_PER_RUN` (2) tickets, so
