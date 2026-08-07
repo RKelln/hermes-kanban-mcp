@@ -113,5 +113,16 @@ rs.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("should
 check("bog-empty", rs.branch_on_github("", ""), False)
 check("bog-none", rs.branch_on_github(None, None), False)
 
+# --- extract_branch / extract_repo (2026-08-07 regression) ---
+check("branch-structured", rs.extract_branch("repo: x; branch: feat/t_abc-foo; sha: 1234567"), "feat/t_abc-foo")
+check("branch-no-false-prose", rs.extract_branch("the branch check failed and a phantom branch ref lingers"), "")
+check("branch-created", rs.extract_branch("Created branch feat/xyz done"), "feat/xyz")
+check("branch-name-eq", rs.extract_branch("branch_name=feat/abc"), "feat/abc")
+repo_raw = rs.extract_repo("Adopted verbatim; repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/t_abc")
+check("repo-full-form", repo_raw, "github.com/RKelln/hermes-kanban-mcp")
+check("repo-normalized", rs._norm_repo(repo_raw), "RKelln/hermes-kanban-mcp")
+check("repo-bare", rs.extract_repo("repository: RKelln/x"), "RKelln/x")
+check("repo-https", rs._norm_repo(rs.extract_repo("clone https://github.com/RKelln/x.git now")), "RKelln/x")
+
 print("\n%s" % ("ALL PASS" if not failures else "FAILURES: %s" % failures))
 sys.exit(1 if failures else 0)
