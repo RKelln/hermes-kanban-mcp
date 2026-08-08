@@ -11,7 +11,7 @@
 2. **Read** — `ticket_get` for full detail on a ticket you'll touch (bodies are truncated; use it when you need more).
 3. **Claim before work** — `ticket_claim` (`ready → running`, TTL ~15m). Never edit without claiming. Re-claim if it expired.
 4. **Track** — `ticket_comment` for decisions/context as you work.
-5. **Finish** — `ticket_complete` with a summary. **Review-gated by default**: blocks with `review-required:` for a human. `review_tier: "LOW"` (or `MCP_COMPLETE_MODE=done`) completes to done; `MEDIUM`/`HIGH` stay review-gated. Only use done when the task says done is fine. Push + record repo/branch/commit first.
+5. **Finish** — `ticket_complete` with a summary. **Review-gated by default**: blocks with `review-required:` for a human. `review_tier: "LOW"` (or `MCP_COMPLETE_MODE=done`) completes to done; `MEDIUM`/`HIGH` stay review-gated. Only use done when the task says done is fine. Push + record repo/branch/commit first. Done mode accepts `created_cards` (child ticket ids you created; the kernel verifies them, so phantom ids fail with a 400 naming the offenders).
 6. **Wait for the review** — long-poll `ticket_events` (default 120s, max 15m; pass the last seen event id; returns instantly with `ticket_status` if already out of `blocked`) or `ticket_get` until the ticket leaves `blocked`: `done` → merge your branch to main (the reviewer never merges); `ready` → REQUEST CHANGES → re-claim, fix, re-complete; still `blocked` → ESCALATED → surface to the human; do not re-loop.
 7. **Blockers** — `ticket_block` with a reason; kinds: `dependency | needs_input | capability | transient`. Never silently stall.
 

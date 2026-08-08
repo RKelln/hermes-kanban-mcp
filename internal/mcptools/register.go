@@ -49,15 +49,16 @@ func getSchema() map[string]any {
 }
 func completeSchema() map[string]any {
 	return objReq(map[string]any{
-		"board":       propStr(),
-		"id":          propStr(),
-		"summary":     propStr(),
-		"result":      propStr(),
-		"metadata":    propStr(),
-		"review_tier": map[string]any{"type": "string", "enum": []string{"LOW", "MEDIUM", "HIGH"}},
-		"repo":        propStr(),
-		"branch":      propStr(),
-		"sha":         propStr(),
+		"board":         propStr(),
+		"id":            propStr(),
+		"summary":       propStr(),
+		"result":        propStr(),
+		"metadata":      propStr(),
+		"review_tier":   map[string]any{"type": "string", "enum": []string{"LOW", "MEDIUM", "HIGH"}},
+		"repo":          propStr(),
+		"branch":        propStr(),
+		"sha":           propStr(),
+		"created_cards": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 	}, "id", "board")
 }
 func blockSchema() map[string]any {
@@ -107,7 +108,7 @@ func Register(srv *mcp.Server, s *Server) {
 		commentSchema(),
 		s.TicketComment)
 
-	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block. (id and board required)",
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block; created_cards (done mode only) is the manifest of child ticket ids the kernel's audit gate verifies. (id and board required)",
 		completeSchema(),
 		s.TicketComplete)
 

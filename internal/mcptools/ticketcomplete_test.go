@@ -40,8 +40,6 @@ func runnableRecServer(t *testing.T) (*httptest.Server, *[]recReq) {
 	return newRecServer(t, http.StatusOK, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
 }
 
-const wantCompleteNote = "REST completion does not record created_cards; create follow-up tickets with ticket_create"
-
 func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
@@ -97,8 +95,11 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	}
 
 	out := decodeCompleteOut(t, res)
-	if out["id"] != "t_x1" || out["final_status"] != "blocked" || out["review_required"] != true || out["note"] != wantCompleteNote {
-		t.Errorf("output = %v, want {id:t_x1 final_status:blocked review_required:true note:%q}", out, wantCompleteNote)
+	if out["id"] != "t_x1" || out["final_status"] != "blocked" || out["review_required"] != true {
+		t.Errorf("output = %v, want {id:t_x1 final_status:blocked review_required:true}", out)
+	}
+	if _, hasNote := out["note"]; hasNote {
+		t.Errorf("output still carries the dropped note warning: %v", out)
 	}
 	if rendered := renderedSize(t, res); rendered > MaxToolResultBytes {
 		t.Errorf("rendered result %d bytes > %d", rendered, MaxToolResultBytes)
@@ -150,11 +151,12 @@ func TestTComplete_DoneMode(t *testing.T) {
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
-		Board:    testBoard,
-		ID:       "t_x1",
-		Summary:  "Done and dusted",
-		Result:   "all green",
-		Metadata: `{"tests_run":42}`,
+		Board:        testBoard,
+		ID:           "t_x1",
+		Summary:      "Done and dusted",
+		Result:       "all green",
+		Metadata:     `{"tests_run":42}`,
+		CreatedCards: []string{"t_child01", "t_child02"},
 	})
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
@@ -173,8 +175,8 @@ func TestTComplete_DoneMode(t *testing.T) {
 	if patch.method != http.MethodPatch || patch.path != "/tasks/t_x1" {
 		t.Errorf("request 2 = %s %s, want PATCH /tasks/t_x1", patch.method, patch.path)
 	}
-	if keys := bodyKeys(t, patch.body); strings.Join(keys, ",") != "metadata,result,status,summary" {
-		t.Errorf("PATCH body keys = %v, want exactly [metadata result status summary] (body=%s)", keys, patch.body)
+	if keys := bodyKeys(t, patch.body); strings.Join(keys, ",") != "created_cards,metadata,result,status,summary" {
+		t.Errorf("PATCH body keys = %v, want exactly [created_cards metadata result status summary] (body=%s)", keys, patch.body)
 	}
 	var pb map[string]any
 	if err := json.Unmarshal([]byte(patch.body), &pb); err != nil {
@@ -184,10 +186,17 @@ func TestTComplete_DoneMode(t *testing.T) {
 		pb["result"] != "all green" || pb["metadata"] != `{"tests_run":42}` {
 		t.Errorf("PATCH body = %v, want status=done summary/result/metadata present", pb)
 	}
+	cc, ok := pb["created_cards"].([]any)
+	if !ok || len(cc) != 2 || cc[0] != "t_child01" || cc[1] != "t_child02" {
+		t.Errorf("PATCH created_cards = %v, want [t_child01 t_child02]", pb["created_cards"])
+	}
 
 	out := decodeCompleteOut(t, res)
-	if out["id"] != "t_x1" || out["final_status"] != "done" || out["review_required"] != false || out["note"] != wantCompleteNote {
-		t.Errorf("output = %v, want {id:t_x1 final_status:done review_required:false note:%q}", out, wantCompleteNote)
+	if out["id"] != "t_x1" || out["final_status"] != "done" || out["review_required"] != false {
+		t.Errorf("output = %v, want {id:t_x1 final_status:done review_required:false}", out)
+	}
+	if _, hasNote := out["note"]; hasNote {
+		t.Errorf("output still carries the dropped note warning: %v", out)
 	}
 }
 
@@ -202,7 +211,107 @@ func TestTComplete_DoneOmitsEmptyFields(t *testing.T) {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
 	if keys := bodyKeys(t, (*rec)[2].body); strings.Join(keys, ",") != "status,summary" {
-		t.Errorf("PATCH body keys = %v, want only [status summary] when result/metadata empty (body=%s)", keys, (*rec)[2].body)
+		t.Errorf("PATCH body keys = %v, want only [status summary] when result/metadata/created_cards empty (body=%s)", keys, (*rec)[2].body)
+	}
+}
+
+func TestTComplete_ReviewIgnoresCreatedCards(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	srv, rec := runnableRecServer(t)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:        testBoard,
+		ID:           "t_x1",
+		Summary:      "s",
+		CreatedCards: []string{"t_child01"},
+	})
+	// created_cards is done-mode only: on the review path it is rejected
+	// loudly, never silently dropped (a dropped manifest would bypass the
+	// kernel's audit gate via caller error).
+	if !res.IsError {
+		t.Fatalf("expected IsError when created_cards is passed on the review path, got: %+v", res)
+	}
+	if res.Content[0].Text != "invalid_input: created_cards requires done mode (review_tier LOW or MCP_COMPLETE_MODE=done)" {
+		t.Errorf("error = %q", res.Content[0].Text)
+	}
+	if len(*rec) != 0 {
+		t.Errorf("no request must be issued when created_cards is rejected on the review path, got %d", len(*rec))
+	}
+}
+
+func TestTComplete_Patch400CreatedCardsRejected(t *testing.T) {
+	t.Setenv("MCP_COMPLETE_MODE", "done")
+	var rec []recReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rec = append(rec, recReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(b)})
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"detail":"created_cards rejected: t_bogus1, t_bogus2 do not exist or were not created by this worker"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
+	}))
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:        testBoard,
+		ID:           "t_x1",
+		Summary:      "s",
+		CreatedCards: []string{"t_bogus1", "t_bogus2"},
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for 400 created_cards rejection")
+	}
+	want := "created_cards rejected: t_bogus1, t_bogus2 do not exist or were not created by this worker"
+	if res.Content[0].Text != want {
+		t.Errorf("error = %q, want %q", res.Content[0].Text, want)
+	}
+	if len(rec) != 3 {
+		t.Fatalf("expected 3 requests (GET, comment POST, PATCH), got %d", len(rec))
+	}
+	if rec[1].method != http.MethodPost || rec[2].method != http.MethodPatch {
+		t.Errorf("request order = %s,%s,%s, want GET,POST,PATCH", rec[0].method, rec[1].method, rec[2].method)
+	}
+	// The failing PATCH must have carried the created_cards manifest so
+	// the backend could audit it in the first place.
+	if keys := bodyKeys(t, rec[2].body); strings.Join(keys, ",") != "created_cards,status,summary" {
+		t.Errorf("PATCH body keys = %v, want [created_cards status summary] (body=%s)", keys, rec[2].body)
+	}
+}
+
+func TestTComplete_Patch400GenericFallthrough(t *testing.T) {
+	t.Setenv("MCP_COMPLETE_MODE", "done")
+	var rec []recReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rec = append(rec, recReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(b)})
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"detail":"bad state for this transition"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
+	}))
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
+	if !res.IsError {
+		t.Fatalf("expected IsError for generic 400 on the PATCH")
+	}
+	// Non-created_cards 400s must keep the standard kind-prefixed
+	// mapping — CompleteErrorMessage only special-cases the phantom-id
+	// rejection.
+	if res.Content[0].Text != "invalid_request: bad state for this transition" {
+		t.Errorf("error = %q, want %q", res.Content[0].Text, "invalid_request: bad state for this transition")
 	}
 }
 
@@ -581,8 +690,11 @@ func TestTComplete_ReviewTierLowCompletesDone(t *testing.T) {
 	}
 
 	out := decodeCompleteOut(t, res)
-	if out["id"] != "t_x1" || out["final_status"] != "done" || out["review_required"] != false || out["review_tier"] != "LOW" || out["note"] != wantCompleteNote {
-		t.Errorf("output = %v, want {id:t_x1 final_status:done review_required:false review_tier:LOW note:%q}", out, wantCompleteNote)
+	if out["id"] != "t_x1" || out["final_status"] != "done" || out["review_required"] != false || out["review_tier"] != "LOW" {
+		t.Errorf("output = %v, want {id:t_x1 final_status:done review_required:false review_tier:LOW}", out)
+	}
+	if _, hasNote := out["note"]; hasNote {
+		t.Errorf("output still carries the dropped note warning: %v", out)
 	}
 }
 
