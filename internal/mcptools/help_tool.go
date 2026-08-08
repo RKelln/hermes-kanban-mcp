@@ -30,7 +30,9 @@ MCP tools for a Hermes kanban board:
     review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
     (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
     for MEDIUM/HIGH. repo/branch/sha are optional structured refs folded
-    into the review-required block_reason (trimmed; single-line).
+    into the review-required block_reason (trimmed; single-line). done mode
+    accepts created_cards (child ticket ids; kernel-verified, phantom ids
+    get a 400 naming the offenders).
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
@@ -55,8 +57,8 @@ Lifecycle facts:
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
   8 KB, ticket_events 6 KB, review_queue 8 KB) — they are summaries; use
   ticket_get for depth.
-- REST completion does not record created_cards; create follow-ups
-  explicitly with ticket_create.
+- REST completion in done mode carries created_cards (kernel-verified;
+  phantom ids get a 400 naming the offenders).
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the
   review block carries the refs; a ticket reaching review with no sha is
   a workflow violation, not a code-review finding.

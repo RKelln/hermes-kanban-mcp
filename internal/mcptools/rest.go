@@ -178,3 +178,29 @@ func RestErrorMessage(err error) string {
 	}
 	return apiErr.Kind + ": " + apiErr.Msg
 }
+
+// createdCardsRejectedPrefix is the leading phrase of the backend's 400
+// detail when a done PATCH carries phantom created_cards ids. The full
+// detail names the offenders, e.g. "created_cards rejected: t_bogus1,
+// t_bogus2 do not exist or were not created by this worker".
+const createdCardsRejectedPrefix = "created_cards rejected: "
+
+// CompleteErrorMessage maps a ticket_complete PATCH error to the
+// one-line tool-error message. The backend rejects a done PATCH whose
+// created_cards manifest contains phantom ids (ids that do not exist or
+// were not created by this worker) with HTTP 400 and a detail naming
+// the offenders; that message is surfaced verbatim so the caller sees
+// exactly which ids failed the kernel's audit gate. Every other error
+// falls through to RestErrorMessage unchanged, keeping the schema-422
+// mapping, kind prefixes, and transport wrapping identical to the rest
+// of the tool family.
+func CompleteErrorMessage(err error) string {
+	var re *RestError
+	if errors.As(err, &re) && re.Status == http.StatusBadRequest {
+		if apiErr, ok := kanban.MapError(re.Status, re.Body).(*kanban.APIError); ok &&
+			strings.HasPrefix(apiErr.Msg, createdCardsRejectedPrefix) {
+			return apiErr.Msg
+		}
+	}
+	return RestErrorMessage(err)
+}

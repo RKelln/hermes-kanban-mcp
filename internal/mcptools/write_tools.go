@@ -199,29 +199,34 @@ func (s *Server) postComment(ctx context.Context, board, id, body, author string
 // review-gated (subject to MCP_COMPLETE_MODE override). repo, branch,
 // and sha are optional structured refs folded into the review
 // block_reason and comment (trimmed, single-line); ignored in done mode.
+// created_cards is the optional manifest of child ticket ids created
+// during this run; it is forwarded only in done mode, where the kernel's
+// created_cards audit gate verifies each id (phantom ids are rejected
+// with a 400 naming the offenders).
 type TicketCompleteInput struct {
-	ID         string `json:"id"`
-	Board      string `json:"board"`
-	Summary    string `json:"summary"`
-	Result     string `json:"result"`
-	Metadata   string `json:"metadata"`
-	ReviewTier string `json:"review_tier"`
-	Repo       string `json:"repo"`
-	Branch     string `json:"branch"`
-	SHA        string `json:"sha"`
+	ID           string   `json:"id"`
+	Board        string   `json:"board"`
+	Summary      string   `json:"summary"`
+	Result       string   `json:"result"`
+	Metadata     string   `json:"metadata"`
+	ReviewTier   string   `json:"review_tier"`
+	Repo         string   `json:"repo"`
+	Branch       string   `json:"branch"`
+	SHA          string   `json:"sha"`
+	CreatedCards []string `json:"created_cards"`
 }
 
 // TicketCompleteOut is the ticket_complete success projection: the
 // ticket id, the final status the PATCH requested, whether a human
-// review is required, the effective review tier, the fixed note
-// warning that a REST completion bypasses the kernel's created_cards
-// audit gate, and the structured refs echoed from the input.
+// review is required, the effective review tier, and the structured
+// refs echoed from the input. The note warning is gone: REST
+// completions in done mode now carry created_cards, so the kernel's
+// audit gate applies to them.
 type TicketCompleteOut struct {
 	ID             string `json:"id"`
 	FinalStatus    string `json:"final_status"`
 	ReviewRequired bool   `json:"review_required"`
 	ReviewTier     string `json:"review_tier"`
-	Note           string `json:"note"`
 	Repo           string `json:"repo,omitempty"`
 	Branch         string `json:"branch,omitempty"`
 	SHA            string `json:"sha,omitempty"`
@@ -237,21 +242,18 @@ type completeReviewBody struct {
 }
 
 // completeDoneBody is the done-mode PATCH /tasks/{id} body. status and
-// summary are always present; result and metadata are omitted from the
-// wire when empty so the backend only receives the fields the caller
-// actually supplied.
+// summary are always present; result, metadata, and created_cards are
+// omitted from the wire when empty so the backend only receives the
+// fields the caller actually supplied. created_cards is forwarded to
+// complete_task so the kernel's audit gate verifies each id — phantom
+// ids produce a 400 the tool surfaces via CompleteErrorMessage.
 type completeDoneBody struct {
-	Status   string `json:"status"`
-	Summary  string `json:"summary"`
-	Result   string `json:"result,omitempty"`
-	Metadata string `json:"metadata,omitempty"`
+	Status       string   `json:"status"`
+	Summary      string   `json:"summary"`
+	Result       string   `json:"result,omitempty"`
+	Metadata     string   `json:"metadata,omitempty"`
+	CreatedCards []string `json:"created_cards,omitempty"`
 }
-
-// completeNote is the fixed warning attached to every ticket_complete
-// success. PATCH status=done accepts no created_cards field, so REST
-// completions bypass the kernel's created_cards audit; follow-up
-// tickets must be created explicitly with ticket_create.
-const completeNote = "REST completion does not record created_cards; create follow-up tickets with ticket_create"
 
 // TicketComplete implements the ticket_complete MCP tool: post the
 // completion comment, then PATCH /tasks/{id} to the final status.
@@ -260,8 +262,10 @@ const completeNote = "REST completion does not record created_cards; create foll
 // (default "review"): review posts a comment with the summary plus
 // result/metadata rendered compactly, then blocks the ticket with
 // reason "review-required: <summary[:100]>"; done posts the summary
-// comment, then transitions to done carrying summary/result/metadata.
-// The comment always precedes the PATCH.
+// comment, then transitions to done carrying summary/result/metadata
+// and, when supplied, created_cards (forwarded to the kernel's
+// created_cards audit gate — phantom ids get a 400 the tool surfaces
+// via CompleteErrorMessage). The comment always precedes the PATCH.
 //
 // Claim guard: unless MCP_ALLOW_SKIP_CLAIM=true, the ticket's current
 // status is read with GetTask first, and any status other than
@@ -320,6 +324,9 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	} else {
 		doneMode = strings.EqualFold(os.Getenv("MCP_COMPLETE_MODE"), "done")
 	}
+	if len(in.CreatedCards) > 0 && !doneMode {
+		return ErrorResult("invalid_input: created_cards requires done mode (review_tier LOW or MCP_COMPLETE_MODE=done)")
+	}
 
 	// Claim guard: without explicit opt-out, only tickets the
 	// dispatcher has actually started (status running) may be
@@ -337,7 +344,6 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	out := TicketCompleteOut{
 		ID:         in.ID,
 		ReviewTier: reviewTier,
-		Note:       completeNote,
 		Repo:       in.Repo,
 		Branch:     in.Branch,
 		SHA:        in.SHA,
@@ -345,10 +351,11 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	comment := in.Summary
 	if doneMode {
 		patchBody = completeDoneBody{
-			Status:   "done",
-			Summary:  in.Summary,
-			Result:   in.Result,
-			Metadata: in.Metadata,
+			Status:       "done",
+			Summary:      in.Summary,
+			Result:       in.Result,
+			Metadata:     in.Metadata,
+			CreatedCards: in.CreatedCards,
 		}
 		out.FinalStatus = "done"
 	} else {
@@ -372,7 +379,7 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 	}
 	if err := s.doJSON(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(in.ID),
 		url.Values{"board": []string{board}}, patchBody, nil); err != nil {
-		return ErrorResult("%s", RestErrorMessage(err))
+		return ErrorResult("%s", CompleteErrorMessage(err))
 	}
 	return SuccessResult(out)
 }
