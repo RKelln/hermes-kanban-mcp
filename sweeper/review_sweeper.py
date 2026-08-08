@@ -967,6 +967,14 @@ def main(argv) -> int:
                 if not is_review_required(detail):
                     continue
                 seen_review_required = True
+                # Wrong-lane guard: repo-mapped board + default (Hermes worker)
+                # assignee = a ticket a worker cannot push. Warn loudly
+                # (2026-08-07, t_f3347854): a Hermes worker is read-only against
+                # GitHub, so such tickets strand with unverifiable work. Detection
+                # only — prevention is the ticket-intake lane rule.
+                wl = wrong_lane_warning(board, tid, conf, detail)
+                if wl:
+                    print(wl)
                 fp = block_fingerprint(detail)
                 if ledger_has(board, tid, fp):
                     continue  # this block event already reviewed
@@ -1069,11 +1077,27 @@ def process_one(mcp, rest_client, board, tid, detail, fp, conf, args):
         return "%s/%s: apply failed (%s) — ticket left as-is; retry next tick" % (board, tid, exc)
 
 
+def wrong_lane_warning(board: str, tid: str, conf: dict, detail: dict) -> str:
+    """Return a WARN line when a review-required ticket is assigned 'default'
+    (Hermes worker lane) on a repo-mapped board, else ''.
+
+    A Hermes worker cannot push to GitHub (read-only box by design), so a
+    repo-mapped ticket assigned to the worker lane always strands with
+    unverifiable work (t_f3347854, 2026-08-07). Detection-only guard: the
+    warning makes the mis-assignment visible in cron output the moment the
+    ticket blocks; prevention is the ticket-intake lane rule.
+    """
+    if board in conf and str(detail.get("assignee") or "").lower() == "default":
+        return ("review-sweeper: WARN: %s/%s assigned 'default' on a repo-mapped board — "
+                "Hermes worker cannot push; the opencode lane must own repo work "
+                "(claim via MCP ticket_claim, or re-assign)." % (board, tid))
+    return ""
+
+
 def stall_update(prev: int, seen_review_required: bool, has_warnings: bool) -> int:
     """Tick the consecutive-empty counter for the silent-blindness alert.
 
-    Resets when any review-required ticket was seen or the scan was clean;
-    increments when the scan found nothing AND errored. Pure — unit-testable.
+    Resets when any review-required ticket was seen or the scan was clean;    increments when the scan found nothing AND errored. Pure — unit-testable.
     """
     if seen_review_required or not has_warnings:
         return 0

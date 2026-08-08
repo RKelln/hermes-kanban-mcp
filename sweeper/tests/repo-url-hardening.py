@@ -155,5 +155,13 @@ check("p1-summary-branch-wins", rs.extract_branch(reason2) or rs.extract_branch(
 check("p1-summary-repo-wins", rs.extract_repo(reason2) or rs.extract_repo(blob2),
       "github.com/RKelln/hermes-kanban-mcp")
 
+# --- wrong_lane_warning (t_62382804, 2026-08-07) ---
+mapped_conf = {"hermes-agent": ("https://github.com/RKelln/hermes-kanban-mcp.git", "main")}
+check("wl-mapped-default", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "default"}) != "", True)
+check("wl-mapped-default-case", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "DEFAULT"}) != "", True)
+check("wl-mapped-other-assignee", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "opencode-remote"}), "")
+check("wl-unmapped-board", rs.wrong_lane_warning("unmapped", "t_x", mapped_conf, {"assignee": "default"}), "")
+check("wl-no-assignee", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {}), "")
+
 print("\n%s" % ("ALL PASS" if not failures else "FAILURES: %s" % failures))
 sys.exit(1 if failures else 0)
