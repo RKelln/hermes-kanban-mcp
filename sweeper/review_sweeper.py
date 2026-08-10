@@ -639,7 +639,7 @@ def comments_have_sweeper_verdict(detail: dict) -> bool:
 def build_reviewer_prompt(board: str, tid: str, detail: dict, repo: str, branch: str,
                           sha: str = "", checkout: str = "", base: str = "main") -> str:
     comments = "\n".join(
-        "- %s: %s" % (c.get("author") or "?", (c.get("body") or "")[:500])
+        "- %s: %s" % (c.get("author") or "?", (c.get("body") or "")[:2000])
         for c in (detail.get("comments") or [])[-10:]
     )
     body = (detail.get("body") or "")[:4000]
@@ -848,8 +848,14 @@ def extract_findings(output: str) -> str:
     bullets = [ln.strip() for ln in excerpt.splitlines()
                if ln.strip().startswith(("- ", "• ", "* "))]
     text = "\n".join(bullets).strip()
-    if len(text) > 1200:
-        text = text[-1200:]
+    # Front-kept safety cap. The old `text[-1200:]` kept the TAIL, destroying
+    # the top (most important) findings mid-word — every long verdict comment
+    # came out as a ~1232-char stub starting mid-sentence (2026-08-09, both
+    # REQUEST_CHANGES comments on t_c6ec0602). Kernel stores comments
+    # unbounded (only the 2KB context-display cap); reviewers emit 2-8
+    # bullets, so 4000 is pure headroom.
+    if len(text) > 4000:
+        text = text[:4000]
     return text
 
 
@@ -870,7 +876,7 @@ def _install_signal_handlers() -> None:
 def main(argv) -> int:
     _install_signal_handlers()
     args = parse_args(argv)
-    if is_peak_hour():
+    if is_peak_hour() and not os.environ.get("REVIEW_SWEEPER_RUN_IN_PEAK"):
         return 0
     if not os.path.isfile(ENV_FILE):
         print("review-sweeper: BROKEN: missing %s" % ENV_FILE)
@@ -886,7 +892,8 @@ def main(argv) -> int:
     # */15 post-approval, silently slowing pickup from 1m to 15m. If the job's
     # schedule drifts, scream BROKEN so the cron's last_status turns red
     # instead of silently missing tickets.
-    _EXPECTED_SCHEDULE = "* 0-1,6-20 * * *"
+    _EXPECTED_SCHEDULE = os.environ.get("REVIEW_SWEEPER_EXPECTED_SCHEDULE",
+                                        "* 0-1,6-20 * * *")
     try:
         with open(os.path.expanduser("~/.hermes/cron/jobs.json"), encoding="utf-8") as fh:
             _jobs = json.load(fh)
