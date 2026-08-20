@@ -9,12 +9,27 @@ Resurrected 2026-08-07 (t_63327112) from the 2026-08-03 design, with three fixes
      bridge cannot express (blocked -> done, blocked -> ready) go through the
      dashboard REST API (:9119) that the bridge itself proxies to.
   2. Board-agnostic: scans every board the MCP board_list reports, not just one.
-  3. Verdict-driven: spawns a real reviewer session (`hermes chat -q -s
-     sdlc-review`) per ticket and applies its verdict:
+  3. Verdict-driven: spawns a real reviewer session per ticket (`hermes chat
+     -q` with the reviewer skill from the REVIEW_SWEEPER_REVIEWER_SKILL env
+     var — none by default; the name is validated pre-spawn) and applies its
+     verdict:
        APPROVE         -> comment verdict, then PATCH status=done
        REQUEST CHANGES -> comment findings, then PATCH status=ready (external
                           lanes re-claim)
        ESCALATE        -> leave blocked (human inbox); comment once
+
+v4 (t_44d19d72, 2026-08-20): the reviewer skill name is CONFIG, not code.
+Until now spawn_reviewer hardcoded '-s sdlc-review'; on 2026-08-14..19 that
+name collided across two skill trees (devops v1.1.0 + software-development
+v1.3.0), every spawned reviewer crashed at agent init with 'Unknown
+skill(s): sdlc-review', and ~9.9k error files accumulated while tickets
+stranded silently in blocked. Now the name comes from
+REVIEW_SWEEPER_REVIEWER_SKILL (unset -> spawn with NO skill; the prompt is
+self-contained). Before spawning, skill_status() probes the profile skills
+tree mirroring hermes' own scanner (agent/skill_utils.iter_skill_index_files):
+missing or colliding names are caught at spawn-prep, the ticket gets ONE
+visible 'review-sweeper: SKIPPED' comment (deduped across ticks) and stays
+blocked for human action — no crash loop, no silent stranding.
 
 Idempotency: per-ticket lock files (state dir) prevent concurrent reviews;
 a ledger line is written only after a verdict is applied, so a crashed run
@@ -68,6 +83,21 @@ HERMES_BIN = "/home/experimance/.local/bin/hermes"
 GH_BIN = "/home/linuxbrew/.linuxbrew/bin/gh"
 GIT_BIN = shutil.which("git") or "/usr/bin/git"
 
+# Reviewer skill resolution (t_44d19d72): the skill loaded into spawned
+# reviewers comes from this env var — NEVER a hardcoded name (the 2026-08-14
+# outage was a hardcoded 'sdlc-review' colliding across two skill trees).
+# Unset/blank -> reviewers spawn with no skill (the prompt is self-contained).
+REVIEWER_SKILL_ENV = "REVIEW_SWEEPER_REVIEWER_SKILL"
+SKILLS_ROOT = os.path.expanduser("~/.hermes/skills")  # hermes profile skills tree
+# Mirrors agent/skill_utils.EXCLUDED_SKILL_DIRS + SKILL_SUPPORT_DIRS so the
+# pre-spawn probe resolves exactly the set hermes itself would load.
+SKILL_SCAN_EXCLUDED = frozenset({
+    ".git", ".github", ".hub", ".archive", ".venv", "venv", "node_modules",
+    "site-packages", "__pycache__", ".tox", ".nox", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache",
+})
+SKILL_SUPPORT_DIRS = frozenset({"references", "templates", "assets", "scripts"})
+
 MAX_TICKETS_PER_RUN = 2        # bound the tick; typical queue is 0-1
 REVIEW_TIMEOUT_SECONDS = 1800  # hard cap on one reviewer session
 LOCK_TTL_SECONDS = 4 * 3600    # stale lock takeover (covers a hung reviewer)
@@ -99,6 +129,10 @@ VERDICT_COMMENT_RE = re.compile(
     r"^\s*review-sweeper:\s*(approved|request changes|escalated)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
+# Whole-line marker for the spawn-prep skill skip (t_44d19d72): a comment
+# counts as "already flagged" when it starts with the clean SKIPPED line, so
+# a broken skill name posts ONE visible error comment, not one per tick.
+SKIP_COMMENT_RE = re.compile(r"^\s*review-sweeper:\s*SKIPPED", re.IGNORECASE | re.MULTILINE)
 
 
 def load_env() -> dict:
@@ -634,6 +668,117 @@ def comments_have_sweeper_verdict(detail: dict) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Reviewer skill resolution (t_44d19d72 — config, not code)
+# --------------------------------------------------------------------------
+def reviewer_skill_name() -> str:
+    """The skill to load into spawned reviewers.
+
+    Comes from the REVIEW_SWEEPER_REVIEWER_SKILL env var; empty when
+    unset/blank, which means reviewers spawn with NO skill (the review prompt
+    is self-contained). Never a hardcoded name: the 2026-08-14..19 outage was
+    a hardcoded 'sdlc-review' colliding across two skill trees, so every
+    spawned reviewer crashed with 'Unknown skill(s)' and tickets stranded
+    silently in blocked.
+    """
+    return (os.environ.get(REVIEWER_SKILL_ENV) or "").strip()
+
+
+def iter_skill_roots(skills_root: str):
+    """Yield (skill_name, skill_md_path) for every active skill under skills_root.
+
+    Mirrors hermes' own scanner (agent/skill_utils.iter_skill_index_files):
+    recursive walk, excluding VCS/venv/cache/archive dirs and skill support
+    dirs (references/templates/assets/scripts); org mirrors under _org/ are
+    token-gated by the .active_org marker and otherwise skipped. The skill
+    name is the SKILL.md parent directory name (the identifier `-s` uses).
+    """
+    active_org = None
+    try:
+        with open(os.path.join(skills_root, "_org", ".active_org"),
+                  encoding="utf-8") as fh:
+            active_org = fh.read().strip() or None
+    except OSError:
+        active_org = None
+    for root, dirs, files in os.walk(skills_root, followlinks=True):
+        rel = os.path.relpath(root, skills_root)
+        top = rel.split(os.sep)[0] if rel != "." else ""
+        if top == "_org":
+            parts = rel.split(os.sep)
+            if active_org is None:
+                dirs[:] = []
+                continue
+            if len(parts) < 2:
+                dirs[:] = [d for d in dirs if d == active_org]
+                continue
+            if parts[1] != active_org:
+                dirs[:] = []
+                continue
+        dirs[:] = [d for d in dirs
+                   if d not in SKILL_SCAN_EXCLUDED
+                   and not ("SKILL.md" in files and d in SKILL_SUPPORT_DIRS)]
+        if "SKILL.md" in files and root != skills_root:
+            yield os.path.basename(root), os.path.join(root, "SKILL.md")
+
+
+def skill_status(name: str, skills_root: str = "") -> tuple:
+    """Pre-spawn resolvability probe for the reviewer skill name.
+
+    Returns (status, detail):
+      ('none', '')           name empty — reviewers spawn without a skill
+      ('ok', path)           exactly one SKILL.md resolves
+      ('missing', '')        zero candidates — hermes would crash at agent
+                             init with 'Unknown skill(s): <name>' (the
+                             2026-08-14 outage failure mode)
+      ('collision', [paths]) two or more candidates in different trees —
+                             ambiguous; same init-crash failure mode
+    """
+    name = (name or "").strip()
+    if not name:
+        return ("none", "")
+    found = [path for sk_name, path in iter_skill_roots(skills_root or SKILLS_ROOT)
+             if sk_name == name]
+    if not found:
+        return ("missing", "")
+    if len(found) == 1:
+        return ("ok", found[0])
+    return ("collision", found)
+
+
+def comments_have_sweeper_skip(detail: dict) -> bool:
+    """True when the ticket already carries a SKIPPED comment (dedup)."""
+    for c in detail.get("comments") or []:
+        if SKIP_COMMENT_RE.search(c.get("body") or ""):
+            return True
+    return False
+
+
+def comment_skill_skip(mcp, board: str, tid: str, detail: dict, skill: str,
+                       status: str, found) -> bool:
+    """Post the visible 'review-sweeper: SKIPPED' error comment once per
+    ticket. Returns True when a comment was posted, False when the ticket
+    already has one (per-tick dedup — no comment spam while the config is
+    broken). The ticket stays blocked for human action; no reviewer spawns.
+    """
+    if comments_have_sweeper_skip(detail):
+        return False
+    if status == "missing":
+        why = ("no SKILL.md under %s matches — hermes would fail at agent init "
+               "with 'Unknown skill(s): %s' (the 2026-08-14..19 outage mode)"
+               % (SKILLS_ROOT, skill))
+    else:  # collision
+        why = ("multiple skills match: %s — ambiguous name, hermes cannot load "
+               "it (same failure mode as the 2026-08-14..19 outage)"
+               % ", ".join(found))
+    body = ("review-sweeper: SKIPPED — reviewer skill '%s' cannot resolve (%s).\n"
+            "Fix %s (or install/dedupe the skill), then re-trigger the review. "
+            "Ticket left blocked for human action; the sweeper will not re-spawn "
+            "reviewers for it." % (skill, why, REVIEWER_SKILL_ENV))
+    mcp.call("ticket_comment", {"board": board, "id": tid, "body": body,
+                                "author": "review-sweeper"})
+    return True
+
+
+# --------------------------------------------------------------------------
 # Reviewer spawn + verdict
 # --------------------------------------------------------------------------
 def build_reviewer_prompt(board: str, tid: str, detail: dict, repo: str, branch: str,
@@ -734,9 +879,16 @@ def spawn_reviewer(prompt: str, toolsets: str = "terminal,file") -> tuple:
     start_new_session=True gives the reviewer its own process group so a
     timeout (or a stale-lock takeover) can killpg the WHOLE tree — the
     round-1 leak left orphaned reviewers re-spawning behind dead owners.
-    The pid is returned for the per-ticket lock's reviewer_pid field."""
-    cmd = [HERMES_BIN, "chat", "-q", prompt, "-s", "sdlc-review", "-Q",
-           "-t", toolsets, "--max-turns", "40", "--reasoning", "low"]
+    The pid is returned for the per-ticket lock's reviewer_pid field.
+
+    The reviewer skill comes from reviewer_skill_name() (env, not code); an
+    empty name spawns with NO skill — callers validate the name pre-spawn via
+    skill_status() so a missing/colliding skill never reaches this point."""
+    cmd = [HERMES_BIN, "chat", "-q", prompt]
+    skill = reviewer_skill_name()
+    if skill:
+        cmd += ["-s", skill]
+    cmd += ["-Q", "-t", toolsets, "--max-turns", "40", "--reasoning", "low"]
     env = {k: v for k, v in os.environ.items()
            if k != "_HERMES_GATEWAY" and not k.startswith("HERMES_")}
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1056,6 +1208,20 @@ def process_one(mcp, rest_client, board, tid, detail, fp, conf, args):
     prompt = build_reviewer_prompt(board, tid, detail, repo, branch, sha, checkout, base)
     if args.dry_run:
         print("DRY-RUN: would review %s/%s (%s)" % (board, tid, detail.get("title", "")))
+        return True
+    # Spawn-prep skill gate (t_44d19d72): resolve the reviewer skill name
+    # BEFORE spawning. A missing or colliding name would crash every reviewer
+    # at agent init ('Unknown skill(s)') — the 2026-08-14..19 outage that
+    # stranded tickets silently in blocked with ~9.9k error files. Instead:
+    # ONE visible SKIPPED comment on the ticket (deduped across ticks), a
+    # loud warn line, ticket left blocked for human action, no spawn.
+    skill = reviewer_skill_name()
+    skill_status_ret, skill_detail = skill_status(skill)
+    if skill_status_ret in ("missing", "collision"):
+        comment_skill_skip(mcp, board, tid, detail, skill, skill_status_ret, skill_detail)
+        print("review-sweeper: warn: %s/%s: reviewer skill %r %s — SKIPPED with "
+              "visible comment, left blocked for human action (fix %s)"
+              % (board, tid, skill, skill_status_ret, REVIEWER_SKILL_ENV))
         return True
     # ALWAYS terminal+file: reviewers need git/gh even on docs tickets (CI
     # check-runs, commit lookup), and a file-only spawn cannot verify a branch
