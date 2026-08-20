@@ -11,6 +11,7 @@ test:
 # sweeper/ copy (repo-relative insert wins over the ~/.hermes/scripts host
 # fallback), so make test-sweeper exercises the pinned in-repo source.
 SWEEPER_UNIT_TESTS := sweeper/tests/repo-url-hardening.py \
+	sweeper/tests/reviewer-skill-config.py \
 	sweeper/tests/review-sweeper-unit.py \
 	sweeper/tests/review-sweeper-unit2.py \
 	sweeper/tests/unit3.py \

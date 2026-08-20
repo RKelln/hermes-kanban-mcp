@@ -20,9 +20,11 @@ Hermes host (2026-08-07) so every future change goes through the normal branch
    a repo, confirm the branch exists on origin (gh API first, public
    api.github.com fallback). A missing branch is a silent skip (push pending);
    a 403/429/5xx prints a warn (never silent blindness).
-3. **Reviewer spawn** — one `hermes chat -q -s sdlc-review` session per ticket
-   (terminal+file toolsets, 40-turn / 30-min caps), working inside a shared
-   per-board clone fetched before the review.
+3. **Reviewer spawn** — one `hermes chat -q` session per ticket, loading the
+   reviewer skill from `REVIEW_SWEEPER_REVIEWER_SKILL` (config, not code;
+   unset → no skill) and validating the name pre-spawn (terminal+file
+   toolsets, 40-turn / 30-min caps), working inside a shared per-board clone
+   fetched before the review.
 4. **Verdict** — `APPROVE` → comment + PATCH done; `REQUEST_CHANGES` → comment
    + PATCH ready (external lane re-claims); `ESCALATE` → leave blocked (human
    inbox), comment once.
@@ -44,6 +46,13 @@ State dir: `~/.hermes/state/review-sweeper/`
 Read from `/etc/kanban-mcp.env` (the same file the MCP server uses):
 
 - `MCP_BEARER_TOKEN` — **required**; script prints BROKEN and exits 1 without it
+- `REVIEW_SWEEPER_REVIEWER_SKILL` — skill loaded into spawned reviewers
+  (t_44d19d72: config, not code). Unset/blank → reviewers spawn with NO skill
+  (the review prompt is self-contained). The name is validated pre-spawn
+  against `~/.hermes/skills`; a missing or colliding name SKIP-comments the
+  ticket once (visible `review-sweeper: SKIPPED` marker) and leaves it blocked
+  for human action — no crash loop, no silent stranding (the 2026-08-14..19
+  outage mode).
 - `MCP_RATE_LIMIT` — **must be generous** (this host: 120). If the bridge
   429s the sweeper, every tick finds zero tickets while exiting 0 — silent
   blindness (the stall.json alert exists for exactly this).

@@ -61,11 +61,15 @@ script self-checks the schedule in `~/.hermes/cron/jobs.json` and exits BROKEN
 on drift — **keep that guard** (a worker once changed it to */15 post-approval,
 silently slowing pickup from 1m to 15m).
 
-Reviewer spawn: `hermes chat -q -s sdlc-review -t terminal,file` (the script
-invokes it with `-Q --max-turns 40 --reasoning low`, 30-min cap). Requires the
-`hermes` CLI at its configured absolute path (`HERMES_BIN`) and the
-`sdlc-review` skill installed on the host. The spawn command is intended to
-become env-configurable (default unchanged) as a follow-up.
+Reviewer spawn: `hermes chat -q -t terminal,file` with the reviewer skill from
+`REVIEW_SWEEPER_REVIEWER_SKILL` (config, not code — t_44d19d72; unset → spawn
+with no skill; the wrapper exports `sdlc-review` today). The script invokes it
+with `-Q --max-turns 40 --reasoning low`, 30-min cap, and validates the skill
+name pre-spawn via `skill_status()`: a missing/colliding name SKIP-comments the
+ticket once and leaves it blocked for human action instead of crashing every
+reviewer at agent init (the 2026-08-14..19 outage). Requires the `hermes` CLI
+at its configured absolute path (`HERMES_BIN`) and, when the env var is set,
+the named skill installed on the host.
 
 ## 5. State dir
 
