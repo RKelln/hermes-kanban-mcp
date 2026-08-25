@@ -41,11 +41,14 @@ per processed ticket; loud "BROKEN:" + exit 1 only on structural failure
 (missing config, bridge unreachable, auth failure). Transient per-ticket
 failures print a warning and are retried next tick (exit 0).
 
-DeepSeek peak pricing guard (policy 2026-08-25, Ryan): schedule+warn, not
-block. The cron schedule is pinned to off-peak hours (see cadence guard
-below); if a run still lands in peak (manual run, drift, DST edge) the pass
-proceeds but prints a loud WARN. Peak = UTC 1-4 and 6-10, Mon-Fri ONLY
-(weekends fully off-peak; the spawned reviewers are DS-paid).
+DeepSeek peak pricing guard (policy 2026-08-25, Ryan): schedule+defer, not
+block, with an opt-in interactive override. The cron schedule is pinned to
+off-peak hours (see cadence guard below); if a run still lands in peak
+(manual invocation, drift, DST edge) it defers to the next off-peak tick
+with a loud WARN — reviews are not time-sensitive, so no 2x token spend.
+Set REVIEW_SWEEPER_RUN_IN_PEAK=1 to force an interactive run (no code
+edits). Peak = UTC 1-4 and 6-10, Mon-Fri ONLY (weekends fully off-peak;
+the spawned reviewers are DS-paid).
 
 v3 (t_21b38b58, 2026-08-07): per-board repo map (review-sweeper.conf ->
 repo + default branch), ONE shared clone per board under checkouts/<board>
@@ -1035,12 +1038,20 @@ def main(argv) -> int:
     _install_signal_handlers()
     args = parse_args(argv)
     if is_peak_hour():
-        # schedule+warn policy (2026-08-25, Ryan): the cron schedule keeps
-        # automatic runs off-peak; a run that still lands in peak (manual
-        # invocation, drift, DST edge) proceeds with a loud WARN instead of
-        # silently no-op'ing.
-        print("review-sweeper: WARN: DeepSeek peak pricing (2x) in effect "
-              "(UTC 01-04 & 06-10, Mon-Fri) — proceeding per schedule+warn policy")
+        # Peak policy (2026-08-25, Ryan): schedule off-peak, defer in peak.
+        # A peak-landing run (drift/DST/manual without override) defers —
+        # reviews are not time-sensitive and 2x tokens are the waste to
+        # avoid. REVIEW_SWEEPER_RUN_IN_PEAK=1 is the OPT-IN interactive
+        # escape hatch (manual run, no code edits, no workarounds).
+        if os.environ.get("REVIEW_SWEEPER_RUN_IN_PEAK"):
+            print("review-sweeper: WARN: DeepSeek peak pricing (2x) in effect "
+                  "(UTC 01-04 & 06-10, Mon-Fri) — "
+                  "REVIEW_SWEEPER_RUN_IN_PEAK set, proceeding")
+        else:
+            print("review-sweeper: WARN: DeepSeek peak pricing (2x) in effect "
+                  "(UTC 01-04 & 06-10, Mon-Fri) — deferring to next off-peak "
+                  "tick (set REVIEW_SWEEPER_RUN_IN_PEAK=1 to force)")
+            return 0
     if not os.path.isfile(ENV_FILE):
         print("review-sweeper: BROKEN: missing %s" % ENV_FILE)
         return 1
