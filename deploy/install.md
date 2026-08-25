@@ -155,7 +155,7 @@ wrong-token `/mcp` calls → 401 with a JSON body and `WWW-Authenticate: Bearer`
 an `initialize` with the correct token → 200; `tools/list` → all tool names
 (`board_list, ticket_list, ticket_get, ticket_claim, ticket_comment,
 ticket_complete, ticket_block, ticket_create, ticket_events, kanban_help`); `board_list` → includes
-`hermes-agent`. It also runs the secret-hygiene checks (no bearer token,
+`hermes-kanban-mcp`. It also runs the secret-hygiene checks (no bearer token,
 password, or set-cookie in recent journald output; no real secrets in git). It
 exits non-zero with the failing step named.
 

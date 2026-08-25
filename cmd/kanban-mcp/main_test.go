@@ -37,10 +37,10 @@ func testMuxLogger(t *testing.T, token string, rateLimit int, logger *slog.Logge
 		KanbanUsername:     "test-user",
 		KanbanPassword:     "test-password-42",
 		MCPBearerToken:     token,
-		KanbanDefaultBoard: "hermes-agent",
+		KanbanDefaultBoard: "hermes-kanban-mcp",
 		MCPRateLimit:       rateLimit,
 	}
-	toolServer := mcptools.NewServerWithClient(&http.Client{}, "http://127.0.0.1:9/api/plugins/kanban", "hermes-agent")
+	toolServer := mcptools.NewServerWithClient(&http.Client{}, "http://127.0.0.1:9/api/plugins/kanban", "hermes-kanban-mcp")
 	return newMux(cfg, logger, toolServer)
 }
 

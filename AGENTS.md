@@ -19,10 +19,10 @@ go build ./... && go vet ./... && go test -race ./...
 
 ## Kanban (shared board)
 
-Project work is tracked on the Hermes kanban board `hermes-agent` via the kanban MCP
+Project work is tracked on the Hermes kanban board `hermes-kanban-mcp` via the kanban MCP
 tools (`hermes-kanban-*`).
 
-- **Always pass `board: "hermes-agent"` on every kanban MCP call.** An omitted `board`
+- **Always pass `board: "hermes-kanban-mcp"` on every kanban MCP call.** An omitted `board`
   is rejected by the tools (never silently defaulted), so forgetting it fails loudly
   instead of landing tickets in the wrong queue.
 - **Capture the ticket `id` from the `ticket_create` response (`t_<hex>`) and reuse it

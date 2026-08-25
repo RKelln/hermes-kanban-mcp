@@ -15,7 +15,7 @@
 #   5. POST /mcp initialize with the correct token returns 200 with an
 #      inline-JSON or inline-SSE result.
 #   6. tools/list exposes every kanban tool.
-#   7. board_list includes the hermes-agent board.
+#   7. board_list includes the hermes-kanban-mcp board.
 #
 # Then secret-hygiene checks: a scan of the kanban-mcp journal (last
 # 10 minutes) for leaked credentials, and a git grep of the repository
@@ -178,20 +178,24 @@ done
 [[ -z $missing ]] || fail "step 6 tools/list is missing tool(s):$missing"
 echo "  ok: all tools present (board_list, ticket_list, ticket_get, ticket_events, ticket_claim, ticket_comment, ticket_complete, ticket_block, ticket_create, kanban_help, review_queue)"
 
-# --- 7. board_list includes hermes-agent -----------------------------------------
-echo "check 7/7: board_list includes hermes-agent"
+# --- 7. board_list includes hermes-kanban-mcp -----------------------------------------
+echo "check 7/7: board_list includes hermes-kanban-mcp"
 BODY="$WORKDIR/s7-body"; HDR="$WORKDIR/s7-hdr"
 CALL='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"board_list","arguments":{}}}'
 code=$(mcp_req good "$CALL" "$BODY" "$HDR") \
     || fail "step 7 curl to $MCP_URL failed (is the server up?)"
 [[ $code == 200 ]] || fail "step 7 board_list should return 200, got $code"
 RESP=$(extract_json "$BODY")
-grep -Fq 'hermes-agent' <<<"$RESP" || fail "step 7 board_list result does not include the hermes-agent board"
-echo "  ok: board_list includes hermes-agent"
+grep -Fq 'hermes-kanban-mcp' <<<"$RESP" || fail "step 7 board_list result does not include the hermes-kanban-mcp board"
+echo "  ok: board_list includes hermes-kanban-mcp"
 
 # --- secret hygiene: journald log scan -------------------------------------------
 echo "secret hygiene: scan kanban-mcp journal (last 10 min) for leaked credentials"
-if journalctl -u kanban-mcp --since "10 min ago" 2>/dev/null | grep -qiE 'bearer [a-f0-9]{16}|password|set-cookie'; then
+# The server logs a startup line with REDACTED values (KanbanPassword=***,
+# MCPBearerToken=***) — the patterns must not flag the literal words inside
+# the redaction. `password=[^*]` matches a real value (first char not '*');
+# `bearer [a-f0-9]{16}` catches raw hex tokens; `set-cookie` catches leaks.
+if journalctl -u kanban-mcp --since "10 min ago" 2>/dev/null | grep -qiE 'bearer [a-f0-9]{16}|password=[^*]|set-cookie'; then
     fail "secret hygiene journalctl -u kanban-mcp --since \"10 min ago\" matched a leaked credential (bearer token / password / set-cookie)"
 fi
 echo "  ok: no leaked credentials in the journal"
@@ -201,7 +205,7 @@ echo "secret hygiene: git grep for committed secret values"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || fail "secret hygiene cannot run — not inside a git repository (git grep needs a work tree)"
 if git grep -nE '(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[^ ]' -- ':!*.example' \
-    | grep -vE '=<[^>]+>' | grep -q .; then
+    | grep -vE '=<[^>]+>|=[.]{3}' | grep -q .; then
     fail "secret hygiene git grep found a committed secret value (a secret variable name followed by an equals sign and a value)"
 fi
 echo "  ok: no committed secret values in the repository"

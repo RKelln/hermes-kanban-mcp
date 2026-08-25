@@ -2,7 +2,7 @@
 
 > This project's work items live on a **Hermes kanban board**. Use the `hermes-kanban` MCP server
 > (remote MCP, URL `http://100.126.212.105:9130/mcp`, bearer token in your opencode config).
-> Board slug for this project: `<BOARD_SLUG>` (default: `hermes-agent`).
+> Board slug for this project: `<BOARD_SLUG>` (default: `hermes-kanban-mcp`).
 
 ## Workflow (extremely succinct)
 
