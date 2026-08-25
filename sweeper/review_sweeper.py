@@ -46,9 +46,12 @@ block, with an opt-in interactive override. The cron schedule is pinned to
 off-peak hours (see cadence guard below); if a run still lands in peak
 (manual invocation, drift, DST edge) it defers to the next off-peak tick
 with a loud WARN — reviews are not time-sensitive, so no 2x token spend.
-Set REVIEW_SWEEPER_RUN_IN_PEAK=1 to force an interactive run (no code
-edits). Peak = UTC 1-4 and 6-10, Mon-Fri ONLY (weekends fully off-peak;
-the spawned reviewers are DS-paid).
+The guard is MODEL-AWARE: it only defers when the spawned reviewer actually
+runs on a DeepSeek model (read from ~/.hermes/config.yaml model.default/
+provider; pin via REVIEW_SWEEPER_REVIEWER_MODEL). Non-DS reviewers have no
+peak hours and never defer. Set REVIEW_SWEEPER_RUN_IN_PEAK=1 to force an
+interactive run (no code edits). Peak = UTC 1-4 and 6-10, Mon-Fri ONLY
+(weekends fully off-peak).
 
 v3 (t_21b38b58, 2026-08-07): per-board repo map (review-sweeper.conf ->
 repo + default branch), ONE shared clone per board under checkouts/<board>
@@ -109,6 +112,51 @@ REVIEW_TIMEOUT_SECONDS = 1800  # hard cap on one reviewer session
 LOCK_TTL_SECONDS = 4 * 3600    # stale lock takeover (covers a hung reviewer)
 PEAK_UTC_HOURS = set(range(1, 4)) | set(range(6, 10))  # DS double-price windows
 PEAK_WEEKDAYS = set(range(0, 5))  # Mon=0..Fri=4; weekends fully off-peak
+HERMES_CONFIG = os.path.expanduser("~/.hermes/config.yaml")
+REVIEWER_MODEL_ENV = "REVIEW_SWEEPER_REVIEWER_MODEL"
+
+
+def reviewer_model_is_deepseek() -> bool:
+    """True if the spawned reviewer runs on a DeepSeek model (has peak hours).
+
+    The reviewer is spawned via `hermes chat` with NO model flag, so it uses
+    the profile default from ~/.hermes/config.yaml (top-level model.default /
+    model.provider). Only DeepSeek models carry 2x peak hours — if the config
+    ever points at Gemini/Claude/OpenAI, the peak guard must NOT defer.
+
+    REVIEW_SWEEPER_REVIEWER_MODEL pins the answer without touching the config
+    (same env-config pattern as REVIEW_SWEEPER_REVIEWER_SKILL).
+    """
+    pinned = os.environ.get(REVIEWER_MODEL_ENV, "").strip()
+    if pinned:
+        return "deepseek" in pinned.lower()
+    model = provider = ""
+    try:
+        with open(HERMES_CONFIG, encoding="utf-8") as fh:
+            in_model = False
+            for line in fh:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                indent = len(line) - len(line.lstrip())
+                if indent == 0:
+                    if in_model:
+                        break  # left the top-level model: block
+                    in_model = stripped.startswith("model:")
+                    continue
+                if in_model and indent == 2:
+                    if stripped.startswith("default:"):
+                        model = stripped.split(":", 1)[1].strip().strip("\"'")
+                    elif stripped.startswith("provider:"):
+                        provider = stripped.split(":", 1)[1].strip().strip("\"'")
+    except OSError:
+        pass  # unreadable config: fall through to the conservative default
+    blob = ("%s %s" % (model, provider)).strip()
+    # Unreadable/unparseable config -> assume DeepSeek (cost-conservative:
+    # keep the deferral rather than risk a 2x spend on a non-DS reviewer).
+    if not blob:
+        return True
+    return "deepseek" in blob.lower()
 
 REVIEW_REQUIRED_RE = re.compile(r"review-required", re.IGNORECASE)
 BRANCH_RE = re.compile(
@@ -1037,7 +1085,7 @@ def _install_signal_handlers() -> None:
 def main(argv) -> int:
     _install_signal_handlers()
     args = parse_args(argv)
-    if is_peak_hour():
+    if is_peak_hour() and reviewer_model_is_deepseek():
         # Peak policy (2026-08-25, Ryan): schedule off-peak, defer in peak.
         # A peak-landing run (drift/DST/manual without override) defers —
         # reviews are not time-sensitive and 2x tokens are the waste to
