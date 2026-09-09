@@ -577,6 +577,37 @@ def ticket_detail(mcp: McpClient, board: str, tid: str) -> dict:
     return json.loads(text)
 
 
+def review_queue_items(mcp: McpClient) -> dict:
+    """Single-call all-board scan for review-required tickets (t_0cbde51b).
+
+    One ``review_queue`` call returns every blocked review-required ticket
+    across all boards: ``{total, returned, truncated, tickets: [{board, id,
+    title, status, assignee, priority, block_reason}]}``. This replaces the
+    whole-board per-ticket probe that used to starve the tick: ticket_list
+    per board plus ticket_get per BLOCKED ticket fired ~30 calls/tick, past
+    the bridge rate-limiter's token-bucket burst (capacity 20, hardcoded),
+    silently blinding every board scanned after the burst ran out (togather
+    sat unreviewed ~17h on 2026-09-09). Callers must surface ``truncated``
+    loudly — a partial queue must never pass silently.
+    """
+    text = mcp.call("review_queue", {})
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise McpError("review_queue: malformed JSON: %s" % exc)
+    if not isinstance(data, dict):
+        raise McpError("review_queue: unexpected payload shape: %r" % (text[:200],))
+    # The bridge marshals an EMPTY queue as "tickets": null (Go nil slice),
+    # which is the normal all-clear state — treat as [], not malformed.
+    # A MISSING tickets key is genuinely unexpected and must stay loud.
+    if "tickets" not in data or not (data["tickets"] is None
+                                     or isinstance(data["tickets"], list)):
+        raise McpError("review_queue: unexpected payload shape: %r" % (text[:200],))
+    if data["tickets"] is None:
+        data["tickets"] = []
+    return data
+
+
 def is_review_required(detail: dict) -> bool:
     haystack = " ".join([
         detail.get("block_reason") or "",
@@ -1169,58 +1200,79 @@ def main(argv) -> int:
                               env.get("KANBAN_USERNAME", ""), env.get("KANBAN_PASSWORD", ""))
         return rest
 
-    boards = args.boards or all_boards(mcp)
     processed = 0
     warnings = []
     seen_review_required = False  # stall alert: any review-required ticket seen this tick
     try:
-        for board in boards:
+        # Candidate scan (t_0cbde51b). Whole-board mode uses the bridge's
+        # review_queue tool: ONE MCP call returns every review-required
+        # ticket across all boards. The legacy per-board probe (ticket_list
+        # + ticket_get per blocked ticket) fired ~30 calls/tick — past the
+        # bridge rate-limiter's token-bucket burst (capacity 20, hardcoded)
+        # — and silently starved every board scanned after the burst ran
+        # out; togather (scanned last) sat unreviewed ~17h on 2026-09-09.
+        # Targeted --board mode keeps the per-board probe (single board,
+        # low volume) for operator scans.
+        candidates = []
+        if args.boards:
+            for board in args.boards:
+                try:
+                    for item in blocked_tickets(mcp, board):
+                        candidates.append((board, item.get("id", "")))
+                except McpError as exc:
+                    warnings.append("board %s: %s" % (board, exc))
+        else:
+            try:
+                queue_out = review_queue_items(mcp)
+            except McpError as exc:
+                warnings.append("review_queue: %s" % exc)
+                queue_out = None
+            if queue_out:
+                if queue_out.get("truncated"):
+                    warnings.append(
+                        "review_queue: truncated (%d/%d returned) — some "
+                        "review-required tickets unseen this tick"
+                        % (queue_out.get("returned", 0), queue_out.get("total", 0)))
+                for item in queue_out.get("tickets", []):
+                    candidates.append((item.get("board", ""), item.get("id", "")))
+        for board, tid in candidates:
             if processed >= args.max_tickets:
                 break
-            try:
-                blocked = blocked_tickets(mcp, board)
-            except McpError as exc:
-                warnings.append("board %s: %s" % (board, exc))
+            if not tid:
                 continue
-            for item in blocked:
-                if processed >= args.max_tickets:
-                    break
-                tid = item.get("id", "")
-                if not tid:
-                    continue
-                try:
-                    detail = ticket_detail(mcp, board, tid)
-                except McpError as exc:
-                    warnings.append("%s/%s: %s" % (board, tid, exc))
-                    continue
-                if not is_review_required(detail):
-                    continue
-                seen_review_required = True
-                # Wrong-lane guard: repo-mapped board + default (Hermes worker)
-                # assignee = a ticket a worker cannot push. Warn loudly
-                # (2026-08-07, t_f3347854): a Hermes worker is read-only against
-                # GitHub, so such tickets strand with unverifiable work. Detection
-                # only — prevention is the ticket-intake lane rule.
-                wl = wrong_lane_warning(board, tid, conf, detail)
-                if wl:
-                    print(wl)
-                fp = block_fingerprint(detail)
-                if ledger_has(board, tid, fp):
-                    continue  # this block event already reviewed
-                if not lock_acquire(board, tid, os.getpid()):
-                    continue  # already being reviewed
-                try:
-                    if args.scan:
-                        print("SCAN: %s/%s %s (%s)" % (board, tid, detail.get("title", ""),
-                                                       detail.get("block_reason") or detail.get("last_run_summary") or ""))
-                        lock_release(board, tid)
-                        continue
-                    ok = process_one(mcp, rest_client, board, tid, detail, fp, conf, args)
-                    processed += 1
-                    if ok is not True:
-                        warnings.append(str(ok))
-                finally:
+            try:
+                detail = ticket_detail(mcp, board, tid)
+            except McpError as exc:
+                warnings.append("%s/%s: %s" % (board, tid, exc))
+                continue
+            if not is_review_required(detail):
+                continue
+            seen_review_required = True
+            # Wrong-lane guard: repo-mapped board + default (Hermes worker)
+            # assignee = a ticket a worker cannot push. Warn loudly
+            # (2026-08-07, t_f3347854): a Hermes worker is read-only against
+            # GitHub, so such tickets strand with unverifiable work. Detection
+            # only — prevention is the ticket-intake lane rule.
+            wl = wrong_lane_warning(board, tid, conf, detail)
+            if wl:
+                print(wl)
+            fp = block_fingerprint(detail)
+            if ledger_has(board, tid, fp):
+                continue  # this block event already reviewed
+            if not lock_acquire(board, tid, os.getpid()):
+                continue  # already being reviewed
+            try:
+                if args.scan:
+                    print("SCAN: %s/%s %s (%s)" % (board, tid, detail.get("title", ""),
+                                                   detail.get("block_reason") or detail.get("last_run_summary") or ""))
                     lock_release(board, tid)
+                    continue
+                ok = process_one(mcp, rest_client, board, tid, detail, fp, conf, args)
+                processed += 1
+                if ok is not True:
+                    warnings.append(str(ok))
+            finally:
+                lock_release(board, tid)
     finally:
         if not args.scan:
             singleton_release(os.getpid())
