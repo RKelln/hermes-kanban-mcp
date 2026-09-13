@@ -58,12 +58,30 @@ const (
 	// cap and a dead flag are worse than no cap.
 	MaxTitleChars = 120
 
-	// MaxTicketBodyChars truncates the ticket body in get output.
+	// MaxTicketBodyChars truncates the ticket body in get output. Validated
+	// by the same measurement as MaxCommentBodyChars (2026-09-13): ticket
+	// bodies run p50 1818, p90 3548, p95 3720 runes, and only 20 of 467
+	// exceed 4000 — so this cap covers ~96% of bodies whole and did not
+	// need changing.
 	MaxTicketBodyChars = 4000
 
-	// MaxCommentBodyChars truncates each returned comment body,
-	// marker included.
-	MaxCommentBodyChars = 500
+	// MaxCommentBodyChars truncates each returned comment body in partial
+	// mode, marker included.
+	//
+	// DATA-DERIVED, not a round number. Measured over 630 comments across
+	// 250 tickets on this host's boards (scripts/comment-length-stats.py,
+	// 2026-09-13): comment lengths run p50 552, p75 1238, p90 2536,
+	// p99 5264, max 15307 runes. At the previous cap of 500 only 47.5% of
+	// comments arrived whole — the MEDIAN comment was being clipped, which
+	// is how a 2,445-rune steer reached a remote agent as 488 runes plus
+	// "…(1957 more)". 1500 covers 79.4% whole, and four complete comments
+	// still fit beside the fixed fields in the 8 KB partial budget; longer
+	// threads are handled by dropping the OLDEST comments (newest survive)
+	// rather than by shredding every one of them. The budget is unchanged —
+	// this spends the same bytes on fewer, complete comments instead of
+	// many clipped ones. Re-derive with scripts/comment-length-stats.py
+	// when the corpus has grown.
+	MaxCommentBodyChars = 1500
 
 	// MaxCommentsReturned keeps only the last N comments in get output.
 	MaxCommentsReturned = 10

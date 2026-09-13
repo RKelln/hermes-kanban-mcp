@@ -155,10 +155,20 @@ func TestTicketGetPartialIsDefaultAndUnchanged(t *testing.T) {
 	}
 	got := out.Comments[0].Body
 	if n := len([]rune(got)); n != MaxCommentBodyChars {
-		t.Errorf("partial comment is %d runes, want %d", n, MaxCommentBodyChars)
+		t.Errorf("partial comment is %d runes, want the cap %d", n, MaxCommentBodyChars)
 	}
-	if !strings.Contains(got, "…(1957 more)") {
-		t.Errorf("partial comment marker = %.40s…, want the live 1957-rune marker", got[len(got)-40:])
+	// The fixture is the 2,445-rune steer from the live incident, which at
+	// the old 500-rune cap came back as 488 runes + "…(1957 more)". Assert
+	// the durable property (one marker, truthful arithmetic) against the
+	// CURRENT cap rather than pinning a literal that moves with the policy —
+	// the number itself is derived in scripts/comment-length-stats.py.
+	if c := strings.Count(got, "…("); c != 1 {
+		t.Errorf("found %d omission markers, want exactly 1", c)
+	}
+	kept := len([]rune(got)) - len([]rune(fmt.Sprintf("…(%d more)", omitsMarker(t, got))))
+	if kept+omitsMarker(t, got) != len([]rune(long)) {
+		t.Errorf("marker arithmetic: kept %d + omitted %d != original %d",
+			kept, omitsMarker(t, got), len([]rune(long)))
 	}
 	if !out.Comments[0].Truncated {
 		t.Error("clipped comment did not set its per-comment truncated flag")
@@ -178,7 +188,11 @@ func TestTicketGetPartialIsDefaultAndUnchanged(t *testing.T) {
 // alongside to show the contrast the fix removes.
 func TestTicketGetFullReturnsTheWholeSteer(t *testing.T) {
 	const tail = "TAIL: a DST-boundary test pins the behaviour."
-	body := repeatBody("REVISION — supersedes the proposed fix. ", 1000) + tail
+	// Cap-relative fixture: long enough that partial MUST clip before the
+	// tail. A fixed length here silently stops testing anything the moment
+	// the policy cap moves (it did, when the cap went 500 -> 1500 and a
+	// 1,047-rune fixture started arriving whole in partial mode).
+	body := repeatBody("REVISION — supersedes the proposed fix. ", MaxCommentBodyChars+800) + tail
 	be := newGetBackend(t, "t_x1", "", comments([2]string{"hermes-agent", body}))
 
 	partial := callGet(t, be, TicketGetInput{ID: "t_x1", Board: testBoard, Detail: DetailPartial})
