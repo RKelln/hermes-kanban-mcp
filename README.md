@@ -12,7 +12,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   |---|---|
   | `board_list` | List boards (slug, name, per-status counts) |
   | `ticket_list` | List tickets with status/assignee filters; summary-only, never full bodies |
-  | `ticket_get` | Full ticket detail with truncation + size budgets |
+  | `ticket_get` | Full ticket detail with truncation + size budgets; `detail: full` returns complete comment/body text |
   | `ticket_events` | Long-poll a ticket's events; returns events newer than since_event_id or empty on timeout |
   | `review_queue` | Single-call scan for review-required tickets across **all boards** (one call replaces per-board scans) |
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`) |
@@ -26,7 +26,8 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
 
 - **Static bearer auth** (custom middleware: constant-time compare, exact JSON 401 contract for opencode) + per-IP rate limiter.
 - **Single static binary**, Go 1.25+, official `modelcontextprotocol/go-sdk` v1.7.0.
-- **Context-budget discipline**: every tool result is truncated to a hard size budget (2 KB write tools, 6 KB `ticket_list`/`ticket_events`, 8 KB `ticket_get`/`review_queue`); the board is never dumped wholesale.
+- **Context-budget discipline**: every tool result is truncated to a hard size budget (2 KB write tools, 6 KB `ticket_list`/`ticket_events`, 8 KB `ticket_get`/`review_queue`, 32 KB `ticket_get` with `detail: full`); the board is never dumped wholesale.
+- **No silent truncation** (`ticket_get`): `detail: partial` (the default) applies the bounded caps; `detail: full` returns complete comment and ticket-body text for long-form content (steers, revision comments, review verdicts). Clipping is always visible — an inline `…(N more)` marker, a per-comment `truncated` flag, `truncated.body`/`truncated.comments`, and `comments_total`/`comments_returned`/`comments_dropped` counts. Under budget pressure the **oldest** comments are dropped first, so the newest (the live review thread) survive. The render guard never clips a payload to fit: if a projection is oversized it returns an explicit error instead of emitting invalid JSON, which is what the old 75%-chop loop did.
 
 ## The claim mechanism (why `ticket_claim` shells out)
 
@@ -68,4 +69,4 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 
 ## Status
 
-Implementation complete and smoke-verified (2026-08-03): all tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), `ticket_events` (2026-08), required id+board schemas, the `review_tier` completion knob, the single-call `review_queue` scan (2026-08), the review-sweeper cron job adopted into `sweeper/` (2026-08), and `ticket_complete` passing `created_cards` over REST in done mode (kernel-verified, 2026-08). The remaining Hermes-side backlog (REST claim endpoint on the kanban plugin) is tracked on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).
+Implementation complete and smoke-verified (2026-08-03): all tools wired, `go build` / `go vet` / `go test -race` green, live smoke against a real dashboard (login, claim, create verified). Since then: `kanban_help` (2026-08), `ticket_events` (2026-08), required id+board schemas, the `review_tier` completion knob, the single-call `review_queue` scan (2026-08), the review-sweeper cron job adopted into `sweeper/` (2026-08), `ticket_complete` passing `created_cards` over REST in done mode (kernel-verified, 2026-08), and the `ticket_get` detail modes + no-silent-truncation read path (2026-09: `detail: partial|full`, flagged drops/clips, oldest-dropped-first, `renderResult` no longer raw-chops an oversized payload into invalid JSON). The remaining Hermes-side backlog (REST claim endpoint on the kanban plugin) is tracked on the project board. Design + experiment record: `~/Documents/assistant/research/planning/hermes-kanban-mcp-design.md` and `notes/2026-08-03-hermes-kanban-mcp-pipeline-experiment.md` (local wiki).

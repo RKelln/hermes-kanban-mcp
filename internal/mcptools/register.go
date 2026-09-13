@@ -45,7 +45,16 @@ func commentSchema() map[string]any {
 	return objReq(map[string]any{"board": propStr(), "id": propStr(), "body": propStr(), "author": propStr()}, "id", "board")
 }
 func getSchema() map[string]any {
-	return objReq(map[string]any{"board": propStr(), "id": propStr()}, "id", "board")
+	return objReq(map[string]any{
+		"board": propStr(),
+		"id":    propStr(),
+		"detail": map[string]any{
+			"type":        "string",
+			"enum":        []string{DetailPartial, DetailFull},
+			"default":     DetailPartial,
+			"description": "partial (default) applies the bounded caps; full returns complete comment and body text for long-form content (review threads, steers). Every drop and clip is flagged in both modes.",
+		},
+	}, "id", "board")
 }
 func completeSchema() map[string]any {
 	return objReq(map[string]any{
@@ -96,7 +105,7 @@ func Register(srv *mcp.Server, s *Server) {
 		}, "board"),
 		s.TicketList)
 
-	addTool(srv, "ticket_get", "Fetch one ticket in full detail with truncation; the escape hatch for ticket_list summaries. (id and board required)",
+	addTool(srv, "ticket_get", "Fetch one ticket in full detail with truncation; the escape hatch for ticket_list summaries. detail=partial (default) caps comment bodies; detail=full returns complete comment and body text (review threads, revision comments). Truncation is always flagged. (id and board required)",
 		getSchema(),
 		s.TicketGet)
 

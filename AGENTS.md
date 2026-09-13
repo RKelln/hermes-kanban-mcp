@@ -16,6 +16,7 @@ go build ./... && go vet ./... && go test -race ./...
 - Module path: `github.com/RKelln/hermes-kanban-mcp`. No secrets in logs, no tokens in commits.
 - Deploy artifacts: `deploy/` (systemd unit, env template, install docs). The claim shell-out needs `HERMES_BIN` + `User=experimance` + the `ReadWritePaths` carve-out for `~/.hermes/kanban*`.
 - **Tool registration: `addTool` adapts internally — pass the raw Server method, NEVER `adapt[...](s.Method)`.** The call signature is `addTool(srv, name, desc, schema, s.SomeTool)`; wrapping again is a compile error (`cannot infer In`). This bit three times during the kanban_help addition.
+- **The read path never clips silently, and never clips to fit.** Every cap, budget or drop sets a visible flag (`truncated.*`, per-comment `truncated`, `comments_*` counts) and carries an inline `…(N more)` marker; losses come off the OLDEST comments first, because the newest carry the live review thread. `renderResult` does not chop an oversized payload — it returns an explicit error, since the old 75%-chop loop emitted invalid JSON and destroyed the last-encoded content with no flag. Size callers with `resultBytes` (the envelope-inclusive measure) so the projection matches the guard. Feature work that needs more detail adds a param to an existing tool (`detail: partial|full`), never a new tool.
 
 ## Kanban (shared board)
 

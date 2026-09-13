@@ -146,13 +146,32 @@ func TestCommentSchemaProperties(t *testing.T) {
 
 func TestGetSchemaProperties(t *testing.T) {
 	props := objSchemaProps(getSchema())
-	if len(props) != 2 {
-		t.Errorf("getSchema has %d properties, want 2", len(props))
+	if len(props) != 3 {
+		t.Errorf("getSchema has %d properties, want 3", len(props))
 	}
-	for _, key := range []string{"board", "id"} {
+	for _, key := range []string{"board", "id", "detail"} {
 		if props[key] == nil {
 			t.Errorf("getSchema missing property %q", key)
 		}
+	}
+	// detail is the retrieval-mode switch: partial (default) keeps the
+	// bounded caps, full returns complete text. Both values must be
+	// advertised, or a caller cannot opt out of the caps.
+	detail := props["detail"].(map[string]any)
+	enum, ok := detail["enum"].([]string)
+	if !ok {
+		t.Fatalf("detail enum = %#v, want []string", detail["enum"])
+	}
+	want := []string{DetailPartial, DetailFull}
+	if !reflect.DeepEqual(enum, want) {
+		t.Errorf("detail enum = %v, want %v", enum, want)
+	}
+	if detail["default"] != DetailPartial {
+		t.Errorf("detail default = %v, want %q", detail["default"], DetailPartial)
+	}
+	// detail stays optional: the per-ticket required set is unchanged.
+	if req := objSchemaRequired(getSchema()); !reflect.DeepEqual(req, []string{"id", "board"}) {
+		t.Errorf("getSchema required = %v, want [id board]", req)
 	}
 }
 

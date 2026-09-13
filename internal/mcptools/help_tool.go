@@ -16,7 +16,11 @@ const helpDoc = `# hermes-kanban MCP — usage
 MCP tools for a Hermes kanban board:
 - board_list      orient: boards + per-status task counts
 - ticket_list     summary view; filters: status[], assignee, limit (max 50)
-- ticket_get      full detail (truncated); call when list summaries are thin
+- ticket_get      full detail; detail=partial (default) applies the bounded
+    sizes below, detail=full returns COMPLETE comment bodies and ticket
+    body. Use full whenever you must read a long-form comment verbatim —
+    a steer, a revision comment, a review verdict — because partial clips
+    every comment body and the clipped tail is usually the payload.
 - ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
     newer than since_event_id or empty on timeout (default 120s, max 15m).
     If the ticket has already left 'blocked' (verdict landed), returns
@@ -55,8 +59,16 @@ Lifecycle facts:
   instead of the review path. review_tier=LOW completes direct to done;
   MEDIUM/HIGH default to review-gated (MCP_COMPLETE_MODE=done overrides).
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
-  8 KB, ticket_events 6 KB, review_queue 8 KB) — they are summaries; use
-  ticket_get for depth.
+  8 KB partial / 32 KB full, ticket_events 6 KB, review_queue 8 KB) — they
+  are summaries; use ticket_get for depth.
+- Truncation is ALWAYS reported: a clipped field carries an inline
+  "…(N more)" marker plus its flag (truncated.body / truncated.comments),
+  clipped comments carry a per-comment truncated flag, and
+  comments_total/comments_returned/comments_dropped say exactly how much
+  of the thread you received. When the budget is tight the OLDEST comments
+  are dropped first, so the newest — the live review thread — survive.
+  Never treat a partial result as complete, and never re-clip a payload
+  yourself on the assumption that the bridge already did.
 - REST completion in done mode carries created_cards (kernel-verified;
   phantom ids get a 400 naming the offenders).
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the

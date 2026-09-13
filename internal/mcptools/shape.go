@@ -27,6 +27,13 @@ const (
 	// even on a maximally oversized source ticket.
 	MaxTicketGetOutputBytes = 8 * 1024
 
+	// MaxTicketGetFullOutputBytes caps the marshalled ticket_get result
+	// in full detail mode. Full mode is an explicit opt-in: the caller
+	// asked for complete content, so the budget is larger than partial's
+	// — but it stays bounded, because no single call may push an
+	// unbounded ticket into the caller's context.
+	MaxTicketGetFullOutputBytes = 32 * 1024
+
 	// MaxBlockedReasonChars truncates the blocked_reason surfaced in
 	// list output.
 	MaxBlockedReasonChars = 120
@@ -49,6 +56,18 @@ const (
 	// MaxCommentsReturned keeps only the last N comments in get output.
 	MaxCommentsReturned = 10
 
+	// MaxCommentsFullReturned is the comment window in full detail mode.
+	// Full mode exists to make long-form comments readable, so its window
+	// is wider than partial's; the size budget still governs, dropping
+	// the oldest comments first.
+	MaxCommentsFullReturned = 50
+
+	// MinCommentRunes is the floor a clipped comment body is reduced to
+	// before the fitter stops trying. Below this a comment carries no
+	// usable meaning, so the honest outcome is an explicit oversized-
+	// payload error rather than a symbol soup.
+	MinCommentRunes = 120
+
 	// MaxEventsReturned keeps only the last N events in get output.
 	MaxEventsReturned = 5
 
@@ -64,6 +83,24 @@ const (
 	// OmittedMarkerFmt is the inline marker appended by truncateWithMarker;
 	// the %d is the number of runes omitted from the source.
 	OmittedMarkerFmt = "…(%d more)"
+
+	// MarkerHeadroom is the worst-case rune length of an omission marker:
+	// OmittedMarkerFmt's fixed part plus the longest decimal an int can
+	// print. The shrinkers reserve this much before clipping, so the
+	// marker they add cannot push the payload back over budget.
+	// Over-reserving is free (the loop converges); under-reserving is not.
+	MarkerHeadroom = 32
+)
+
+// ticket_get detail modes. Partial is the default and keeps the bounded
+// caps, tuned for scanning and for context economy. Full is an explicit
+// opt-in that returns complete comment and body text, for callers reading
+// long-form content — revision comments and review verdicts — that
+// partial mode clips. Truncation is reported in every mode: no caller
+// ever has to guess whether what it received was complete.
+const (
+	DetailPartial = "partial"
+	DetailFull    = "full"
 )
 
 // ValidStatuses is the full set of statuses a task can take, in the order

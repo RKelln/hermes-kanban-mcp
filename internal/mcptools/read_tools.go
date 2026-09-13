@@ -40,11 +40,16 @@ type TicketListItem struct {
 	BlockReason string `json:"block_reason,omitempty"`
 }
 
-// TicketListOut is the ticket_list success projection.
+// TicketListOut is the ticket_list success projection. All three counts
+// are reported so a windowed result is legible: TotalMatched is what the
+// filters matched, Returned is what this call carried, and Truncated
+// marks that the difference is due to the size budget rather than a
+// filter.
 type TicketListOut struct {
 	Board        string           `json:"board"`
 	TotalMatched int              `json:"total_matched"`
 	Returned     int              `json:"returned"`
+	Truncated    bool             `json:"truncated,omitempty"`
 	Tickets      []TicketListItem `json:"tickets"`
 }
 
@@ -115,6 +120,14 @@ func (s *Server) TicketList(ctx context.Context, in TicketListInput) *ToolResult
 	}
 
 	out := TicketListOut{Board: board, TotalMatched: total, Returned: len(matched), Tickets: matched}
+	// Drop from the tail (the lowest-priority columns sort last) rather
+	// than letting renderResult damage the payload: every drop is counted
+	// in Returned vs TotalMatched and flagged.
+	for len(out.Tickets) > 0 && resultBytes(out) > MaxTicketListOutputBytes {
+		out.Tickets = out.Tickets[:len(out.Tickets)-1]
+		out.Returned = len(out.Tickets)
+		out.Truncated = true
+	}
 	return renderResult(MaxTicketListOutputBytes, false, out)
 }
 
@@ -130,43 +143,57 @@ func containsStatus(list []string, s string) bool {
 // --- ticket_get ---
 
 // TicketGetInput is the ticket_get tool input. Board and ID are both
-// required.
+// required; Detail selects the retrieval mode (empty = partial).
 type TicketGetInput struct {
 	Board string `json:"board"`
 	ID    string `json:"id"`
+	// Detail is the retrieval mode: DetailPartial (the default) applies
+	// the bounded comment/body caps, DetailFull returns complete comment
+	// and body text for callers reading long-form content. Any other
+	// value is rejected rather than silently treated as partial.
+	Detail string `json:"detail"`
 }
 
-// CommentOut is the truncated comment projection in get output.
+// CommentOut is the comment projection in get output. Body carries an
+// inline "…(N more)" marker when clipped, and Truncated is the
+// machine-readable form of the same fact so no clip is ever silent.
 type CommentOut struct {
-	Author string `json:"author"`
-	Body   string `json:"body"`
+	Author    string `json:"author"`
+	Body      string `json:"body"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
-// TicketGetOut is the ticket_get success projection. Body and comments
-// are truncated; heavy sibling arrays (events, attachments, runs,
-// warnings) are surfaced as counts plus the truncated flags, keeping the
-// result inside the hard 8 KB budget.
+// TicketGetOut is the ticket_get success projection. Fields are
+// truncated according to the requested detail mode; heavy sibling arrays
+// (events, attachments, runs, warnings) are surfaced as counts plus the
+// truncation flags, keeping the result inside the mode's byte budget.
+// CommentsTotal/CommentsReturned/CommentsDropped make any loss of the
+// comment thread legible to the caller instead of silent.
 type TicketGetOut struct {
-	ID             string          `json:"id"`
-	Title          string          `json:"title"`
-	Status         string          `json:"status"`
-	Assignee       string          `json:"assignee,omitempty"`
-	Priority       int             `json:"priority"`
-	ClaimExpires   int64           `json:"claim_expires,omitempty"`
-	BlockReason    string          `json:"block_reason,omitempty"`
-	BlockKind      string          `json:"block_kind,omitempty"`
-	LatestSummary  string          `json:"latest_summary,omitempty"`
-	LastRunSummary string          `json:"last_run_summary,omitempty"`
-	BranchName     string          `json:"branch_name,omitempty"`
-	Body           string          `json:"body,omitempty"`
-	Comments       []CommentOut    `json:"comments,omitempty"`
-	EventsCount    int             `json:"events_count"`
-	RunsCount      int             `json:"runs_count"`
-	AttachmentsN   int             `json:"attachments_count"`
-	LinksParents   int             `json:"links_parents"`
-	LinksChildren  int             `json:"links_children"`
-	WarningsCount  int             `json:"warnings_count"`
-	Truncated      TruncationFlags `json:"truncated"`
+	ID               string          `json:"id"`
+	Title            string          `json:"title"`
+	Status           string          `json:"status"`
+	Assignee         string          `json:"assignee,omitempty"`
+	Priority         int             `json:"priority"`
+	ClaimExpires     int64           `json:"claim_expires,omitempty"`
+	BlockReason      string          `json:"block_reason,omitempty"`
+	BlockKind        string          `json:"block_kind,omitempty"`
+	LatestSummary    string          `json:"latest_summary,omitempty"`
+	LastRunSummary   string          `json:"last_run_summary,omitempty"`
+	BranchName       string          `json:"branch_name,omitempty"`
+	Body             string          `json:"body,omitempty"`
+	Comments         []CommentOut    `json:"comments,omitempty"`
+	CommentsTotal    int             `json:"comments_total"`
+	CommentsReturned int             `json:"comments_returned"`
+	CommentsDropped  int             `json:"comments_dropped,omitempty"`
+	EventsCount      int             `json:"events_count"`
+	RunsCount        int             `json:"runs_count"`
+	AttachmentsN     int             `json:"attachments_count"`
+	LinksParents     int             `json:"links_parents"`
+	LinksChildren    int             `json:"links_children"`
+	WarningsCount    int             `json:"warnings_count"`
+	Detail           string          `json:"detail"`
+	Truncated        TruncationFlags `json:"truncated"`
 }
 
 // TruncationFlags reports which fields were clipped so the calling model
@@ -212,6 +239,10 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	if err := ensureKnownBoard(ctx, board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
 	}
+	proj, ok := projectionFor(in.Detail)
+	if !ok {
+		return ErrorResult("invalid_input: unknown detail %q (want %q or %q)", in.Detail, DetailPartial, DetailFull)
+	}
 
 	var env taskDetailEnvelope
 	if err := s.doJSON(ctx, http.MethodGet, "/tasks/"+url.PathEscape(in.ID), url.Values{"board": []string{board}}, nil, &env); err != nil {
@@ -238,6 +269,7 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		RunsCount:     len(env.Runs),
 		AttachmentsN:  len(env.Attachments),
 		WarningsCount: len(env.Warnings),
+		Detail:        proj.mode,
 	}
 	// The REST API does not carry block_reason on the task dict — block
 	// reasons live in the run summaries (e.g. "review-required: ...").
@@ -250,26 +282,226 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		out.LinksParents = len(env.Links.Parents)
 		out.LinksChildren = len(env.Links.Children)
 	}
-	// Body truncated with an explicit marker.
-	if t.Body != "" {
-		body, cut := truncateWithMarkerFlag(t.Body, MaxTicketBodyChars)
-		out.Body = body
-		out.Truncated.Body = cut
+
+	// Body and comments are projected under the mode's policy: partial
+	// applies the bounded caps, full returns complete text. The fitter
+	// then guarantees the rendered payload fits the mode's budget, and
+	// reports every drop and clip — nothing is ever clipped silently.
+	// The fitter writes the projected body, comments, counts and
+	// truncation flags into out; its return value is for callers that
+	// want the fit summary directly (tests).
+	fitGetProjection(&out, t.Body, env.Comments, proj)
+
+	return renderResult(proj.budget, false, out)
+}
+
+// commentFit reports how a ticket's comment thread was projected into the
+// get-result budget.
+type commentFit struct {
+	Total   int  // comments the backend served
+	Dropped int  // comments omitted (window or budget), oldest first
+	Clipped bool // a returned comment body was clipped
+}
+
+// getProjection is the mode-derived sizing policy for one ticket_get
+// call: which caps apply and how large the rendered envelope may be.
+type getProjection struct {
+	mode          string
+	budget        int // byte budget for the rendered tool result
+	commentCap    int // per-comment rune cap (0 = complete)
+	commentWindow int // max comments returned
+	bodyCap       int // ticket body rune cap (0 = complete)
+}
+
+// projectionFor maps a ticket_get detail mode onto its sizing policy.
+// An unknown mode is rejected (ok = false) instead of being silently
+// treated as partial, so a typo cannot quietly cost the caller content.
+func projectionFor(detail string) (getProjection, bool) {
+	switch detail {
+	case "", DetailPartial:
+		return getProjection{
+			mode:          DetailPartial,
+			budget:        MaxTicketGetOutputBytes,
+			commentCap:    MaxCommentBodyChars,
+			commentWindow: MaxCommentsReturned,
+			bodyCap:       MaxTicketBodyChars,
+		}, true
+	case DetailFull:
+		return getProjection{
+			mode:          DetailFull,
+			budget:        MaxTicketGetFullOutputBytes,
+			commentCap:    0,
+			commentWindow: MaxCommentsFullReturned,
+			bodyCap:       0,
+		}, true
 	}
-	// Comments: newest-last per the API ordering; keep the last N, each
-	// body truncated with a marker.
-	comments := env.Comments
-	if len(comments) > MaxCommentsReturned {
-		comments = comments[len(comments)-MaxCommentsReturned:]
-		out.Truncated.Comments = true
+	return getProjection{}, false
+}
+
+// getComment is the working projection of one source comment: its
+// original body plus the rune cap currently applied (0 = uncapped).
+// Clipping always re-derives from the original body, so the inline
+// "…(N more)" marker reports the true number of omitted runes at every
+// stage and markers can never layer.
+type getComment struct {
+	author string
+	orig   string
+	cap    int
+}
+
+func (c getComment) render() CommentOut {
+	body, clipped := c.orig, false
+	if c.cap > 0 {
+		body, clipped = truncateWithMarkerFlag(c.orig, c.cap)
 	}
-	for _, c := range comments {
-		body, cut := truncateWithMarkerFlag(c.Body, MaxCommentBodyChars)
-		out.Comments = append(out.Comments, CommentOut{Author: c.Author, Body: body})
-		out.Truncated.Comments = out.Truncated.Comments || cut
+	return CommentOut{Author: c.author, Body: body, Truncated: clipped}
+}
+
+// bodyProjection is the same idea for the ticket body.
+type bodyProjection struct {
+	orig string
+	cap  int // 0 = complete
+}
+
+func (b bodyProjection) render() (string, bool) {
+	if b.cap <= 0 {
+		return b.orig, false
+	}
+	return truncateWithMarkerFlag(b.orig, b.cap)
+}
+
+// current is render()'s text, for size arithmetic.
+func (b bodyProjection) current() string {
+	s, _ := b.render()
+	return s
+}
+
+// fitGetProjection fills out's Body and Comments under proj's caps, then
+// shrinks the payload until the rendered result fits proj.budget. It
+// enforces the two rules the read path must never break:
+//
+//  1. The newest comments survive. Review verdicts, steers and revision
+//     comments live at the tail of the thread, so the fitter drops the
+//     OLDEST comments first and clips the newest only when a single
+//     comment cannot fit on its own.
+//  2. No loss is silent. Every drop and clip is counted here and flagged
+//     on the result; the body is clipped only after the comment thread
+//     has been reduced as far as it can go.
+func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment, proj getProjection) commentFit {
+	fit := commentFit{Total: len(comments)}
+	bp := bodyProjection{orig: body, cap: proj.bodyCap}
+	rendered, clipped := bp.render()
+	out.Body, out.Truncated.Body = rendered, clipped
+
+	source := comments
+	if proj.commentWindow > 0 && len(source) > proj.commentWindow {
+		fit.Dropped += len(source) - proj.commentWindow
+		source = source[len(source)-proj.commentWindow:]
+	}
+	live := make([]getComment, 0, len(source))
+	for _, c := range source {
+		live = append(live, getComment{author: c.Author, orig: c.Body, cap: proj.commentCap})
+	}
+	// render writes the projection AND its counts/flags. It must do both
+	// before any size measurement: the flags themselves occupy envelope
+	// bytes, so a payload fitted without them can land a few bytes over
+	// the budget the moment they are set.
+	render := func() {
+		rendered := make([]CommentOut, 0, len(live))
+		for _, c := range live {
+			oc := c.render()
+			if oc.Truncated {
+				fit.Clipped = true
+			}
+			rendered = append(rendered, oc)
+		}
+		out.Comments = rendered
+		out.CommentsTotal = fit.Total
+		out.CommentsReturned = len(rendered)
+		out.CommentsDropped = fit.Dropped
+		out.Truncated.Comments = fit.Clipped || fit.Dropped > 0
 	}
 
-	return renderResult(MaxTicketGetOutputBytes, false, out)
+	for {
+		render()
+		if resultBytes(out) <= proj.budget {
+			break
+		}
+		if len(live) > 1 {
+			// Over budget: drop the oldest comment, keep the tail.
+			live = live[1:]
+			fit.Dropped++
+			continue
+		}
+		if len(live) == 1 && shrinkComment(&live[0], out, proj.budget) {
+			continue
+		}
+		if shrinkBody(&bp, out, proj.budget) {
+			out.Body, out.Truncated.Body = bp.render()
+			continue
+		}
+		// Nothing left to reduce: renderResult reports the oversize
+		// rather than clipping silently.
+		break
+	}
+
+	render() // idempotent: guarantees counts/flags match the final text
+	return fit
+}
+
+// shrinkComment reduces the cap on c until out fits in budget, always
+// re-deriving the rendered body from the original comment. It returns
+// false when c is not reducible further (or already fits).
+func shrinkComment(c *getComment, out *TicketGetOut, budget int) bool {
+	current := len([]rune(c.render().Body))
+	if current <= MinCommentRunes {
+		return false
+	}
+	size := resultBytes(out)
+	if size <= budget {
+		return false
+	}
+	// Keep enough to clear the overage, less headroom for the marker's
+	// own runes; fall back to a proportional cut when the overage alone
+	// would not change the length (multi-byte runes, JSON escaping).
+	next := current - (size - budget) - MarkerHeadroom
+	if next >= current {
+		next = current - current/4
+	}
+	if next < MinCommentRunes {
+		next = MinCommentRunes
+	}
+	if next >= current {
+		return false
+	}
+	c.cap = next
+	return true
+}
+
+// shrinkBody reduces the body cap until out fits in budget, re-deriving
+// from the original body so markers never layer. It returns false when
+// the body is already at the floor (or already fits).
+func shrinkBody(b *bodyProjection, out *TicketGetOut, budget int) bool {
+	current := len([]rune(b.current()))
+	if current <= MinCommentRunes {
+		return false
+	}
+	size := resultBytes(out)
+	if size <= budget {
+		return false
+	}
+	next := current - (size - budget) - MarkerHeadroom
+	if next >= current {
+		next = current - current/4
+	}
+	if next < MinCommentRunes {
+		next = MinCommentRunes
+	}
+	if next >= current {
+		return false
+	}
+	b.cap = next
+	return true
 }
 
 // truncateWithMarkerFlag is truncateWithMarker plus a "was anything
@@ -281,27 +513,45 @@ func truncateWithMarkerFlag(s string, max int) (string, bool) {
 	return truncateWithMarker(s, max), true
 }
 
-// renderResult renders v as a ToolResult text under a byte budget that
-// may exceed the default 2 KB write-tool cap (read tools have 6 KB /
-// 8 KB budgets). It reuses the shrink-to-fit loop from buildResult.
+// renderResult renders v as a ToolResult under a byte budget that may
+// exceed the default 2 KB write-tool cap (read tools have 6 KB / 8 KB /
+// 32 KB budgets).
+//
+// It never clips the payload to fit. The former shrink-to-fit loop
+// chopped the marshalled JSON to 75% repeatedly, which (a) emits invalid
+// JSON, so the client cannot parse the result at all, (b) destroys
+// whatever was encoded last — for ticket_get that is the newest comments,
+// i.e. the review thread — and (c) set no flag, so the loss was invisible
+// to the caller. Callers size their projection to the budget instead
+// (see fitGetProjection); when a value still does not fit, the caller
+// gets an explicit error naming the overage rather than a silently
+// damaged payload.
 func renderResult(budget int, isErr bool, v any) *ToolResult {
-	b, err := json.Marshal(v)
+	text, err := json.Marshal(v)
 	if err != nil {
 		return ErrorResult("internal error: %v", err)
 	}
-	tr := &ToolResult{Content: []ContentPart{{Type: "text", Text: string(b)}}}
+	tr := &ToolResult{Content: []ContentPart{{Type: "text", Text: string(text)}}}
 	if isErr {
 		tr.IsError = true
 	}
-	for {
-		rb, err := json.Marshal(tr)
-		if err == nil && len(rb) <= budget {
-			return tr
-		}
-		runes := []rune(tr.Content[0].Text)
-		if len(runes) <= 32 {
-			return tr
-		}
-		tr.Content[0].Text = string(runes[:len(runes)*3/4])
+	if size := resultBytes(v); size > budget {
+		return ErrorResult("internal error: shaped result is %d bytes, over the %d-byte budget; this is a projection sizing bug, not a client error", size, budget)
 	}
+	return tr
+}
+
+// resultBytes returns the rendered size of v as a tool result — the exact
+// measure the budgets are defined against, including the content envelope
+// and any JSON escaping the payload's characters incur.
+func resultBytes(v any) int {
+	text, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	b, err := json.Marshal(ToolResult{Content: []ContentPart{{Type: "text", Text: string(text)}}})
+	if err != nil {
+		return 0
+	}
+	return len(b)
 }

@@ -8,7 +8,7 @@
 
 0. **Always pass `board` and `id`** — all board-taking tools require `board` (omitting it is rejected, never defaulted) and the per-ticket tools require `id` too. Capture the `id` from the `ticket_create` response and reuse it verbatim.
 1. **Orient** — `board_list` first. Then `ticket_list` (status filters; summaries only).
-2. **Read** — `ticket_get` for full detail on a ticket you'll touch (bodies are truncated; use it when you need more).
+2. **Read** — `ticket_get` for full detail on a ticket you'll touch. **Pass `detail: "full"` whenever you must read a comment verbatim** (a steer, a revision comment, a review verdict): the default `partial` mode clips every comment body at 500 runes, and the clipped tail is usually the payload (the design decision, the requested change, the commit ref). Keep `partial` for scanning and for reading the ticket's own body/metadata.
 3. **Claim before work** — `ticket_claim` (`ready → running`, TTL ~15m). Never edit without claiming. Re-claim if it expired.
 4. **Track** — `ticket_comment` for decisions/context as you work.
 5. **Finish** — `ticket_complete` with a summary. **Review-gated by default**: blocks with `review-required:` for a human. `review_tier: "LOW"` (or `MCP_COMPLETE_MODE=done`) completes to done; `MEDIUM`/`HIGH` stay review-gated. Only use done when the task says done is fine. Push + record repo/branch/commit first. Done mode accepts `created_cards` (child ticket ids you created; the kernel verifies them, so phantom ids fail with a 400 naming the offenders).
@@ -18,6 +18,7 @@
 ## Rules
 
 - **Never touch the live Hermes install tree** (`~/.hermes`) — work in your repo/worktree.
+- **Trust the truncation flags, don't guess.** Every `ticket_get` result reports what it lost: `truncated.body` / `truncated.comments`, a per-comment `truncated` flag, inline `…(N more)` markers, and `comments_total` / `comments_returned` / `comments_dropped`. If any of those is set and you needed the whole thing, re-read with `detail: "full"` — do not reconstruct clipped text, and do not assume an unflagged result was cut.
 - **Ask before deploy/publish** — block with `ticket_block(reason="approval-required: ...")` and wait for the human.
 - **Don't create tickets for yourself** — create follow-ups assigned to the right lane, or comment on the goal.
 - Ticket lifecycle details: claims are kernel-enforced (a ticket with an open parent stays `todo`; gates are wired as parents). Full docs: call the MCP server's help tool if present, or see the repo's README/design docs.
