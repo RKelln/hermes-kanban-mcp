@@ -560,15 +560,37 @@ def ledger_append(board: str, tid: str, verdict: str, status_after: str, fp: str
 # --------------------------------------------------------------------------
 # Board scanning
 # --------------------------------------------------------------------------
+def parse_tool_json(text: str, what: str) -> dict:
+    """Parse a tool result, turning a non-JSON payload into McpError.
+
+    Expected failures come back from the bridge as ERROR TEXT, not JSON:
+    'not found: ticket <id> on board <slug>', 'oversized ticket ...', or
+    'unavailable: decode kanban backend response: ...'. Callers of these
+    helpers catch McpError and warn+continue, so parsing MUST raise that —
+    a bare json.JSONDecodeError escapes main() and aborts the whole tick as
+    'BROKEN' (exit 1), and because the candidate order is stable, one
+    permanently-failing ticket would block every later candidate on every
+    tick. That is reachable exactly for the giant-handoff tickets this
+    pipeline exists to review.
+    """
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise McpError("%s: tool returned non-JSON (%s): %.200s" % (what, exc, text))
+    if not isinstance(data, dict):
+        raise McpError("%s: unexpected payload shape: %.200s" % (what, text))
+    return data
+
+
 def all_boards(mcp: McpClient) -> list:
     text = mcp.call("board_list", {"include_archived": False})
-    data = json.loads(text)
+    data = parse_tool_json(text, "board_list")
     return [b.get("slug", "") for b in data.get("boards", []) if b.get("slug")]
 
 
 def blocked_tickets(mcp: McpClient, board: str) -> list:
     text = mcp.call("ticket_list", {"board": board, "status": ["blocked"], "limit": 50})
-    data = json.loads(text)
+    data = parse_tool_json(text, "ticket_list %s" % board)
     return data.get("tickets", [])
 
 
@@ -588,7 +610,7 @@ def ticket_detail(mcp: McpClient, board: str, tid: str) -> dict:
     flags are surfaced by detail_truncation_warning().
     """
     text = mcp.call("ticket_get", {"board": board, "id": tid, "detail": "full"})
-    return json.loads(text)
+    return parse_tool_json(text, "ticket_get %s/%s" % (board, tid))
 
 
 def bridge_detail_support(detail: dict) -> str:

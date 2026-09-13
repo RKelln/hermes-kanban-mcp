@@ -601,6 +601,96 @@ func TestTicketGetOversizedFieldsReportHonestly(t *testing.T) {
 	}
 }
 
+// TestTicketGetAnnouncesTitleClip covers the dead-flag bug the round-3
+// review found: the title was clipped at 120 runes with no marker and no
+// flag, while TruncationFlags.Titles was advertised and never assigned
+// anywhere in the repo. A cap that cannot be observed is a silent cap.
+func TestTicketGetAnnouncesTitleClip(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"`+testBoard+`","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		env := map[string]any{
+			"task": map[string]any{
+				"id": "t_title", "title": repeatBody("long title ", 400), "status": "ready",
+			},
+			"comments": []any{}, "events": []any{}, "runs": []any{},
+		}
+		b, err := json.Marshal(env)
+		if err != nil {
+			t.Errorf("marshal fixture: %v", err)
+			return
+		}
+		_, _ = w.Write(b)
+	}))
+	defer fake.Close()
+
+	s := NewServer(fake.URL, testBoard)
+	SetBoardLister(s)
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_title", Board: testBoard})
+	if res == nil || res.IsError {
+		t.Fatalf("TicketGet error result: %+v", res)
+	}
+	var out TicketGetOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len([]rune(out.Title)) > MaxTitleChars {
+		t.Errorf("title is %d runes, over the %d-rune cap", len([]rune(out.Title)), MaxTitleChars)
+	}
+	if !out.Truncated.Titles {
+		t.Error("a clipped title must set truncated.titles — it was the dead flag")
+	}
+	if !strings.Contains(out.Title, "more)") {
+		t.Errorf("clipped title carries no inline marker: %q", out.Title)
+	}
+}
+
+// TestTicketListAnnouncesTitleClip is the same contract for the list view:
+// the list has no titles flag, so the marker in the text is the only
+// announcement and it must be there.
+func TestTicketListAnnouncesTitleClip(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"`+testBoard+`","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		env := map[string]any{"columns": []any{map[string]any{
+			"name": "ready",
+			"tasks": []any{map[string]any{
+				"id": "t_title", "title": repeatBody("long title ", 400), "status": "ready",
+			}},
+		}}}
+		b, err := json.Marshal(env)
+		if err != nil {
+			t.Errorf("marshal fixture: %v", err)
+			return
+		}
+		_, _ = w.Write(b)
+	}))
+	defer fake.Close()
+
+	s := NewServer(fake.URL, testBoard)
+	SetBoardLister(s)
+	res := s.TicketList(context.Background(), TicketListInput{Board: testBoard})
+	if res == nil || res.IsError {
+		t.Fatalf("TicketList error result: %+v", res)
+	}
+	var out TicketListOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(out.Tickets) != 1 {
+		t.Fatalf("returned %d tickets, want 1", len(out.Tickets))
+	}
+	if !strings.Contains(out.Tickets[0].Title, "more)") {
+		t.Errorf("list title clipped without a marker: %q", out.Tickets[0].Title)
+	}
+}
+
 // TestTicketListDropsTailToFitBudget proves ticket_list also stopped
 // relying on the silent chop: an oversized list drops its lowest-priority
 // tail, reports the drop, and still parses.

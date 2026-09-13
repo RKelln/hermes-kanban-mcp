@@ -52,6 +52,12 @@ const (
 	// projection (and would blow the whole envelope on its own).
 	MaxBranchNameChars = 256
 
+	// MaxTitleChars truncates a ticket title in read output. Titles are
+	// identity, not payload, so the cap is small — but it is announced
+	// (marker + truncated.titles) like every other clip, because a silent
+	// cap and a dead flag are worse than no cap.
+	MaxTitleChars = 120
+
 	// MaxTicketBodyChars truncates the ticket body in get output.
 	MaxTicketBodyChars = 4000
 

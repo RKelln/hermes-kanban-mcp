@@ -44,7 +44,9 @@ type TicketListItem struct {
 // are reported so a windowed result is legible: TotalMatched is what the
 // filters matched, Returned is what this call carried, and Truncated
 // marks that the difference is due to the size budget rather than a
-// filter.
+// filter. A clipped TITLE is announced in the text itself (an inline
+// "…(N more)" marker) rather than by this flag, which is reserved for
+// dropped rows.
 type TicketListOut struct {
 	Board        string           `json:"board"`
 	TotalMatched int              `json:"total_matched"`
@@ -103,7 +105,7 @@ func (s *Server) TicketList(ctx context.Context, in TicketListInput) *ToolResult
 			}
 			matched = append(matched, TicketListItem{
 				ID:          t.ID,
-				Title:       truncateToRunes(t.Title, 120),
+				Title:       truncateWithMarker(t.Title, MaxTitleChars),
 				Status:      t.Status,
 				Assignee:    t.Assignee,
 				Priority:    t.Priority,
@@ -259,7 +261,6 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	t := env.Task
 	out := TicketGetOut{
 		ID:            t.ID,
-		Title:         truncateToRunes(t.Title, 120),
 		Status:        t.Status,
 		Assignee:      t.Assignee,
 		Priority:      t.Priority,
@@ -286,7 +287,10 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	}
 	// Identity fields are capped too, and the caps are ANNOUNCED: an
 	// uncapped branch_name would be the one field that could blow the
-	// envelope on its own, with nothing below to shrink it back.
+	// envelope on its own, with nothing below to shrink it back, and a
+	// silently clipped title is the dead-flag bug this invariant exists to
+	// prevent.
+	out.Title, out.Truncated.Titles = truncateWithMarkerFlag(t.Title, MaxTitleChars)
 	out.BranchName, out.Truncated.Refs = truncateWithMarkerFlag(t.BranchName, MaxBranchNameChars)
 
 	// Body and comments are projected under the mode's policy: partial
