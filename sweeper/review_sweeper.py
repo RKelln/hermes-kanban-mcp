@@ -629,9 +629,10 @@ def ticket_detail(mcp: McpClient, board: str, tid: str) -> dict:
     Uses detail="full" rather than the partial default: this detail feeds both
     the branch/repo/sha extractors and the reviewer prompt, and the refs and
     the requested changes routinely sit at the TAIL of a long handoff comment.
-    Partial mode clips every comment body at 500 runes, which is how a review
-    round was lost (2026-08-08, t_c8c3a817: a 1,711-char review comment
-    arrived cut mid-word and the HIGH finding was missed).
+    Partial mode clips every comment body at the bridge's partial cap (500
+    runes until 2026-09-13, now 1500), which is how a review round was lost
+    (2026-08-08, t_c8c3a817: a 1,711-char review comment arrived cut
+    mid-word and the HIGH finding was missed).
 
     The bridge must be new enough to know the parameter — an older build
     silently ignores it, leaving the clip in place while the code looks fixed.
@@ -647,16 +648,18 @@ def bridge_detail_support(detail: dict) -> str:
 
     The response echoes `detail` when the mode was applied, so its absence
     means the running bridge predates the detail modes and ignored the
-    argument: comment text is still clipped at 500 runes even though the
-    caller asked for full. That is a deployment gap, not a code gap, and it
-    must be loud — otherwise the reviewer prompt is silently built from
-    partial text while an operator believes the widening shipped.
+    argument: comment text is still clipped (that build clipped at 500
+    runes) even though the caller asked for full. That is a deployment gap,
+    not a code gap, and it must be loud — otherwise the reviewer prompt is
+    silently built from partial text while an operator believes the
+    widening shipped.
     """
     if detail.get("detail"):
         return ""
     return ("bridge ignored detail=full (no 'detail' key echoed back): the running "
             "kanban-mcp predates the detail modes, so comment text may still be "
-            "clipped at 500 runes — redeploy the bridge for this to take effect")
+            "clipped (500 runes in that build) — redeploy the bridge for this "
+            "to take effect")
 
 
 def detail_truncation_warning(detail: dict) -> str:

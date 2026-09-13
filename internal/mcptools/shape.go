@@ -60,7 +60,7 @@ const (
 
 	// MaxTicketBodyChars truncates the ticket body in get output. Validated
 	// by the same measurement as MaxCommentBodyChars (2026-09-13): ticket
-	// bodies run p50 1818, p90 3548, p95 3720 runes, and only 20 of 467
+	// bodies run p50 1782, p90 3548, p95 3717 runes, and only 20 of 470
 	// exceed 4000 — so this cap covers ~96% of bodies whole and did not
 	// need changing.
 	MaxTicketBodyChars = 4000
@@ -68,19 +68,31 @@ const (
 	// MaxCommentBodyChars truncates each returned comment body in partial
 	// mode, marker included.
 	//
-	// DATA-DERIVED, not a round number. Measured over 630 comments across
-	// 250 tickets on this host's boards (scripts/comment-length-stats.py,
-	// 2026-09-13): comment lengths run p50 552, p75 1238, p90 2536,
-	// p99 5264, max 15307 runes. At the previous cap of 500 only 47.5% of
+	// DATA-DERIVED, not a round number. Measured over 631 comments across
+	// 251 tickets on this host's boards (scripts/comment-length-stats.py,
+	// 2026-09-13): comment lengths run p50 553, p75 1236, p90 2535,
+	// p99 5263, max 15307 runes. At the previous cap of 500 only 47.4% of
 	// comments arrived whole — the MEDIAN comment was being clipped, which
 	// is how a 2,445-rune steer reached a remote agent as 488 runes plus
-	// "…(1957 more)". 1500 covers 79.4% whole, and four complete comments
-	// still fit beside the fixed fields in the 8 KB partial budget; longer
-	// threads are handled by dropping the OLDEST comments (newest survive)
-	// rather than by shredding every one of them. The budget is unchanged —
-	// this spends the same bytes on fewer, complete comments instead of
-	// many clipped ones. Re-derive with scripts/comment-length-stats.py
-	// when the corpus has grown.
+	// "…(1957 more)". 1500 is the smallest round cap past p75 and covers
+	// 79.4% whole.
+	//
+	// Consequence for the window, measured rather than assumed: TWO TO THREE
+	// complete comments fit the 8 KB partial budget once the ticket's own
+	// body and summary fields are paid for (four only when those are small).
+	// Summaries are the variable: each run summary is itself capped at
+	// MaxRunSummaryChars=1024, per-ticket summary bytes run p50 508 / p90
+	// 1024 / max 2733, and bodies run p50 1782. So the comment count per
+	// response is not fixed. Past the budget the OLDEST comments are dropped
+	// and the newest survive whole, rather than every comment being
+	// shredded — and every loss is flagged. The budget is unchanged: this
+	// spends the same bytes on fewer, complete comments instead of many
+	// clipped ones.
+	//
+	// These figures DRIFT as the corpus grows (a second measurement minutes
+	// after the first had already moved p50 552 -> 553). Re-derive rather
+	// than re-guess: scripts/comment-length-stats.py, whose docstring
+	// records the snapshot the numbers came from.
 	MaxCommentBodyChars = 1500
 
 	// MaxCommentsReturned keeps only the last N comments in get output.

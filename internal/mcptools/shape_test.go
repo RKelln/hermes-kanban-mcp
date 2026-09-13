@@ -324,8 +324,11 @@ func TestTaskOversizedFixtureShape(t *testing.T) {
 	if len(td.Task.Body) <= MaxTicketBodyChars {
 		t.Error("oversized fixture body must exceed MaxTicketBodyChars to exercise truncation")
 	}
-	// At least one comment body must exceed the comment cap so the
-	// truncateWithMarker path is exercised in get output.
+	// At least one comment body must exceed the comment cap, so this fixture
+	// stays a valid stand-in for an oversized SOURCE. Note what it does NOT
+	// do: it is consumed only here, as a shape check. The truncation paths
+	// themselves are exercised by ticket_get_detail_test.go, not by reading
+	// this file.
 	over := 0
 	for _, raw := range td.Comments {
 		var c struct {
