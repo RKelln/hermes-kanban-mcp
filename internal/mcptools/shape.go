@@ -46,6 +46,12 @@ const (
 	// for reviewers on hosts without the checkout.
 	MaxRunSummaryChars = 1024
 
+	// MaxBranchNameChars caps the branch_name identity field. Real branch
+	// names are short; this only guards against a garbage value from the
+	// backend, which would otherwise be the one unbounded field in the
+	// projection (and would blow the whole envelope on its own).
+	MaxBranchNameChars = 256
+
 	// MaxTicketBodyChars truncates the ticket body in get output.
 	MaxTicketBodyChars = 4000
 

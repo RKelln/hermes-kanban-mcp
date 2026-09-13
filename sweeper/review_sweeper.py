@@ -573,19 +573,39 @@ def blocked_tickets(mcp: McpClient, board: str) -> list:
 
 
 def ticket_detail(mcp: McpClient, board: str, tid: str) -> dict:
-    """Fetch one ticket for review, with COMPLETE comment text.
+    """Fetch one ticket for review, REQUESTING complete comment text.
 
     Uses detail="full" rather than the partial default: this detail feeds both
     the branch/repo/sha extractors and the reviewer prompt, and the refs and
     the requested changes routinely sit at the TAIL of a long handoff comment.
     Partial mode clips every comment body at 500 runes, which is how a review
     round was lost (2026-08-08, t_c8c3a817: a 1,711-char review comment
-    arrived cut mid-word and the HIGH finding was missed). The bridge still
-    flags any loss it has to make (truncated.*, comments_total/returned/
-    dropped) — callers must surface that; see detail_truncation_warning.
+    arrived cut mid-word and the HIGH finding was missed).
+
+    The bridge must be new enough to know the parameter — an older build
+    silently ignores it, leaving the clip in place while the code looks fixed.
+    Callers therefore check bridge_detail_support(); the bridge's own loss
+    flags are surfaced by detail_truncation_warning().
     """
     text = mcp.call("ticket_get", {"board": board, "id": tid, "detail": "full"})
     return json.loads(text)
+
+
+def bridge_detail_support(detail: dict) -> str:
+    """Warn when the bridge did not honour detail="full".
+
+    The response echoes `detail` when the mode was applied, so its absence
+    means the running bridge predates the detail modes and ignored the
+    argument: comment text is still clipped at 500 runes even though the
+    caller asked for full. That is a deployment gap, not a code gap, and it
+    must be loud — otherwise the reviewer prompt is silently built from
+    partial text while an operator believes the widening shipped.
+    """
+    if detail.get("detail"):
+        return ""
+    return ("bridge ignored detail=full (no 'detail' key echoed back): the running "
+            "kanban-mcp predates the detail modes, so comment text may still be "
+            "clipped at 500 runes — redeploy the bridge for this to take effect")
 
 
 def detail_truncation_warning(detail: dict) -> str:
@@ -1316,6 +1336,10 @@ def main(argv) -> int:
             if tw:
                 print("review-sweeper: warn: %s/%s: %s" % (board, tid, tw))
                 warnings.append("%s/%s: %s" % (board, tid, tw))
+            bw = bridge_detail_support(detail)
+            if bw:
+                print("review-sweeper: warn: %s/%s: %s" % (board, tid, bw))
+                warnings.append("%s/%s: %s" % (board, tid, bw))
             fp = block_fingerprint(detail)
             if ledger_has(board, tid, fp):
                 continue  # this block event already reviewed

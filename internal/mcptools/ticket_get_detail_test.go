@@ -87,9 +87,10 @@ func newGetBackend(t *testing.T, id, body string, cmts []kanban.Comment) *getBac
 	return be
 }
 
-// callGet runs ticket_get, asserting a non-error result with a payload
-// that parses as JSON and fits the budget the mode advertises.
-func callGet(t *testing.T, be *getBackend, in TicketGetInput) TicketGetOut {
+// callGetRaw runs ticket_get and returns the decoded projection plus the
+// exact rendered payload size, so tests can assert on budget utilisation
+// rather than only on content.
+func callGetRaw(t *testing.T, be *getBackend, in TicketGetInput) (TicketGetOut, int) {
 	t.Helper()
 	res := be.server.TicketGet(context.Background(), in)
 	if res == nil {
@@ -103,9 +104,22 @@ func callGet(t *testing.T, be *getBackend, in TicketGetInput) TicketGetOut {
 	if err := json.Unmarshal([]byte(text), &out); err != nil {
 		t.Fatalf("ticket_get payload is not valid JSON: %v\npayload: %.200s", err, text)
 	}
-	if n := len(text); n > MaxTicketGetFullOutputBytes {
-		t.Errorf("payload is %d bytes, over every mode budget", n)
+	// Report the size in the units the budget is defined in (the rendered
+	// tool result, envelope and escaping included) — len(text) alone
+	// understates it, because the JSON payload is itself escaped into the
+	// content envelope.
+	size := resultBytes(out)
+	if size > MaxTicketGetFullOutputBytes {
+		t.Errorf("payload renders to %d bytes, over every mode budget", size)
 	}
+	return out, size
+}
+
+// callGet runs ticket_get, asserting a non-error result with a payload
+// that parses as JSON and fits the budget the mode advertises.
+func callGet(t *testing.T, be *getBackend, in TicketGetInput) TicketGetOut {
+	t.Helper()
+	out, _ := callGetRaw(t, be, in)
 	return out
 }
 
@@ -434,6 +448,83 @@ func TestTicketGetBodyOverageDoesNotShredTheComment(t *testing.T) {
 			}
 			if n := len(out.Body); n >= len(tt.body) {
 				t.Errorf("body is %d bytes, want it reduced below the source %d", n, len(tt.body))
+			}
+			// The body must not be floored either: shrinking one field to
+			// MinFieldRunes while the other is intact is the over-shrink
+			// failure in its other form (review round 2).
+			if n := len([]rune(out.Body)); n <= MinFieldRunes {
+				t.Errorf("body floored to %d runes (%d bytes) with the budget far from spent", n, len(out.Body))
+			}
+		})
+	}
+}
+
+// TestTicketGetShrinkSharesBetweenComparableFields is the review-round-2
+// regression: with a body and a comment of comparable size, both must give
+// ground. The earlier policy picked one field and removed the whole overage
+// from it, so a 30,000-rune body was cut to ~2,359 runes while a 30,000-rune
+// comment was returned untouched — the same destruction F1 reported, moved
+// to the other field.
+func TestTicketGetShrinkSharesBetweenComparableFields(t *testing.T) {
+	const size = 30000
+	be := newGetBackend(t, "t_x1", repeatBody("body ", size),
+		comments([2]string{"hermes-agent", repeatBody("steer ", size)}))
+
+	out, payload := callGetRaw(t, be, TicketGetInput{ID: "t_x1", Board: testBoard, Detail: DetailFull})
+	bodyRunes := len([]rune(out.Body))
+	commentRunes := len([]rune(out.Comments[0].Body))
+
+	// Neither field may be sacrificed: both are comparable in size, so both
+	// must retain a substantial share.
+	for _, c := range []struct {
+		name  string
+		runes int
+	}{{"body", bodyRunes}, {"newest comment", commentRunes}} {
+		if c.runes < size/4 {
+			t.Errorf("%s kept only %d of %d runes; comparable fields must share the cut", c.name, c.runes, size)
+		}
+	}
+	// and the budget must actually be used, not abandoned at a floor.
+	if payload < MaxTicketGetFullOutputBytes*9/10 {
+		t.Errorf("payload is %d bytes of a %d-byte budget: fields were floored instead of shared",
+			payload, MaxTicketGetFullOutputBytes)
+	}
+	if !out.Truncated.Body || !out.Comments[0].Truncated {
+		t.Error("both clipped fields must be flagged")
+	}
+}
+
+// TestTicketGetMultibyteOverageDoesNotFloorFields is the other half of
+// review round 2: the cut arithmetic must work in BYTES. Subtracting a byte
+// overage from a rune length over-cuts by the bytes-per-rune factor, so
+// multi-byte and JSON-escape-heavy text was floored at 120 runes with
+// 70-97% of the budget unused — and no error raised, because the floored
+// payload then "fitted".
+func TestTicketGetMultibyteOverageDoesNotFloorFields(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		// 4 bytes per rune.
+		{"emoji-body", strings.Repeat("🙂", 20000)},
+		// '<' escapes to 6 bytes per rune in JSON.
+		{"escape-heavy-body", strings.Repeat("<", 6000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			be := newGetBackend(t, "t_x1", tt.body, comments([2]string{"hermes-agent", repeatBody("steer ", 300)}))
+			out, payload := callGetRaw(t, be, TicketGetInput{ID: "t_x1", Board: testBoard, Detail: DetailFull})
+
+			if n := len([]rune(out.Body)); n <= MinFieldRunes {
+				t.Errorf("body floored to %d runes (%d bytes) although %d bytes of the %d-byte budget were free",
+					n, len(out.Body), MaxTicketGetFullOutputBytes-payload, MaxTicketGetFullOutputBytes)
+			}
+			if payload < MaxTicketGetFullOutputBytes/2 {
+				t.Errorf("payload is %d bytes of a %d-byte budget: the cut over-ran by the bytes-per-rune factor",
+					payload, MaxTicketGetFullOutputBytes)
+			}
+			if out.Comments[0].Body != repeatBody("steer ", 300) {
+				t.Error("a 300-rune comment must survive an oversized multibyte body")
 			}
 		})
 	}

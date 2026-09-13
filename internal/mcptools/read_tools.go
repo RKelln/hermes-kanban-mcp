@@ -202,6 +202,7 @@ type TruncationFlags struct {
 	Body     bool `json:"body,omitempty"`
 	Comments bool `json:"comments,omitempty"`
 	Titles   bool `json:"titles,omitempty"`
+	Refs     bool `json:"refs,omitempty"`
 }
 
 // taskDetailEnvelope is the GET /tasks/{id} wire shape: the task dict
@@ -266,7 +267,6 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		BlockReason:   truncateToRunes(t.BlockReason, MaxBlockedReasonChars),
 		BlockKind:     t.BlockKind,
 		LatestSummary: truncateToRunes(t.LatestSummary, MaxRunSummaryChars),
-		BranchName:    t.BranchName,
 		EventsCount:   len(env.Events),
 		RunsCount:     len(env.Runs),
 		AttachmentsN:  len(env.Attachments),
@@ -284,6 +284,10 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 		out.LinksParents = len(env.Links.Parents)
 		out.LinksChildren = len(env.Links.Children)
 	}
+	// Identity fields are capped too, and the caps are ANNOUNCED: an
+	// uncapped branch_name would be the one field that could blow the
+	// envelope on its own, with nothing below to shrink it back.
+	out.BranchName, out.Truncated.Refs = truncateWithMarkerFlag(t.BranchName, MaxBranchNameChars)
 
 	// Body and comments are projected under the mode's policy: partial
 	// applies the bounded caps, full returns complete text. The fitter
@@ -295,14 +299,15 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	fit := fitGetProjection(&out, t.Body, env.Comments, proj)
 	if !fit.Fits {
 		// The remaining overage is in fields this tool does not reduce:
-		// latest_summary / last_run_summary / block_reason are capped at
-		// rune counts by design (MaxRunSummaryChars exists so review refs
-		// survive), and JSON escaping can inflate a rune cap past the byte
-		// budget. Name the ticket and the real cause — this is an
-		// input-size limit, not a projection bug, and the caller cannot
-		// discover which ticket it was from a generic message.
+		// the summaries and identity fields are capped at rune counts
+		// (MaxRunSummaryChars exists so review refs survive), and JSON
+		// escaping can inflate a rune cap past the byte budget. Name the
+		// ticket and the actual candidates rather than guessing which one
+		// is responsible — this is an input-size limit, not a projection
+		// bug, and the caller cannot discover which ticket it was from a
+		// generic message.
 		return ErrorResult(
-			"oversized ticket %s (status %s): not representable within the %d-byte %s budget after body/comments were reduced to their %d-rune floors; the remaining bulk is in latest_summary/last_run_summary/block_reason, which are capped by rune count rather than by bytes",
+			"oversized ticket %s (status %s): not representable within the %d-byte %s budget after the body and comments were reduced to their %d-rune floors; the remaining bulk is in a field this tool caps by rune count rather than by bytes (latest_summary, last_run_summary, block_reason, branch_name, title)",
 			t.ID, t.Status, proj.budget, proj.mode, MinFieldRunes)
 	}
 
@@ -400,8 +405,10 @@ func (b bodyProjection) current() string {
 //     OLDEST comments first and clips the newest only when a single
 //     comment cannot fit on its own.
 //  2. No loss is silent. Every drop and clip is counted here and flagged
-//     on the result; the body is clipped only after the comment thread
-//     has been reduced as far as it can go.
+//     on the result. Text is clipped only as a last resort, after the
+//     comment window has been spent: the newest comment and the body then
+//     give way together (see shrinkToFit), never one being destroyed while
+//     the other is kept whole.
 func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment, proj getProjection) commentFit {
 	fit := commentFit{Total: len(comments)}
 	bp := bodyProjection{orig: body, cap: proj.bodyCap}
@@ -454,7 +461,7 @@ func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment,
 		if len(live) == 1 {
 			newest = &live[0]
 		}
-		if !shrinkLargest(newest, &bp, out, proj.budget) {
+		if !shrinkToFit(newest, &bp, out, proj.budget) {
 			// Nothing can give any more: whatever is left over is in
 			// fields this fitter does not reduce (the summaries and the
 			// identity fields, which are capped at rune counts that JSON
@@ -470,88 +477,119 @@ func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment,
 	return fit
 }
 
-// shrinkLargest makes the field that actually caused the overage give way.
-// Both the newest comment and the ticket body are shrinkable, but a fixed
-// order between them is wrong in one direction or the other: shrinking the
-// comment first shreds a comment that would have fitted on its own while the
-// BODY carried the overage (and nothing re-expands it afterwards), while
-// shrinking the body first throws away the spec when a single comment is the
-// oversized field. So whichever field has more runes still to give absorbs
-// the cut, and a field is clipped only once it is genuinely the one with
-// room to spare.
+// shrinkToFit reduces the ticket body and the newest comment until out fits
+// budget. It is the only place text is clipped, and it is deliberately not a
+// fixed field order: a fixed order destroys one field while the other keeps
+// everything, which is not acceptable whichever field it hits.
 //
-// Returns false when neither field can give any more.
-func shrinkLargest(newest *getComment, bp *bodyProjection, out *TicketGetOut, budget int) bool {
-	if resultBytes(out) <= budget {
+// The policy has two stages:
+//
+//  1. The larger field gives way first, down to PARITY with the smaller one.
+//     A small steer is never destroyed to preserve a giant ticket body (and a
+//     spec is never destroyed to preserve a giant comment).
+//  2. Past parity the two share the remaining cut in proportion to their
+//     current sizes, so when they are comparable neither is sacrificed while
+//     the other survives untouched.
+//
+// All arithmetic is in BYTES, then converted to a rune cap by reducedCap.
+// Subtracting a byte overage from a rune length is the trap here: for
+// multi-byte text (emoji, CJK) or JSON-escape-inflated text (a run of '<'
+// costs 6 bytes per rune) it over-cuts by the bytes-per-rune factor and
+// floors the field outright, leaving most of the budget unused with no error
+// raised because the floor-ed payload then "fits".
+//
+// Returns false when neither field can give any more, which is the caller's
+// signal to report the payload honestly rather than emit symbol soup.
+func shrinkToFit(newest *getComment, bp *bodyProjection, out *TicketGetOut, budget int) bool {
+	size := resultBytes(out)
+	if size <= budget {
 		return false
 	}
-	commentSlack := 0
+	need := size - budget + MarkerHeadroom
+
+	commentText := ""
 	if newest != nil {
-		commentSlack = len([]rune(newest.render().Body)) - MinFieldRunes
+		commentText = newest.render().Body
 	}
-	bodySlack := len([]rune(bp.current())) - MinFieldRunes
-	if commentSlack <= 0 && bodySlack <= 0 {
-		return false
+	bodyText := bp.current()
+
+	// Measure each shakable field's contribution AS THE BUDGET SEES IT: remove
+	// the field and re-measure the payload. Raw byte lengths are not usable
+	// here — the payload is JSON wrapped in JSON, so a run of '<' costs ~12
+	// bytes per rune on the wire, and apportioning by raw length under-cuts the
+	// ratio and floors the field with most of the budget free.
+	savedBody, savedComments := out.Body, out.Comments
+	out.Body = ""
+	bodyShare := size - resultBytes(out)
+	out.Body = savedBody
+	commentShare := 0
+	if len(savedComments) > 0 {
+		out.Comments = savedComments[:len(savedComments)-1]
+		commentShare = size - resultBytes(out)
+		out.Comments = savedComments
 	}
-	if bodySlack >= commentSlack {
-		return shrinkBody(bp, out, budget)
+
+	var cCut, bCut int
+	switch {
+	case commentShare == 0:
+		bCut = need
+	case bodyShare == 0:
+		cCut = need
+	default:
+		// Stage 1: down to parity with the smaller field.
+		if bodyShare > commentShare {
+			bCut = min(bodyShare-commentShare, need)
+		} else if commentShare > bodyShare {
+			cCut = min(commentShare-bodyShare, need)
+		}
+		// Stage 2: share what is left, in proportion to current size.
+		if rem := need - bCut - cCut; rem > 0 {
+			shared := rem * commentShare / (commentShare + bodyShare)
+			cCut += shared
+			bCut += rem - shared
+		}
 	}
-	return shrinkComment(newest, out, budget)
+
+	changed := false
+	if newest != nil && commentShare > 0 {
+		if cap, ok := reducedCap(len([]rune(commentText)), commentShare, cCut); ok {
+			newest.cap = cap
+			changed = true
+		}
+	}
+	if bodyShare > 0 {
+		if cap, ok := reducedCap(len([]rune(bodyText)), bodyShare, bCut); ok {
+			bp.cap = cap
+			changed = true
+		}
+	}
+	return changed
 }
 
-// shrinkComment reduces the cap on c until out fits in budget, always
-// re-deriving the rendered body from the original comment. It returns
-// false when c is not reducible further (or already fits).
-func shrinkComment(c *getComment, out *TicketGetOut, budget int) bool {
-	current := len([]rune(c.render().Body))
-	if current <= MinFieldRunes {
-		return false
+// reducedCap converts a BYTE reduction into the new rune cap for a field
+// currently rendering as runes runes / bytes bytes, keeping at least
+// MinFieldRunes. It reports false when the field has nothing left to give,
+// so the caller can hand its share to the other field instead of shredding
+// text that is already at the floor.
+func reducedCap(runes, bytes, cut int) (int, bool) {
+	if bytes <= 0 || cut <= 0 || runes <= 0 {
+		return 0, false
 	}
-	size := resultBytes(out)
-	if size <= budget {
-		return false
+	keep := bytes - cut
+	if keep < 1 {
+		keep = 1
 	}
-	// Keep enough to clear the overage, less headroom for the marker's
-	// own runes; fall back to a proportional cut when the overage alone
-	// would not change the length (multi-byte runes, JSON escaping).
-	next := current - (size - budget) - MarkerHeadroom
-	if next >= current {
-		next = current - current/4
+	next := runes * keep / bytes
+	if next >= runes {
+		next = runes - 1 // guarantee progress even when rounding stalls
 	}
 	if next < MinFieldRunes {
 		next = MinFieldRunes
 	}
-	if next >= current {
-		return false
+	if next >= runes {
+		return 0, false // at the floor already: nothing to give
 	}
-	c.cap = next
-	return true
-}
-
-// shrinkBody reduces the body cap until out fits in budget, re-deriving
-// from the original body so markers never layer. It returns false when
-// the body is already at the floor (or already fits).
-func shrinkBody(b *bodyProjection, out *TicketGetOut, budget int) bool {
-	current := len([]rune(b.current()))
-	if current <= MinFieldRunes {
-		return false
-	}
-	size := resultBytes(out)
-	if size <= budget {
-		return false
-	}
-	next := current - (size - budget) - MarkerHeadroom
-	if next >= current {
-		next = current - current/4
-	}
-	if next < MinFieldRunes {
-		next = MinFieldRunes
-	}
-	if next >= current {
-		return false
-	}
-	b.cap = next
-	return true
+	return next, true
 }
 
 // truncateWithMarkerFlag is truncateWithMarker plus a "was anything
