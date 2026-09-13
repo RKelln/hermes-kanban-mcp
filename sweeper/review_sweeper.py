@@ -277,7 +277,14 @@ class McpClient:
 
     @staticmethod
     def _parse_sse(raw: str) -> dict:
-        """Extract the first JSON payload from an SSE (or plain JSON) body."""
+        """Extract the first JSON payload from an SSE (or plain JSON) body.
+
+        A malformed body raises McpError, never ValueError: this runs inside
+        call(), and every caller catches McpError only. A bare
+        json.JSONDecodeError would escape the per-ticket warn-and-continue
+        path and abort the whole tick as BROKEN, which the module contract
+        reserves for structural failures (config, bridge unreachable, auth).
+        """
         for line in raw.splitlines():
             line = line.strip()
             if line.startswith("data:"):
@@ -286,7 +293,11 @@ class McpClient:
                 except ValueError:
                     continue
         if raw.strip().startswith("{"):
-            return json.loads(raw)
+            try:
+                return json.loads(raw)
+            except ValueError as exc:
+                raise McpError("unexpected mcp response (malformed JSON: %s): %r"
+                               % (exc, raw[:200]))
         raise McpError("unexpected mcp response: %r" % raw[:200])
 
     def initialize(self) -> None:
@@ -313,7 +324,16 @@ class McpClient:
         if result.get("isError"):
             raise McpError("mcp tool %s: %s" % (name, result.get("content")))
         parts = result.get("content") or []
-        return "".join(p.get("text", "") for p in parts if p.get("type") == "text")
+        chunks = []
+        for p in parts:
+            if p.get("type") != "text":
+                continue
+            text = p.get("text", "")
+            if not isinstance(text, str):
+                # A corrupt bridge must be an error, not silently-empty data.
+                raise McpError("mcp tool %s: non-string content block: %r" % (name, text))
+            chunks.append(text)
+        return "".join(chunks)
 
 
 # --------------------------------------------------------------------------
@@ -350,7 +370,16 @@ class RestClient:
             headers={"Content-Type": "application/json"}, method="PATCH")
         try:
             with self.opener.open(req, timeout=30) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                payload = resp.read().decode("utf-8", errors="replace")
+                try:
+                    return json.loads(payload)
+                except ValueError as exc:
+                    # A 2xx with a non-JSON body (empty, or an HTML proxy /
+                    # login page) must not raise a bare ValueError: that
+                    # escapes the McpError-only handlers below and aborts the
+                    # whole tick instead of warning and retrying.
+                    raise McpError("rest patch %s -> %s: non-JSON response (%s): %.200s"
+                                   % (tid, body.get("status"), exc, payload))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
             raise McpError("rest patch %s -> %s failed: http %s %s" % (tid, body.get("status"), exc.code, detail))
@@ -646,6 +675,13 @@ def detail_truncation_warning(detail: dict) -> str:
         bits.append("comment text clipped or dropped")
     if flags.get("body"):
         bits.append("body clipped")
+    if flags.get("titles"):
+        # Named explicitly: this flag is set whenever a long title is capped,
+        # so falling through to the generic message would emit a vague
+        # "truncated flags set" warning on every tick for such a ticket.
+        bits.append("title clipped")
+    if flags.get("refs"):
+        bits.append("branch_name clipped")
     if dropped:
         bits.append("%s comment(s) dropped (oldest first)" % dropped)
     total, returned = detail.get("comments_total"), detail.get("comments_returned")
