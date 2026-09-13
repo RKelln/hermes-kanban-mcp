@@ -231,7 +231,14 @@ func TestTicketGetRejectsUnknownDetail(t *testing.T) {
 		}
 	}
 	if n := be.taskRequests(); n != 0 {
-		t.Errorf("invalid detail made %d backend request(s), want 0 (fail fast)", n)
+		t.Errorf("invalid detail made %d backend task request(s), want 0 (fail fast)", n)
+	}
+	// and no board-list request either: validation must precede the
+	// known-board check, which is itself a backend round-trip.
+	// SetBoardLister (called by newGetBackend) resets the slug cache, so
+	// the cache cannot mask a regression here.
+	if n := be.boardHits.Load(); n != 0 {
+		t.Errorf("invalid detail made %d backend board request(s), want 0 (validate before ensureKnownBoard)", n)
 	}
 }
 
@@ -386,6 +393,120 @@ func TestRenderResultNeverClipsPayload(t *testing.T) {
 	}
 	if got := resultBytes(small); got != len(raw) {
 		t.Errorf("resultBytes = %d but the rendered envelope is %d bytes; the fitter and the guard disagree", got, len(raw))
+	}
+}
+
+// TestTicketGetBodyOverageDoesNotShredTheComment is the review-finding
+// regression (2026-09-13, independent reviewer): when the TICKET BODY is
+// the field that blows the budget, the comment must survive intact. The
+// fitter has to shrink the field that actually caused the overage; a fixed
+// field order shreds the comment to its floor and (because nothing ever
+// re-expands it) the loss is permanent — including in detail=full, the
+// documented remedy.
+func TestTicketGetBodyOverageDoesNotShredTheComment(t *testing.T) {
+	const commentRunes = 300
+	comment := repeatBody("steer ", commentRunes)
+	tests := []struct {
+		name string
+		mode string
+		body string
+	}{
+		// full: uncapped body, so the body alone is ~40 KB.
+		{"full", DetailFull, repeatBody("spec ", 40000)},
+		// partial: body within its rune cap but 4 bytes/runes, so it is
+		// still the field carrying the overage.
+		{"partial-multibyte", DetailPartial, strings.Repeat("🙂", 4000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			be := newGetBackend(t, "t_x1", tt.body, comments([2]string{"hermes-agent", comment}))
+			out := callGet(t, be, TicketGetInput{ID: "t_x1", Board: testBoard, Detail: tt.mode})
+
+			if len(out.Comments) != 1 {
+				t.Fatalf("returned %d comments, want 1", len(out.Comments))
+			}
+			if got := out.Comments[0]; got.Body != comment || got.Truncated {
+				t.Errorf("comment destroyed while the BODY carried the overage: %d runes (want %d), truncated=%v",
+					len([]rune(got.Body)), commentRunes, got.Truncated)
+			}
+			if !out.Truncated.Body {
+				t.Error("body not flagged as clipped; the body is what should have given way")
+			}
+			if n := len(out.Body); n >= len(tt.body) {
+				t.Errorf("body is %d bytes, want it reduced below the source %d", n, len(tt.body))
+			}
+		})
+	}
+}
+
+// TestTicketGetHugeCommentLeavesTheBodyAlone is the mirror of the case
+// above: when the COMMENT is the oversized field and the body is small, the
+// comment gives way (flagged) and the body stays whole. Together the two
+// tests pin "shrink the field that caused the overage", not a fixed order.
+func TestTicketGetHugeCommentLeavesTheBodyAlone(t *testing.T) {
+	const body = "short spec body"
+	be := newGetBackend(t, "t_x1", body, comments([2]string{"hermes-agent", repeatBody("huge ", 100000)}))
+
+	out := callGet(t, be, TicketGetInput{ID: "t_x1", Board: testBoard, Detail: DetailFull})
+	if out.Body != body {
+		t.Errorf("body = %q (%d runes), want it untouched: the comment carried the overage", out.Body, len([]rune(out.Body)))
+	}
+	if out.Truncated.Body {
+		t.Error("body flagged as clipped although the comment carried the overage")
+	}
+	if len(out.Comments) != 1 || !out.Comments[0].Truncated {
+		t.Error("the oversized comment should have been clipped and flagged")
+	}
+}
+
+// TestTicketGetOversizedFieldsReportHonestly covers the case where the
+// overage sits in fields the fitter deliberately does not reduce (the
+// summaries and identity fields are capped by design; a 1024-rune cap is
+// not a byte cap, and JSON escaping can inflate them ~6x). The call must
+// fail with an honest message naming the ticket and the real cause — not a
+// bare "projection sizing bug" that hides which ticket it was.
+func TestTicketGetOversizedFieldsReportHonestly(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/boards") {
+			io_WriteString(w, `{"boards":[{"slug":"`+testBoard+`","name":"Hermes Agent","counts":{}}]}`)
+			return
+		}
+		// Three 1024-rune fields of '<' escape to 6 bytes per rune.
+		hostile := strings.Repeat("<", MaxRunSummaryChars)
+		env := map[string]any{
+			"task": map[string]any{
+				"id": "t_hostile", "title": "T", "status": "blocked",
+				"block_reason": hostile, "latest_summary": hostile,
+			},
+			"comments": []any{},
+			"events":   []any{},
+			"runs":     []any{map[string]any{"id": 1, "status": "blocked", "started_at": 1, "summary": hostile}},
+		}
+		b, err := json.Marshal(env)
+		if err != nil {
+			t.Errorf("marshal fixture: %v", err)
+			return
+		}
+		_, _ = w.Write(b)
+	}))
+	defer fake.Close()
+
+	s := NewServer(fake.URL, testBoard)
+	SetBoardLister(s)
+	res := s.TicketGet(context.Background(), TicketGetInput{ID: "t_hostile", Board: testBoard})
+	if res == nil || !res.IsError {
+		t.Fatalf("oversized identity/summary fields returned %+v, want an explicit error", res)
+	}
+	msg := res.Content[0].Text
+	if !strings.Contains(msg, "t_hostile") {
+		t.Errorf("error does not name the ticket: %q", msg)
+	}
+	if !strings.Contains(msg, "latest_summary") && !strings.Contains(msg, "summar") {
+		t.Errorf("error does not name the cause (the non-shrinkable summary fields): %q", msg)
+	}
+	if strings.Contains(msg, "projection sizing bug") {
+		t.Errorf("error misattributes an input-size limit to a projection bug: %q", msg)
 	}
 }
 

@@ -62,11 +62,11 @@ const (
 	// the oldest comments first.
 	MaxCommentsFullReturned = 50
 
-	// MinCommentRunes is the floor a clipped comment body is reduced to
-	// before the fitter stops trying. Below this a comment carries no
-	// usable meaning, so the honest outcome is an explicit oversized-
-	// payload error rather than a symbol soup.
-	MinCommentRunes = 120
+	// MinFieldRunes is the floor a clipped field (comment body or ticket
+	// body) is reduced to before the fitter stops trying. Below this the
+	// text carries no usable meaning, so the honest outcome is an explicit
+	// oversized-payload error rather than a symbol soup.
+	MinFieldRunes = 120
 
 	// MaxEventsReturned keeps only the last N events in get output.
 	MaxEventsReturned = 5

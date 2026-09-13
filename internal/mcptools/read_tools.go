@@ -236,12 +236,14 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	if err := ValidateTicketID(in.ID); err != nil {
 		return ErrorResult("invalid_input: %v", err)
 	}
-	if err := ensureKnownBoard(ctx, board); err != nil {
-		return ErrorResult("invalid_input: %v", err)
-	}
+	// Detail is validated BEFORE any backend call: a typo must not cost a
+	// round-trip, and a rejected call must not have touched the board.
 	proj, ok := projectionFor(in.Detail)
 	if !ok {
 		return ErrorResult("invalid_input: unknown detail %q (want %q or %q)", in.Detail, DetailPartial, DetailFull)
+	}
+	if err := ensureKnownBoard(ctx, board); err != nil {
+		return ErrorResult("invalid_input: %v", err)
 	}
 
 	var env taskDetailEnvelope
@@ -288,9 +290,21 @@ func (s *Server) TicketGet(ctx context.Context, in TicketGetInput) *ToolResult {
 	// then guarantees the rendered payload fits the mode's budget, and
 	// reports every drop and clip — nothing is ever clipped silently.
 	// The fitter writes the projected body, comments, counts and
-	// truncation flags into out; its return value is for callers that
-	// want the fit summary directly (tests).
-	fitGetProjection(&out, t.Body, env.Comments, proj)
+	// truncation flags into out; its return value reports whether the
+	// payload fits and how much of the thread it carried.
+	fit := fitGetProjection(&out, t.Body, env.Comments, proj)
+	if !fit.Fits {
+		// The remaining overage is in fields this tool does not reduce:
+		// latest_summary / last_run_summary / block_reason are capped at
+		// rune counts by design (MaxRunSummaryChars exists so review refs
+		// survive), and JSON escaping can inflate a rune cap past the byte
+		// budget. Name the ticket and the real cause — this is an
+		// input-size limit, not a projection bug, and the caller cannot
+		// discover which ticket it was from a generic message.
+		return ErrorResult(
+			"oversized ticket %s (status %s): not representable within the %d-byte %s budget after body/comments were reduced to their %d-rune floors; the remaining bulk is in latest_summary/last_run_summary/block_reason, which are capped by rune count rather than by bytes",
+			t.ID, t.Status, proj.budget, proj.mode, MinFieldRunes)
+	}
 
 	return renderResult(proj.budget, false, out)
 }
@@ -301,6 +315,7 @@ type commentFit struct {
 	Total   int  // comments the backend served
 	Dropped int  // comments omitted (window or budget), oldest first
 	Clipped bool // a returned comment body was clipped
+	Fits    bool // the rendered payload is within the mode's budget
 }
 
 // getProjection is the mode-derived sizing policy for one ticket_get
@@ -425,28 +440,63 @@ func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment,
 	for {
 		render()
 		if resultBytes(out) <= proj.budget {
+			fit.Fits = true
 			break
 		}
 		if len(live) > 1 {
-			// Over budget: drop the oldest comment, keep the tail.
+			// Over budget: drop the oldest comment, keep the tail. The
+			// window is sacrificed before any text is clipped.
 			live = live[1:]
 			fit.Dropped++
 			continue
 		}
-		if len(live) == 1 && shrinkComment(&live[0], out, proj.budget) {
-			continue
+		var newest *getComment
+		if len(live) == 1 {
+			newest = &live[0]
 		}
-		if shrinkBody(&bp, out, proj.budget) {
-			out.Body, out.Truncated.Body = bp.render()
-			continue
+		if !shrinkLargest(newest, &bp, out, proj.budget) {
+			// Nothing can give any more: whatever is left over is in
+			// fields this fitter does not reduce (the summaries and the
+			// identity fields, which are capped at rune counts that JSON
+			// escaping can inflate past the byte budget). The caller
+			// reports that honestly rather than clipping a field that
+			// has nothing left to give.
+			break
 		}
-		// Nothing left to reduce: renderResult reports the oversize
-		// rather than clipping silently.
-		break
+		out.Body, out.Truncated.Body = bp.render()
 	}
 
 	render() // idempotent: guarantees counts/flags match the final text
 	return fit
+}
+
+// shrinkLargest makes the field that actually caused the overage give way.
+// Both the newest comment and the ticket body are shrinkable, but a fixed
+// order between them is wrong in one direction or the other: shrinking the
+// comment first shreds a comment that would have fitted on its own while the
+// BODY carried the overage (and nothing re-expands it afterwards), while
+// shrinking the body first throws away the spec when a single comment is the
+// oversized field. So whichever field has more runes still to give absorbs
+// the cut, and a field is clipped only once it is genuinely the one with
+// room to spare.
+//
+// Returns false when neither field can give any more.
+func shrinkLargest(newest *getComment, bp *bodyProjection, out *TicketGetOut, budget int) bool {
+	if resultBytes(out) <= budget {
+		return false
+	}
+	commentSlack := 0
+	if newest != nil {
+		commentSlack = len([]rune(newest.render().Body)) - MinFieldRunes
+	}
+	bodySlack := len([]rune(bp.current())) - MinFieldRunes
+	if commentSlack <= 0 && bodySlack <= 0 {
+		return false
+	}
+	if bodySlack >= commentSlack {
+		return shrinkBody(bp, out, budget)
+	}
+	return shrinkComment(newest, out, budget)
 }
 
 // shrinkComment reduces the cap on c until out fits in budget, always
@@ -454,7 +504,7 @@ func fitGetProjection(out *TicketGetOut, body string, comments []kanban.Comment,
 // false when c is not reducible further (or already fits).
 func shrinkComment(c *getComment, out *TicketGetOut, budget int) bool {
 	current := len([]rune(c.render().Body))
-	if current <= MinCommentRunes {
+	if current <= MinFieldRunes {
 		return false
 	}
 	size := resultBytes(out)
@@ -468,8 +518,8 @@ func shrinkComment(c *getComment, out *TicketGetOut, budget int) bool {
 	if next >= current {
 		next = current - current/4
 	}
-	if next < MinCommentRunes {
-		next = MinCommentRunes
+	if next < MinFieldRunes {
+		next = MinFieldRunes
 	}
 	if next >= current {
 		return false
@@ -483,7 +533,7 @@ func shrinkComment(c *getComment, out *TicketGetOut, budget int) bool {
 // the body is already at the floor (or already fits).
 func shrinkBody(b *bodyProjection, out *TicketGetOut, budget int) bool {
 	current := len([]rune(b.current()))
-	if current <= MinCommentRunes {
+	if current <= MinFieldRunes {
 		return false
 	}
 	size := resultBytes(out)
@@ -494,8 +544,8 @@ func shrinkBody(b *bodyProjection, out *TicketGetOut, budget int) bool {
 	if next >= current {
 		next = current - current/4
 	}
-	if next < MinCommentRunes {
-		next = MinCommentRunes
+	if next < MinFieldRunes {
+		next = MinFieldRunes
 	}
 	if next >= current {
 		return false
@@ -535,11 +585,25 @@ func renderResult(budget int, isErr bool, v any) *ToolResult {
 	if isErr {
 		tr.IsError = true
 	}
-	if size := resultBytes(v); size > budget {
-		return ErrorResult("internal error: shaped result is %d bytes, over the %d-byte budget; this is a projection sizing bug, not a client error", size, budget)
+	// Measure the result that is actually returned, not just its payload:
+	// the content envelope and the isError field occupy bytes too, and
+	// measuring anything narrower is how a guard drifts out of agreement
+	// with the fitter that sized the value.
+	raw, err := json.Marshal(tr)
+	if err != nil {
+		return ErrorResult("internal error: %v", err)
+	}
+	if len(raw) > budget {
+		return ErrorResult("internal error: shaped result is %d bytes, over the %d-byte budget; this is a projection sizing bug, not a client error", len(raw), budget)
 	}
 	return tr
 }
+
+// unknownResultBytes is reported when a value cannot be marshalled at all.
+// It is deliberately larger than any budget: a measurement failure must
+// never look like a payload that comfortably fits, or the fitter would stop
+// shrinking and a caller would emit something that cannot be rendered.
+const unknownResultBytes = 1 << 30
 
 // resultBytes returns the rendered size of v as a tool result — the exact
 // measure the budgets are defined against, including the content envelope
@@ -547,11 +611,11 @@ func renderResult(budget int, isErr bool, v any) *ToolResult {
 func resultBytes(v any) int {
 	text, err := json.Marshal(v)
 	if err != nil {
-		return 0
+		return unknownResultBytes
 	}
 	b, err := json.Marshal(ToolResult{Content: []ContentPart{{Type: "text", Text: string(text)}}})
 	if err != nil {
-		return 0
+		return unknownResultBytes
 	}
 	return len(b)
 }

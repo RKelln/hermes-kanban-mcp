@@ -573,8 +573,43 @@ def blocked_tickets(mcp: McpClient, board: str) -> list:
 
 
 def ticket_detail(mcp: McpClient, board: str, tid: str) -> dict:
-    text = mcp.call("ticket_get", {"board": board, "id": tid})
+    """Fetch one ticket for review, with COMPLETE comment text.
+
+    Uses detail="full" rather than the partial default: this detail feeds both
+    the branch/repo/sha extractors and the reviewer prompt, and the refs and
+    the requested changes routinely sit at the TAIL of a long handoff comment.
+    Partial mode clips every comment body at 500 runes, which is how a review
+    round was lost (2026-08-08, t_c8c3a817: a 1,711-char review comment
+    arrived cut mid-word and the HIGH finding was missed). The bridge still
+    flags any loss it has to make (truncated.*, comments_total/returned/
+    dropped) — callers must surface that; see detail_truncation_warning.
+    """
+    text = mcp.call("ticket_get", {"board": board, "id": tid, "detail": "full"})
     return json.loads(text)
+
+
+def detail_truncation_warning(detail: dict) -> str:
+    """Warn when the bridge clipped the ticket detail it returned.
+
+    A clipped detail means the reviewer may be reading a partial thread, and
+    the ref extractors may have missed a branch/sha sitting beyond the cut.
+    That must show up in the run output and the warnings list — never silent.
+    """
+    flags = detail.get("truncated") or {}
+    dropped = detail.get("comments_dropped") or 0
+    if not flags and not dropped:
+        return ""
+    bits = []
+    if flags.get("comments"):
+        bits.append("comment text clipped or dropped")
+    if flags.get("body"):
+        bits.append("body clipped")
+    if dropped:
+        bits.append("%s comment(s) dropped (oldest first)" % dropped)
+    total, returned = detail.get("comments_total"), detail.get("comments_returned")
+    if total is not None and returned is not None and total != returned:
+        bits.append("returned %s of %s comments" % (returned, total))
+    return "bridge clipped the ticket detail: %s" % ("; ".join(bits) or "truncated flags set")
 
 
 def review_queue_items(mcp: McpClient) -> dict:
@@ -869,13 +904,34 @@ def comment_skill_skip(mcp, board: str, tid: str, detail: dict, skill: str,
 # --------------------------------------------------------------------------
 # Reviewer spawn + verdict
 # --------------------------------------------------------------------------
+# Reviewer-prompt digest caps. These are the sweeper's OWN caps, sitting on
+# top of whatever the bridge returned, so they must be ANNOUNCED — never
+# silent, never layered into an invisible lossy chain (the principle from
+# t_8c07a27c's scope add). Sized so a real review steer / revision comment
+# (2-4 KB) arrives whole; only genuinely enormous comments get clipped, and
+# the prompt says so inline where it happened.
+COMMENT_DIGEST_CHARS = 8000
+BODY_DIGEST_CHARS = 6000
+
+
+def _digest(text: str, limit: int, what: str) -> str:
+    """Clamp text for the reviewer prompt, marking any loss visibly."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return ("%s\n[…(%d more chars) the %s exceeded the %d-char digest cap; if the "
+            "clipped part matters, re-read the full text from the board]"
+            % (text[:limit], len(text) - limit, what, limit))
+
+
 def build_reviewer_prompt(board: str, tid: str, detail: dict, repo: str, branch: str,
                           sha: str = "", checkout: str = "", base: str = "main") -> str:
     comments = "\n".join(
-        "- %s: %s" % (c.get("author") or "?", (c.get("body") or "")[:2000])
+        "- %s: %s" % (c.get("author") or "?", _digest(c.get("body") or "",
+                                                     COMMENT_DIGEST_CHARS, "comment"))
         for c in (detail.get("comments") or [])[-10:]
     )
-    body = (detail.get("body") or "")[:4000]
+    body = _digest(detail.get("body") or "", BODY_DIGEST_CHARS, "ticket body")
     block_reason = (detail.get("block_reason") or detail.get("last_run_summary") or "")[:300]
     if repo:
         ref_note = "REPO: %s\nBASE: %s" % (repo, base or "main")
@@ -1256,6 +1312,10 @@ def main(argv) -> int:
             wl = wrong_lane_warning(board, tid, conf, detail)
             if wl:
                 print(wl)
+            tw = detail_truncation_warning(detail)
+            if tw:
+                print("review-sweeper: warn: %s/%s: %s" % (board, tid, tw))
+                warnings.append("%s/%s: %s" % (board, tid, tw))
             fp = block_fingerprint(detail)
             if ledger_has(board, tid, fp):
                 continue  # this block event already reviewed
