@@ -245,28 +245,82 @@ class TestVersionStamp(unittest.TestCase):
 
 
 class TestRollbackLine(unittest.TestCase):
-    """AC6: printed in both paths, and it must name a binary that EXISTS."""
+    """AC6: printed in both paths, and it must name a binary that EXISTS.
+
+    Three states, three truths. The line must not confuse "no backup was taken"
+    with "no binary was there": the first is a failure before the install (the
+    host is untouched), the second is a first install with nothing to restore.
+    """
 
     def test_a_real_backup_is_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             bak = os.path.join(tmp, "kanban-mcp.bak-20260914-133000")
             with open(bak, "w", encoding="utf-8") as fh:
                 fh.write("old binary\n")
-            line = up.rollback_line(bak)
+            line = up.rollback_line(bak, installed=True)
         self.assertIn(bak, line)
         self.assertIn("sudo install -m 0755", line)
         self.assertIn("systemctl restart", line)
 
-    def test_no_backup_says_so_and_never_offers_a_self_copy(self):
-        line = up.rollback_line(None)
+    def test_a_failure_before_the_install_never_claims_the_binary_was_absent(self):
+        line = up.rollback_line(None, installed=False)
+        self.assertIn("nothing to undo", line)
+        self.assertIn("untouched", line)
+        self.assertNotIn("no previous binary", line,
+                         "a build failure happens on hosts that DO have a binary "
+                         "installed; that sentence would be false there")
+
+    def test_an_install_with_no_previous_binary_says_there_is_nothing_to_restore(self):
+        line = up.rollback_line(None, installed=True)
         self.assertIn("no previous binary", line)
         self.assertNotIn("sudo install", line,
                          "a rollback that reinstalls the binary we just installed "
                          "(or a path that does not exist) fails when it is run")
 
     def test_a_backup_path_that_vanished_is_not_offered(self):
-        self.assertIn("no previous binary",
-                      up.rollback_line("/nonexistent/kanban-mcp.bak-20260914"))
+        line = up.rollback_line("/nonexistent/kanban-mcp.bak-20260914", installed=True)
+        self.assertNotIn("sudo install", line)
+
+
+class TestSmokeStep(unittest.TestCase):
+    """The smoke step's cwd is load-bearing.
+
+    scripts/smoke.sh's secret-hygiene scan needs a git work tree and FAILS if it
+    cannot run, so without cwd=<repo> a perfectly good deploy is reported FAILED
+    — after it has already installed and restarted.
+    """
+
+    TOKEN_VALUE = "0123456789abcdef"
+
+    def _capture(self, rc=0):
+        captured = {}
+        real_run = up.run
+
+        def fake(cmd, **kw):
+            captured["argv"] = list(cmd)
+            captured.update(kw)
+            return subprocess.CompletedProcess(list(cmd), rc, "smoke step output\n", "")
+
+        up.run = fake
+        self.addCleanup(lambda: setattr(up, "run", real_run))
+        with contextlib.redirect_stdout(io.StringIO()):
+            if rc == 0:
+                up.run_smoke("%s=%s\n" % (up.TOKEN_KEY, self.TOKEN_VALUE))
+            else:
+                with self.assertRaises(up.Fail):
+                    up.run_smoke("%s=%s\n" % (up.TOKEN_KEY, self.TOKEN_VALUE))
+        return captured
+
+    def test_smoke_runs_with_the_repo_as_cwd(self):
+        self.assertEqual(self._capture().get("cwd"), up.REPO)
+
+    def test_the_token_goes_in_the_environment_not_on_the_command_line(self):
+        cap = self._capture()
+        self.assertEqual(cap.get("env", {}).get(up.TOKEN_KEY), self.TOKEN_VALUE)
+        self.assertNotIn(self.TOKEN_VALUE, " ".join(cap["argv"]))
+
+    def test_a_failing_smoke_is_a_failure_not_a_warning(self):
+        self._capture(rc=1)
 
 
 class TestContainsCommit(unittest.TestCase):

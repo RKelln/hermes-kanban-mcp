@@ -241,15 +241,16 @@ failed deploy. A failing smoke test fails the upgrade.
 What it touches, and what it needs:
 
 - **Writes:** `/usr/local/bin/kanban-mcp` (the install) and the service restart.
-  Those are the only two `sudo` calls. The previous binary is copied to
+  Those are the only two privileged writes. The previous binary is copied to
   `~/.local/state/kanban-mcp/backups/kanban-mcp.bak-<timestamp>` as the operator
   (no sudo — the installed binary is world-readable), and the rollback command
   is printed on success and on failure.
 - **Reads:** the unit file and the env file, to check them for the two traps.
   The env file is only read, never replaced, so new keys still belong appended
   by hand (never re-run §3 on a live host). On a host where it is `root:root
-  0600` — what §3 installs — the read uses `sudo -n`, which never prompts: run
-  `sudo -v` once before a non-interactive run, and `--dry-run` stays prompt-free.
+  0600` — what §3 installs — the read uses `sudo -n` (read-only, and it never
+  prompts): run `sudo -v` once before a non-interactive run, and `--dry-run`
+  stays prompt-free.
 - **First install:** not this script. Follow sections 1–5 above.
 
 **Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example

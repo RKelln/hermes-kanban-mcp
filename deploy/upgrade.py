@@ -31,9 +31,10 @@ sudo is used for exactly two writes: the install of /usr/local/bin/kanban-mcp
 and the `systemctl restart`. The backup is a plain user-owned copy under
 ~/.local/state/kanban-mcp/backups — no sudo, because the installed binary is
 world-readable. Reading a root:root 0600 env file (what deploy/install.md §3
-installs) falls back to `sudo -n cat`, which never prompts, so --dry-run cannot
-stall on a password; if that is not possible the script refuses and says to run
-`sudo -v` first.
+installs) is a third, read-only use: `sudo -n cat`, which never prompts, so
+--dry-run cannot stall on a password; if that is not possible the script refuses
+and says to run `sudo -v` first. Prefer `sudo -v` over piping a password into
+this script: a pipe puts it in your shell history.
 """
 
 from __future__ import annotations
@@ -88,11 +89,11 @@ def stdin_is_tty() -> bool:
 def sudo(cmd, **kw):
     """Run a privileged command (the two writes: install, restart).
 
-    Non-interactive callers pipe the password in (`echo pw | ... upgrade.py`):
-    that is the `sudo -S -p ''` form — read the password from stdin, print no
-    prompt. On a terminal we let sudo prompt normally, because `-S` reads the
-    typed password from the tty WITHOUT disabling echo, which would leave it in
-    the scrollback.
+    Non-interactive callers should cache a ticket first (`sudo -v`) — piping a
+    password in puts it in your shell history. With no terminal, sudo is invoked
+    as `sudo -S -p ''`: read the password from stdin, print no prompt. On a
+    terminal we let sudo prompt normally, because `-S` reads the typed password
+    from the tty WITHOUT disabling echo, which would leave it in the scrollback.
     """
     prefix = ["sudo"] if stdin_is_tty() else ["sudo", "-S", "-p", ""]
     return run([*prefix, *cmd], **kw)
@@ -196,18 +197,24 @@ def stamp(describe: str, sha: str, dirty: bool = False) -> str:
     return base + "-dirty" if dirty else base
 
 
-def rollback_line(backup: str | None) -> str:
+def rollback_line(backup: str | None, installed: bool = False) -> str:
     """How to undo this deploy — or the honest statement that there is nothing.
 
-    Printing an install of the binary we just installed (or of a path that does
-    not exist) is a lie you discover with the service down.
+    Three distinct states, and the line must not confuse them: a backup exists
+    (undo is a command), nothing was installed yet (a build or backup failure —
+    the host is untouched), or the install ran where no binary had ever existed
+    (nothing to restore). Printing an install of the binary we just installed,
+    or claiming a path was empty when it was not, is a lie the operator finds
+    out with the service down.
     """
     if backup and os.path.exists(backup):
         return ("rollback:  sudo install -m 0755 %s %s && sudo systemctl restart %s"
                 % (backup, BIN, SERVICE))
-    return ("rollback:  no previous binary to restore — nothing existed at %s "
-            "before this run, so nothing was overwritten (the unit and the env "
-            "file are unchanged)" % BIN)
+    if not installed:
+        return ("rollback:  nothing to undo — this run never installed or restarted "
+                "anything, so %s is untouched" % BIN)
+    return ("rollback:  no previous binary to restore — %s did not exist before this "
+            "run, and the unit and the env file are unchanged" % BIN)
 
 
 # --- steps -------------------------------------------------------------------
@@ -235,11 +242,17 @@ def preflight(args) -> dict:
     dirty_text = run(["git", "-C", REPO, "status", "--porcelain"]).stdout.strip()
     dirty = bool(dirty_text)
     if dirty and not args.allow_dirty:
+        summary = dirty_text.splitlines()
+        if len(summary) > 10:
+            head = "\n".join("    " + l for l in summary[:10])
+            head += "\n    (and %d more line(s))" % (len(summary) - 10)
+        else:
+            head = "\n".join("    " + l for l in summary)
         raise Fail(
             "the working tree is dirty:\n%s\n"
             "A dirty tree means you would deploy code that no review has seen. "
             "Commit and merge it, or pass --allow-dirty if you truly mean it."
-            % "\n".join("    " + l for l in dirty_text.splitlines()[:10])
+            % head
         )
 
     if args.expect:
@@ -313,12 +326,14 @@ def backup_binary(stamp_ts: str) -> str | None:
     return dest
 
 
-def install_and_restart(tmp_bin: str) -> None:
+def install_binary(tmp_bin: str) -> None:
     say("install", "%s -> %s" % (tmp_bin, BIN))
     p = sudo(["install", "-m", "0755", tmp_bin, BIN])
     if p.returncode != 0:
         raise Fail("install failed: %s" % (p.stderr or p.stdout).strip())
 
+
+def restart_service() -> None:
     say("restart", "systemctl restart %s (no daemon-reload: the unit is unchanged)" % SERVICE)
     p = sudo(["systemctl", "restart", SERVICE])
     if p.returncode != 0:
@@ -384,10 +399,34 @@ def wait_for_running_version(want_version: str, since: str, journal=None,
             break
         time.sleep(1)
     raise Fail(
-        "the running process reports version %r but we built %r. The restart "
-        "may not have taken, or the service is serving a different binary. Do "
-        "not trust this deploy." % (seen, want_version)
+        "the running process reports version %r but we built %r. %s Do not trust "
+        "this deploy." % (seen, want_version,
+                          "No startup line at all appeared in the journal window "
+                          "(the restart wrote nothing, or the journal could not be "
+                          "read)." if seen is None else
+                          "A startup line for a different build is already in that "
+                          "window: the service is serving a different binary.")
     )
+
+
+def run_smoke(env_text: str) -> None:
+    """The served tool roster, via scripts/smoke.sh.
+
+    cwd matters: smoke.sh's secret-hygiene step needs a git work tree and fails
+    if it cannot run, so the smoke step would report ANY deploy as FAILED when
+    the script was invoked from outside the repo.
+    """
+    token = smoke_token(env_text)
+    say("verify", "tools/list roster via scripts/smoke.sh")
+    p = run(["bash", SMOKE], cwd=REPO,
+            env=dict(os.environ, URL=URL, **{TOKEN_KEY: token}))
+    lines = (p.stdout + p.stderr).strip().splitlines()
+    if p.returncode != 0:
+        for line in lines[-15:]:
+            print("        " + line)
+        raise Fail("the smoke test failed (rc=%d) — see its output above" % p.returncode)
+    for line in lines[-3:]:
+        print("        " + line)
 
 
 def verify(want_version: str, since: str, env_text: str, skip_smoke: bool) -> None:
@@ -397,16 +436,7 @@ def verify(want_version: str, since: str, env_text: str, skip_smoke: bool) -> No
     if skip_smoke:
         say("verify", "smoke test skipped (--skip-smoke)")
         return
-    token = smoke_token(env_text)
-    say("verify", "tools/list roster via scripts/smoke.sh")
-    p = run(["bash", SMOKE], env=dict(os.environ, URL=URL, **{TOKEN_KEY: token}))
-    lines = (p.stdout + p.stderr).strip().splitlines()
-    if p.returncode != 0:
-        for line in lines[-15:]:
-            print("        " + line)
-        raise Fail("the smoke test failed (rc=%d) — see its output above" % p.returncode)
-    for line in lines[-3:]:
-        print("        " + line)
+    run_smoke(env_text)
 
 
 def main(argv=None) -> int:
@@ -454,25 +484,29 @@ def main(argv=None) -> int:
         say("dry-run", "nothing was changed")
         return 0
 
-    # `backup` is bound BEFORE anything that can fail, so every failure path can
-    # name the binary to roll back to — including a failure after the install.
+    # `backup` and `installed` are bound BEFORE anything that can fail, so every
+    # failure path can say something true — including a failure after the
+    # install, where the rollback matters most.
     backup = None
+    installed = False
     try:
         build(info["version"], tmp_bin)
         backup = backup_binary(time.strftime("%Y%m%d-%H%M%S"))
-        install_and_restart(tmp_bin)
+        install_binary(tmp_bin)
+        installed = True
+        restart_service()
         verify(info["version"], since, info["env_text"], args.skip_smoke)
     except Fail as exc:
         print("\nFAILED: %s" % exc, file=sys.stderr)
-        print(rollback_line(backup), file=sys.stderr)
+        print(rollback_line(backup, installed), file=sys.stderr)
         return 1
     except OSError as exc:
-        print("\nFAILED: unexpected error before/while installing: %s" % exc, file=sys.stderr)
-        print(rollback_line(backup), file=sys.stderr)
+        print("\nFAILED: unexpected error during the upgrade: %s" % exc, file=sys.stderr)
+        print(rollback_line(backup, installed), file=sys.stderr)
         return 1
 
     print("\ndeployed %s (%s)" % (info["version"], info["sha"]))
-    print(rollback_line(backup))
+    print(rollback_line(backup, installed))
     return 0
 
 
