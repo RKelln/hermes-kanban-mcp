@@ -210,6 +210,24 @@ in a session.
 
 ## Upgrading an existing install
 
+**For an existing install, use `deploy/upgrade.py` instead of the manual steps below:**
+
+```sh
+python3 deploy/upgrade.py --dry-run     # preflight and plan, changes nothing
+python3 deploy/upgrade.py               # build, back up, install, restart, verify
+```
+
+It is binary-only on purpose: it never installs the unit file (that is how the
+`__SERVICE_USER__` placeholder took the service down — systemd reports the
+result as `217/USER` inside an `activating (auto-restart)` loop, which reads
+like a slow start) and never touches `/etc/kanban-mcp.env`. It refuses a dirty
+working tree, refuses an installed unit that still carries a live placeholder,
+and after the restart it compares the version reported by the RUNNING process
+against the version it just built — because "I deployed it" and "what is
+running is what I built" are different claims, and the difference is how a
+stale binary gets served for hours. The manual steps below remain the reference
+for a first install and for changing the unit or the env file.
+
 **Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example
 /etc/kanban-mcp.env` OVERWRITES the target, and the example contains placeholders —
 it would destroy the real `KANBAN_PASSWORD` and `MCP_BEARER_TOKEN`. Add new keys
