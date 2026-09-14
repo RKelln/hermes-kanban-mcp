@@ -1,4 +1,4 @@
-.PHONY: test test-sweeper
+.PHONY: test test-sweeper test-deploy
 
 # Go suite (the MCP server). Run race-enabled as the CI gate does.
 test:
@@ -22,3 +22,11 @@ test-sweeper:
 	@set -e; for t in $(SWEEPER_UNIT_TESTS); do \
 		echo "== $$t"; PYTHONPATH=sweeper python3 $$t; \
 	done
+
+# Deploy tooling unit suite. Stdlib only, offline: no board, no host, no sudo.
+# One of its tests runs the repo-wide secret-hygiene scan that scripts/smoke.sh
+# executes (and deploy/upgrade.py runs as its final verification step), so a
+# source line that would turn every upgrade into a reported failure goes red
+# here instead of at deploy time.
+test-deploy:
+	python3 deploy/tests/test_upgrade.py
