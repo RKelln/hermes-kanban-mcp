@@ -12,7 +12,11 @@ provenance") and the reviewer's only exit is a block. The card is then
 Returning it is NOT `unblock`. `unblock_task` is provenance-sensitive: it
 restores the phase the card was blocked in, so a card blocked BY A REVIEWER
 RUN goes back to `review`, where the lane still cannot claim it. `promote_task`
-is the one verb that forces `ready` (it refuses only on unfinished parents).
+is the verb that forces `ready` for a card in this phase, and it is subject to
+two guards, both checked before any write: the card's status must be `todo` or
+`blocked` (a card parked in `review` is refused, not forced to `ready`) and
+every parent must already be terminal. A review-finished block satisfies both,
+which is why this tick uses it and nothing else.
 See t_f16003a1 (the kernel gap) and t_02c3e7d2 (the incident).
 
 WHAT IT DELIBERATELY IS NOT
@@ -99,11 +103,32 @@ def run_cli(*argv: str) -> tuple[int, str]:
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
+class BoardSelectionError(RuntimeError):
+    """A `--board` request that resolves to nothing: loud, never a silent no-op.
+
+    Silence means "nothing to do" and the cron delivers stdout, so an empty
+    selection must not be able to impersonate an idle tick: with `--verbose`
+    the contract is that no-ops are reported so silence is auditable, and the
+    sweeper this tick replaces is remembered for `last_status: ok` while blind.
+    """
+
+
 def board_slugs(only: str | None) -> list[str]:
     rc, out = run_cli("boards", "list", "--json")
     if rc != 0:
         raise RuntimeError("boards list failed: %s" % out)
     slugs = [b.get("slug") for b in json.loads(out) if b.get("slug")]
+    if not slugs:
+        # Every box has at least the default board, so an empty list is a read
+        # that failed, not a board set that is genuinely empty.
+        raise BoardSelectionError(
+            "boards list --json returned no boards%s; refusing to report an idle "
+            "tick while blind" % (" (requested --board %r)" % only if only else ""))
+    if only is not None and only not in slugs:
+        raise BoardSelectionError(
+            "--board %r is not a board on this box (known: %s); refusing to report "
+            "an idle tick for a board that does not exist"
+            % (only, ", ".join(slugs)))
     return [s for s in slugs if only is None or s == only]
 
 

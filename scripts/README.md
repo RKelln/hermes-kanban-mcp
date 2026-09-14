@@ -21,7 +21,7 @@ than only in the module docstring.
 | verb | `blocked` card → | `review` card → | notes |
 |---|---|---|---|
 | `unblock` | **restores the phase it was blocked in** | n/a | `unblock_task` (`kanban_db.py:3264-3305`) reads `resume_status` from the block event's `source_status`, so a card blocked *by a review run* unblocks back to **`review`** — where the lane still cannot claim it, and the dispatcher spawns another reviewer on an unchanged tree. |
-| `promote` | **`ready`**, always | `ready` | `promote_task` (`:3185-3231`) has no run-provenance logic; it refuses only on unfinished parents. **This is the verb for a reviewer-blocked card.** |
+| `promote` | **`ready`** unless a parent is unfinished | refused | `promote_task` (`:3185-3231`) has no run-provenance logic, but it has two guards, and both are checked *before* any write: the card's status must be `todo` or `blocked` (`:3196-3200` — a card parked in `review` is **refused**, not forced to `ready`), and every parent must already be terminal (`:3205-3217`). **This is the verb for a reviewer-blocked card** — the one status pair both guards admit. |
 | `reopen-review` | refused | `ready` / `todo` | the exit for a card already parked in `review`; provenance-*tolerant*. |
 | `request-changes` | — | → `ready` assigned to the implementer | **refuses outright** when the handoff recorded `implementer: null` (`:3146-3147`), which is the gap this tick exists for. |
 
@@ -62,6 +62,11 @@ delegated-child context, and a `no_agent` cron script is not marked as one.
 
 - An idle tick prints **nothing** (the cron delivers stdout, so silence is the
   correct idle signal). Actions and warnings print.
+- `--board <slug>` that names no board on the box, or a `boards list --json`
+  that comes back empty, is a **loud error** with a non-zero exit that names the
+  requested slug — a selection that resolves to nothing must not impersonate an
+  idle tick. A registered board that has no DB yet is still skipped in silence:
+  that is a board the tick can see, not one it cannot find.
 - A promote that reports success but does not change the board is an **error**,
   not a success — the tick re-reads the status before claiming anything.
 - A failed audit comment *after* a successful promote is an **error** with a

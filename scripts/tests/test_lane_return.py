@@ -46,7 +46,8 @@ FAKE_CLI = textwrap.dedent(
     with open(os.environ["FAKE_LOG"], "a", encoding="utf-8") as fh:
         fh.write(json.dumps(argv) + "\\n")
     if "boards" in argv and "list" in argv:
-        boards = os.environ.get("FAKE_BOARDS", "probe").split(",")
+        # FAKE_BOARDS="" is the empty board list (`boards list --json` -> []).
+        boards = [b for b in os.environ.get("FAKE_BOARDS", "probe").split(",") if b]
         print(json.dumps([{"slug": b} for b in boards]))
         sys.exit(0)
     if "promote" in argv:
@@ -309,12 +310,41 @@ class TestActing(Harness):
         self.assertEqual(len(promotes), 1)
         self.assertIn("probe", promotes[0])
 
-    def test_an_unknown_board_is_a_silent_no_op(self):
+    def test_an_unknown_board_is_a_loud_error(self):
+        # Was a silent no-op (rc 0, no output) even with --verbose, whose whole
+        # job is to make no-ops auditable: an idle tick and a blind tick were
+        # indistinguishable.
         self.add_card("t_x", reason="review-required: REQUEST_CHANGES")
-        rc, out = self.run_tick("--board", "no-such-board")
+        rc, out = self.run_tick("--board", "no-such-board", "--verbose")
+        self.assertEqual(rc, 1, "an unknown --board must not pass for an idle tick: %r" % out)
+        self.assertIn("no-such-board", out, "the error must name the requested slug")
+        self.assertEqual(self.status("t_x"), "blocked", "nothing may be touched")
+        self.assertEqual([c for c in self.calls() if "promote" in c], [])
+
+    def test_an_empty_board_list_is_a_loud_error(self):
+        os.environ["FAKE_BOARDS"] = ""   # `boards list --json` -> []
+        self.add_card("t_y", reason="review-required: REQUEST_CHANGES")
+        rc, out = self.run_tick("--board", "probe")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("probe", out)
+        self.assertEqual(self.status("t_y"), "blocked")
+        self.assertEqual([c for c in self.calls() if "promote" in c], [])
+
+    def test_an_empty_board_list_is_loud_without_a_board_flag(self):
+        # The deployed cron passes no --board, so this is the tick-while-blind
+        # case: an empty read must not be reported as "nothing to do".
+        os.environ["FAKE_BOARDS"] = ""
+        rc, out = self.run_tick()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("no boards", out)
+
+    def test_a_registered_board_with_no_db_yet_is_still_silent(self):
+        # The loud cases are selection failures. A board the tick can see but
+        # that has no DB file yet stays a quiet skip.
+        os.unlink(self.db_path("default"))
+        rc, out = self.run_tick()
         self.assertEqual(rc, 0, out)
-        self.assertEqual(out, "", "an unknown board is not an error and not noise")
-        self.assertEqual(self.status("t_x"), "blocked")
+        self.assertEqual(out, "", "a registered board without a DB is not an error")
 
 
 class TestNotActing(Harness):
