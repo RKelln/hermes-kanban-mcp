@@ -40,6 +40,12 @@ type Config struct {
 	MCPClaimWorker string
 	// MCPCommentAuthor is the author name stamped on tool-generated comments. Env: MCP_COMMENT_AUTHOR.
 	MCPCommentAuthor string
+	// MCPReviewerProfile is the default reviewer for ticket_request_review
+	// when the caller passes none. MUST be an installed profile the
+	// dispatcher can spawn — a non-profile value makes the tool refuse,
+	// because a review row on an unspawnable assignee never runs.
+	// Env: MCP_REVIEWER_PROFILE.
+	MCPReviewerProfile string
 	// MCPRateLimit caps MCP calls per minute. Env: MCP_RATE_LIMIT.
 	MCPRateLimit int
 	// LogLevel sets the log verbosity. Env: LOG_LEVEL.
@@ -56,6 +62,11 @@ const (
 	defaultCompleteMode  = "review"
 	defaultClaimWorker   = "opencode-remote"
 	defaultCommentAuthor = "opencode-remote"
+	// defaultReviewerProfile is deliberately EMPTY: there is no safe
+	// universal reviewer. Hardcoding one would silently choose who reviews
+	// on every deployment, and the tool already refuses (with the installed
+	// roster in the message) when no reviewer can be resolved.
+	defaultReviewerProfile = ""
 	defaultRateLimit     = 60
 	defaultLogLevel      = "info"
 
@@ -81,6 +92,7 @@ func Load() (*Config, error) {
 		MCPCompleteMode:    getEnv("MCP_COMPLETE_MODE", defaultCompleteMode),
 		MCPClaimWorker:     getEnv("MCP_CLAIM_WORKER", defaultClaimWorker),
 		MCPCommentAuthor:   getEnv("MCP_COMMENT_AUTHOR", defaultCommentAuthor),
+		MCPReviewerProfile: getEnv("MCP_REVIEWER_PROFILE", defaultReviewerProfile),
 		LogLevel:           getEnv("LOG_LEVEL", defaultLogLevel),
 	}
 
@@ -148,6 +160,7 @@ func (c *Config) String() string {
 	fmt.Fprintf(&b, "MCPAllowSkipClaim=%t\n", c.MCPAllowSkipClaim)
 	fmt.Fprintf(&b, "MCPClaimWorker=%s\n", c.MCPClaimWorker)
 	fmt.Fprintf(&b, "MCPCommentAuthor=%s\n", c.MCPCommentAuthor)
+	fmt.Fprintf(&b, "MCPReviewerProfile=%s\n", c.MCPReviewerProfile)
 	fmt.Fprintf(&b, "MCPRateLimit=%d\n", c.MCPRateLimit)
 	fmt.Fprintf(&b, "LogLevel=%s\n", c.LogLevel)
 	return b.String()

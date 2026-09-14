@@ -28,7 +28,8 @@ tools (`hermes-kanban-*`).
   instead of landing tickets in the wrong queue.
 - **Capture the ticket `id` from the `ticket_create` response (`t_<hex>`) and reuse it
   verbatim on every subsequent call.** Every per-ticket call — `ticket_claim`,
-  `ticket_comment`, `ticket_get`, `ticket_complete`, `ticket_block` — requires BOTH
+  `ticket_comment`, `ticket_get`, `ticket_complete`, `ticket_request_review`,
+  `ticket_block` — requires BOTH
   `board` and `id`. Omitting `id` fails the call with `invalid ticket id`; do not guess,
   truncate, or reconstruct it. If a call errors, `ticket_list`/`ticket_get` to recover the
   id before retrying.
@@ -41,19 +42,41 @@ tools (`hermes-kanban-*`).
   The human merges to main during review; the agent does not self-merge.
 - Workflow: `ticket_create` (lands `ready`; `triage: true` for triage) → `ticket_claim`
   right before editing (ready→running) → `ticket_comment` as you work → push → record the
-  commit SHA in a ticket comment → `ticket_complete`. Completion is review-gated: the
-  ticket lands `blocked` (review-required) for review, not `done`.
-- **Wait for the review** — completing review-gated work leaves the ticket `blocked`. Poll
-  `ticket_events` with the last seen event id (default long-poll is 120s, max 15m — one call
-  covers a full review cycle; if the ticket already left `blocked` it returns instantly with
-  its `ticket_status`), or `ticket_get`, until it leaves `blocked`: `done` → the review
-  passed → merge your branch to main (the reviewer never merges); `ready` → REQUEST CHANGES →
-  re-claim, fix, re-complete; still `blocked` → ESCALATED → surface to the human; do not re-loop.
-- **Push BEFORE `ticket_complete`.** The review gate reads the pushed commit. After
-  pushing, comment the repo + branch + commit SHA + changed files on the ticket so the
-  reviewer can resolve it. A ticket in review with no commit ref is unreviewable.
-- **Claims TTL ~15 min.** Re-claim before `ticket_complete` if yours expired — completion
-  refuses an unclaimed ticket.
+  commit SHA in a ticket comment → **request review**. Two completion paths exist and both
+  are live:
+  - `ticket_request_review` — the native review lane. The ticket moves to `review` (not
+    `blocked`), the dispatcher claims it as a review run and spawns the `sdlc-review`
+    reviewer, and the verdict comes back to you. `summary` is required — it IS the
+    reviewer's handoff (what changed, the refs to verify, what you already proved); do not
+    make the reviewer re-derive it. `reviewer` is optional: it resolves to
+    `MCP_REVIEWER_PROFILE` when the caller passes none, is verified against the installed
+    profile roster, and is REFUSED when it is not a profile the dispatcher can spawn (an
+    unspawnable reviewer parks the card in `review` forever). **Moving a `running` ticket
+    requires `force: true`** — the bridge cannot verify claim ownership (one shared bearer
+    token), so releasing a live claim is your explicit call; pass it only for work you
+    claimed yourself, never for a ticket someone else holds mid-implementation.
+  - `ticket_complete` — the older path. Completion is review-gated: the ticket lands
+    `blocked` (review-required) for a human or the review-sweeper, not `done`.
+- **Push BEFORE requesting review.** The reviewer reads the pushed commit, and a ticket
+  whose branch is not on origin cannot be reviewed at all. If your work is already merged
+  and the branch deleted, say so in `summary` and name the merge commit and the range to
+  diff — a reviewer that goes looking for a deleted branch burns its run.
+- **Wait for the review — on either path.** `ticket_request_review` leaves the ticket in
+  `review`; a review-gated `ticket_complete` leaves it `blocked`. Poll `ticket_events` with
+  the last seen event id (default long-poll is 120s, max 15m — one call covers a full review
+  cycle; if the ticket already left that state it returns instantly with its
+  `ticket_status`), or `ticket_get`, until it leaves it:
+  - `done` → the review passed → merge your branch to main (the reviewer never merges);
+  - `ready` → REQUEST CHANGES → re-claim, fix, push, request review again;
+  - still `blocked` with an ESCALATE comment → surface to the human; do not re-loop;
+  - `triage` → the kernel's block-loop breaker parked it mid-cycle; surface to the human
+    rather than re-completing (each cycle worsens it).
+- **Comment the refs on the ticket too.** The reviewer resolves the work from the ticket, not
+  just from `summary`: after pushing, comment repo + branch + commit SHA + changed files. A
+  ticket in review with no commit ref is unreviewable.
+- **Claims TTL ~15 min.** Re-claim before completing if yours expired — completion refuses an
+  unclaimed ticket. `ticket_request_review` accepts a `ready` ticket too, so an expired claim
+  is recoverable either way.
 - Never put credentials in ticket bodies — write `***`.
 
 Prohibited: touching the live `~/.hermes` install tree, SSH to framework, pushing without

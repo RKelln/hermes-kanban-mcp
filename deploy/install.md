@@ -100,9 +100,10 @@ sudo install -m 0644 deploy/kanban-mcp.service /etc/systemd/system/kanban-mcp.se
 **Before enabling, edit `User=` in the unit** — `__SERVICE_USER__` is a
 placeholder that MUST be replaced with the account that can execute `hermes`.
 That account is the one whose `~/.hermes/` holds the kanban state the service
-manages, and it must be able to run the `hermes` CLI for the claim and typed
-block shell-outs (`HERMES_BIN`). It is usually the account that owns the kanban
-dashboard (e.g. `experimance`), not `root` and not a purpose-made system user.
+manages, and it must be able to run the `hermes` CLI for the claim, typed
+block and review-request shell-outs (`HERMES_BIN`). It is usually the account
+that owns the kanban dashboard (e.g. `experimance`), not `root` and not a
+purpose-made system user.
 
 Then:
 
@@ -117,21 +118,28 @@ Check it came up:
 systemctl status kanban-mcp --no-pager
 ```
 
-### ProtectHome and `hermes kanban claim`
+### ProtectHome and the write shell-outs (`claim`, `block`, `request-review`)
 
 The shipped unit sets `ProtectHome=read-only` deliberately: the bridge only
 needs to READ Hermes state under the service user's home while proxying REST
 calls, and full write access to `$HOME` would let a compromised bridge rewrite
 the operator's entire home directory for no functional gain.
 
-The known trade-off is **not** silently relaxed: `hermes kanban claim` (and
-typed `hermes kanban block`) shell out via `$HERMES_BIN` and WRITE to
-`~/.hermes/kanban.db` under the service user's home. Under
-`ProtectHome=read-only` those writes fail. If claim support is required and the
-write cannot be avoided:
+**THREE tools write through `$HERMES_BIN` and therefore need write access to
+`~/.hermes/kanban.db` under this unit:** `ticket_claim` (ready→running),
+`ticket_block` (typed kinds), and `ticket_request_review` (the native review
+lane, the recommended completion path). All three are the same shell-out class;
+a carve-out that covers one and not the others fails confusingly, because the
+tools that keep working are the ones that never needed the write.
+
+The known trade-off is **not** silently relaxed: `hermes kanban claim`,
+`hermes kanban block --kind`, and `hermes kanban request-review` all shell out
+via `$HERMES_BIN` and WRITE to `~/.hermes/kanban.db` under the service user's
+home. Under `ProtectHome=read-only` those writes fail. If any of them is
+required and the write cannot be avoided:
 
 - Either set `ProtectHome=false` in the unit and document why it is loosened
-  here (service user needs write access to `~/.hermes/kanban.db` for claim
+  here (service user needs write access to `~/.hermes/kanban.db` for the write
   shell-outs), or
 - prefer a narrower carve-out once `__SERVICE_USER__` is known: keep
   `ProtectHome=read-only` and add
@@ -140,7 +148,9 @@ write cannot be avoided:
 The decision belongs in this file and in the unit comment — never loosen it
 silently. If the claim shell-out is unavailable, `ticket_claim` degrades to
 comment-only advisory mode (per `MCP_ALLOW_SKIP_CLAIM`) rather than failing
-hard.
+hard. `ticket_request_review` has no such fallback by design: it refuses and
+names the reason, because a review row nobody can dispatch is worse than a
+clear error.
 
 ## 5. Smoke test
 
@@ -154,7 +164,8 @@ The script asserts, in order: `/healthz` → 200; unauthenticated and
 wrong-token `/mcp` calls → 401 with a JSON body and `WWW-Authenticate: Bearer`;
 an `initialize` with the correct token → 200; `tools/list` → all tool names
 (`board_list, ticket_list, ticket_get, ticket_claim, ticket_comment,
-ticket_complete, ticket_block, ticket_create, ticket_events, kanban_help`); `board_list` → includes
+ticket_complete, ticket_request_review, ticket_block, ticket_create,
+ticket_events, kanban_help, review_queue`); `board_list` → includes
 `hermes-kanban-mcp`. It also runs the secret-hygiene checks (no bearer token,
 password, or set-cookie in recent journald output; no real secrets in git). It
 exits non-zero with the failing step named.
@@ -194,8 +205,47 @@ On the machine running opencode, add the server to
 chmod 0600 ~/.config/opencode/opencode.json
 ```
 
-After editing, restart opencode and confirm the 9 `hermes-kanban-*` tools are listed
+After editing, restart opencode and confirm the 12 `hermes-kanban-*` tools are listed
 in a session.
+
+## Upgrading an existing install
+
+**Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example
+/etc/kanban-mcp.env` OVERWRITES the target, and the example contains placeholders —
+it would destroy the real `KANBAN_PASSWORD` and `MCP_BEARER_TOKEN`. Add new keys
+to the live file instead.
+
+From the repo, on the reviewed commit:
+
+```sh
+# 1. build a static binary from the branch under review
+git rev-parse --short HEAD          # record the SHA you are shipping
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" \
+  -o kanban-mcp ./cmd/kanban-mcp
+
+# 2. back up the live env BEFORE touching it
+sudo cp -a /etc/kanban-mcp.env /etc/kanban-mcp.env.bak-$(date +%Y%m%d-%H%M)
+
+# 3. append only the NEW key(s) — never replace the file
+sudo grep -q '^MCP_REVIEWER_PROFILE=' /etc/kanban-mcp.env || \
+  printf '\nMCP_REVIEWER_PROFILE=default\n' | sudo tee -a /etc/kanban-mcp.env
+
+# 4. install the binary and the unit, then restart
+sudo install -m 0755 kanban-mcp /usr/local/bin/kanban-mcp
+sudo install -m 0644 deploy/kanban-mcp.service /etc/systemd/system/kanban-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl restart kanban-mcp.service
+systemctl is-active kanban-mcp.service
+
+# 5. verify the SERVED tool roster (now 12 names, including ticket_request_review)
+URL=http://127.0.0.1:9130 MCP_BEARER_TOKEN=<token> scripts/smoke.sh
+```
+
+After the restart, confirm the redacted startup config names the reviewer profile
+you expect — `MCPReviewerProfile` appears in the log line printed at boot. Then
+make one real `ticket_request_review` call and check the ticket reaches `review`
+with a spawnable assignee (`hermes kanban --board <slug> show <id>`).
 
 ## Rollback
 

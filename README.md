@@ -1,12 +1,12 @@
 # hermes-kanban-mcp
 
-> **⚠️ EARLY — IMPLEMENTED, NOT YET STABLE.** This repository started as a 2026-08 design-phase experiment and is now a working implementation: all 11 MCP tools implemented, tested (`go vet` + `go test -race` green), and smoke-verified against a live Hermes kanban board. It is still young — expect API adjustments and breaking changes while it hardens. Use at your own risk; no support implied.
+> **⚠️ EARLY — IMPLEMENTED, NOT YET STABLE.** This repository started as a 2026-08 design-phase experiment and is now a working implementation: all 12 MCP tools implemented, tested (`go vet` + `go test -race` green), and smoke-verified against a live Hermes kanban board. It is still young — expect API adjustments and breaking changes while it hardens. Use at your own risk; no support implied.
 
 Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode agents (or any MCP client) over streamable HTTP.
 
 ## Features
 
-- **11 MCP tools** over streamable HTTP at `/mcp`, MCP v2 with protocol-version negotiation for older clients:
+- **12 MCP tools** over streamable HTTP at `/mcp`, MCP v2 with protocol-version negotiation for older clients:
 
   | Tool | Purpose |
   |---|---|
@@ -18,6 +18,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`) |
   | `ticket_comment` | Append a comment |
   | `ticket_complete` | Complete a ticket — **review-gated by default**, with a `review_tier` knob (`LOW` completes direct) |
+  | `ticket_request_review` | Request a final review: `ready`/`running` → `review` (the native review lane — a dispatched `sdlc-review` reviewer, not a block). `summary` required; refuses when no reviewer can be resolved |
   | `ticket_block` | Block a ticket; typed kinds via CLI with REST fallback |
   | `ticket_create` | Create a ticket (title required; parents supported) |
   | `kanban_help` | Full MCP-native usage + lifecycle contract |

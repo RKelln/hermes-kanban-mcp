@@ -78,6 +78,19 @@ func blockSchema() map[string]any {
 		"kind":   map[string]any{"type": "string", "enum": []string{"dependency", "needs_input", "capability", "transient"}},
 	}, "id", "board")
 }
+func requestReviewSchema() map[string]any {
+	return objReq(map[string]any{
+		"board":    propStr(),
+		"id":       propStr(),
+		"summary":  propStr(),
+		"reviewer": propStr(),
+		"force": map[string]any{
+			"type":        "boolean",
+			"default":     false,
+			"description": "Required to move a RUNNING ticket (it releases your live claim; the CLI has no --expected-run-id). Must be omitted for a ready ticket. Only pass it if you claimed the ticket yourself and are requesting review of your own finished work.",
+		},
+	}, "id", "board", "summary")
+}
 func eventsSchema() map[string]any {
 	return objReq(map[string]any{
 		"id":              propStr(),
@@ -117,9 +130,13 @@ func Register(srv *mcp.Server, s *Server) {
 		commentSchema(),
 		s.TicketComment)
 
-	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block; created_cards (done mode only) is the manifest of child ticket ids the kernel's audit gate verifies. (id and board required)",
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block; created_cards (done mode only) is the manifest of child ticket ids the kernel's audit gate verifies. Prefer ticket_request_review for a final review when the server has review dispatch enabled — this gate is the older review-required BLOCK convention. (id and board required)",
 		completeSchema(),
 		s.TicketComplete)
+
+	addTool(srv, "ticket_request_review", "Request a FINAL REVIEW of a finished ticket: ready/running -> 'review' via the hermes CLI (not a block). The dispatcher then claims the ticket as a REVIEW run and spawns the sdlc-review reviewer; APPROVE completes it to done, changes come back to you. summary is required — it is the reviewer's handoff (what changed, the refs to verify, what you already proved). reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE; it is VERIFIED against the installed profile roster and refused if it is not a profile the dispatcher can spawn (a non-profile reviewer parks the card in 'review' forever), and when neither source supplies one the kernel's own re-review provenance is used. Moving a RUNNING ticket additionally requires force: true — it releases your live claim, so pass it only for work you claimed yourself. Push your branch FIRST, and do NOT merge before the verdict: done means merge. (id, board and summary required)",
+		requestReviewSchema(),
+		s.TicketRequestReview)
 
 	addTool(srv, "ticket_block", "Block a ticket; typed kinds (dependency|needs_input|capability|transient) via the CLI with untyped REST fallback. (id and board required)",
 		blockSchema(),

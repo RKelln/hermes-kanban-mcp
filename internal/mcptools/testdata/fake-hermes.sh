@@ -15,7 +15,7 @@ verb=""
 id=""
 for arg in "$@"; do
   case "$arg" in
-    claim|block) verb="$arg" ;;
+    claim|block|request-review) verb="$arg" ;;
     *)
       if [ -n "$verb" ] && [ -z "$id" ]; then
         id="$arg"
@@ -23,6 +23,14 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# Optional argv capture, for tests that must assert what the tool layer
+# actually passed (the --force decision). The production child env is
+# scrubbed down to PATH/HOME/LANG/HERMES_*, so the path has to arrive
+# under a HERMES_-prefixed name to survive the scrub.
+if [ -n "$HERMES_FAKE_ARGV_LOG" ]; then
+  printf '%s\n' "$*" >> "$HERMES_FAKE_ARGV_LOG"
+fi
 
 emit_big() {
   i=0
