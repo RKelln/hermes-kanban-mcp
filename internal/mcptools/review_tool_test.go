@@ -95,8 +95,8 @@ func TestTRR_SuccessReady(t *testing.T) {
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0", n)
 	}
-	if n := backend.profileProbes(); n != 1 {
-		t.Errorf("profile probes = %d, want 1 (reviewer must be verified spawnable)", n)
+	if n := backend.profileProbes(); n != 2 {
+		t.Errorf("profile probes = %d, want 2 (verify the requested reviewer, then re-verify the assignee that actually landed)", n)
 	}
 	argv := readArgv()
 	if len(argv) != 1 {
@@ -248,16 +248,21 @@ func TestTRR_UnverifiedRosterAnnounced(t *testing.T) {
 }
 
 // F3 regression (MEDIUM): after request-changes the kernel sets
-// assignee = the implementer, so using the assignee as the reviewer makes
-// round 2 a self-review. With no reviewer configured the tool must omit
-// --reviewer and let the kernel resolve its own provenance.
-func TestTRR_AssigneeIsNotUsedAsReviewer(t *testing.T) {
+// assignee = the implementer, so SUBSTITUTING the assignee as the reviewer
+// would make round 2 a self-review. With no reviewer configured the tool
+// must omit --reviewer and leave the kernel's own choice intact.
+//
+// Note what this test does NOT claim: it is not a licence to skip
+// verification. The assignee here is a roster member, so the review row is
+// dispatchable; TestTRR_PreservedNonSpawnableAssigneeRefused covers the
+// non-spawnable case, which an earlier version of this test blessed.
+func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 	noEnvReviewer(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"the-implementer"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"the-reviewer"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"bob"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -272,16 +277,96 @@ func TestTRR_AssigneeIsNotUsedAsReviewer(t *testing.T) {
 		t.Fatalf("argv = %v, want one invocation", argv)
 	}
 	if strings.Contains(argv[0], "--reviewer=") {
-		t.Errorf("argv = %q, must omit --reviewer so the kernel's provenance applies", argv[0])
-	}
-	if strings.Contains(argv[0], "the-implementer") {
-		t.Errorf("argv = %q, the implementer must never become the reviewer", argv[0])
+		t.Errorf("argv = %q, must omit --reviewer so the kernel's own choice applies", argv[0])
 	}
 	if out := decodeOut[TicketRequestReviewOut](t, res); !strings.Contains(out.Note, "previous review round") {
 		t.Errorf("note = %q, want it to state the kernel's provenance was used", out.Note)
 	}
-	if n := backend.profileProbes(); n != 0 {
-		t.Errorf("profile probes = %d, want 0 (no reviewer to verify)", n)
+	// The preserved assignee is still VERIFIED for spawnability — that is
+	// the difference between checking a value and substituting it.
+	if n := backend.profileProbes(); n != 2 {
+		t.Errorf("profile probes = %d, want 2 (the preserved assignee must still be verified)", n)
+	}
+}
+
+// Round-2 F1 regression (HIGH): with no reviewer supplied, the kernel
+// PRESERVES the existing assignee. If that assignee is not a spawnable
+// profile the card sits in 'review' forever — the exact strand — so the
+// tool must refuse before creating it.
+func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	// "ryan" and "parent-worker" are real non-spawnable assignees on this
+	// host (`hermes kanban assignees`: default yes, ryan no).
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for a preserved non-spawnable assignee, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"ryan", "not an installed profile", "MCP_REVIEWER_PROFILE", "alice"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0 (must not create the stranded row)", n)
+	}
+
+	// Same card, but with a configured reviewer: now it proceeds, and the
+	// configured reviewer is used rather than the preserved assignee.
+	// Fresh backend: scripted orders repeat their last body, and the first
+	// half already consumed a GET.
+	t.Setenv("MCP_REVIEWER_PROFILE", "bob")
+	backend2 := newClaimBackend()
+	backend2.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+	}
+	readArgv2 := argvLog(t)
+	s2 := newClaimToolServer(t, backend2)
+	res = s2.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success with a configured reviewer, got IsError: %s", res.Content[0].Text)
+	}
+	argv := readArgv2()
+	if len(argv) != 1 || !strings.Contains(argv[0], "--reviewer=bob") {
+		t.Fatalf("argv = %v, want exactly one invocation with --reviewer=bob", argv)
+	}
+}
+
+// Round-2 F1, second half: the assignee that ACTUALLY LANDS can differ from
+// the one requested (the kernel prefers its own prior-reviewer provenance).
+// The post-condition must check what landed, not what was asked for.
+func TestTRR_PostconditionNonSpawnableAssignee(t *testing.T) {
+	noEnvReviewer(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"parent-worker"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for a review row assigned to a non-profile, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"parent-worker", "not an installed profile"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
 	}
 }
 

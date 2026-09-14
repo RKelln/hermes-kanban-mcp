@@ -208,6 +208,45 @@ chmod 0600 ~/.config/opencode/opencode.json
 After editing, restart opencode and confirm the 12 `hermes-kanban-*` tools are listed
 in a session.
 
+## Upgrading an existing install
+
+**Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example
+/etc/kanban-mcp.env` OVERWRITES the target, and the example contains placeholders —
+it would destroy the real `KANBAN_PASSWORD` and `MCP_BEARER_TOKEN`. Add new keys
+to the live file instead.
+
+From the repo, on the reviewed commit:
+
+```sh
+# 1. build a static binary from the branch under review
+git rev-parse --short HEAD          # record the SHA you are shipping
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X main.version=$(git describe --tags --always --dirty)" \
+  -o kanban-mcp ./cmd/kanban-mcp
+
+# 2. back up the live env BEFORE touching it
+sudo cp -a /etc/kanban-mcp.env /etc/kanban-mcp.env.bak-$(date +%Y%m%d-%H%M)
+
+# 3. append only the NEW key(s) — never replace the file
+sudo grep -q '^MCP_REVIEWER_PROFILE=' /etc/kanban-mcp.env || \
+  printf '\nMCP_REVIEWER_PROFILE=default\n' | sudo tee -a /etc/kanban-mcp.env
+
+# 4. install the binary and the unit, then restart
+sudo install -m 0755 kanban-mcp /usr/local/bin/kanban-mcp
+sudo install -m 0644 deploy/kanban-mcp.service /etc/systemd/system/kanban-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl restart kanban-mcp.service
+systemctl is-active kanban-mcp.service
+
+# 5. verify the SERVED tool roster (now 12 names, including ticket_request_review)
+URL=http://127.0.0.1:9130 MCP_BEARER_TOKEN=<token> scripts/smoke.sh
+```
+
+After the restart, confirm the redacted startup config names the reviewer profile
+you expect — `MCPReviewerProfile` appears in the log line printed at boot. Then
+make one real `ticket_request_review` call and check the ticket reaches `review`
+with a spawnable assignee (`hermes kanban --board <slug> show <id>`).
+
 ## Rollback
 
 ```sh

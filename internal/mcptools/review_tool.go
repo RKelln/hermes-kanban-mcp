@@ -176,34 +176,48 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 
 	// Reviewer resolution: explicit argument, then the server default.
 	// Deliberately NOT the ticket's assignee — after a request-changes
-	// verdict the kernel sets assignee = the implementer, so falling back
-	// to it would assign the next round to the author of the change, i.e.
-	// self-review. When neither source supplies a reviewer we omit the
-	// flag entirely and let the kernel resolve its own re-review
-	// provenance, which is the only durable source for it.
-	reviewer := strings.TrimSpace(in.Reviewer)
-	if reviewer == "" {
-		reviewer = strings.TrimSpace(os.Getenv("MCP_REVIEWER_PROFILE"))
+	// verdict the kernel sets assignee = the implementer, so *substituting*
+	// it as the reviewer would make the next round a self-review.
+	//
+	// Two values matter and they are NOT the same one:
+	//   flagReviewer  — what we pass to the CLI. Empty means "omit
+	//                   --reviewer" and let the kernel make its own choice
+	//                   (prior-reviewer provenance, else preserve the
+	//                   existing assignee). Passing the assignee here would
+	//                   substitute it and defeat that provenance.
+	//   verifyValue   — what will END UP on the review row, which is what
+	//                   the dispatcher spawns on. Verified in every tier:
+	//                   an unspawnable assignee is the strand no matter who
+	//                   chose it. Verifying a value is not substituting it.
+	flagReviewer := strings.TrimSpace(in.Reviewer)
+	if flagReviewer == "" {
+		flagReviewer = strings.TrimSpace(os.Getenv("MCP_REVIEWER_PROFILE"))
 	}
-	note := reviewNote
-	if reviewer == "" {
-		if strings.TrimSpace(ts.Assignee) == "" {
+	useProvenance := flagReviewer == ""
+	verifyValue := flagReviewer
+	if useProvenance {
+		verifyValue = strings.TrimSpace(ts.Assignee)
+		if verifyValue == "" {
 			return ErrorResult("invalid_input: no reviewer resolved and ticket %s is unassigned. The dispatcher never spawns an unassigned review ticket — it would sit in 'review' silently and no reviewer would ever run. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID)
 		}
-		// Keep the kernel's own provenance path: assignee is preserved
-		// and _prior_reviewer is consulted.
-		note = reviewNote + ";" + reviewProvenanceNote
-	} else {
-		ok, checked, names := s.profileSpawnable(ctx, reviewer)
-		switch {
-		case checked && !ok:
-			return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", reviewer, strings.Join(names, ", "))
-		case !checked:
-			note = reviewNote + ";" + reviewUnverifiedNote
-		}
 	}
+	notes := []string{reviewNote}
+	ok, checked, names := s.profileSpawnable(ctx, verifyValue)
+	switch {
+	case checked && !ok:
+		if useProvenance {
+			return ErrorResult("invalid_input: no reviewer was supplied and ticket %s carries assignee %q, which is not an installed profile. The kernel would preserve that assignee, so the card would sit in 'review' with no reviewer the dispatcher can ever spawn. Installed profiles: %s. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID, verifyValue, strings.Join(names, ", "))
+		}
+		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", verifyValue, strings.Join(names, ", "))
+	case !checked:
+		notes = append(notes, reviewUnverifiedNote)
+	}
+	if useProvenance {
+		notes = append(notes, reviewProvenanceNote)
+	}
+	note := strings.Join(notes, ";")
 
-	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), reviewer, force); err != nil {
+	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), flagReviewer, force); err != nil {
 		return ErrorResult("%s", cliFailureText(stderr, err))
 	}
 
@@ -220,6 +234,13 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	}
 	if strings.TrimSpace(after.Assignee) == "" {
 		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. Set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server, or pass reviewer explicitly, then request again.", in.ID)
+	}
+	// The row's assignee can differ from what we asked for: with no reviewer
+	// supplied the kernel prefers its own prior-reviewer provenance over the
+	// existing assignee. Verify what actually LANDED, not what was requested
+	// — the dispatcher spawns on this value and nothing else.
+	if aok, achecked, anames := s.profileSpawnable(ctx, after.Assignee); achecked && !aok {
+		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. Set MCP_REVIEWER_PROFILE (e.g. \"default\") or pass reviewer explicitly, then request again.", in.ID, after.Assignee, strings.Join(anames, ", "))
 	}
 	return SuccessResult(TicketRequestReviewOut{
 		ID:       after.ID,

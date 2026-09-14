@@ -35,9 +35,15 @@ MCP tools for a Hermes kanban board:
     spawns the sdlc-review reviewer; APPROVE completes the ticket to done,
     request-changes returns it to you. summary is REQUIRED — it is the
     reviewer's handoff (what changed, the refs to verify, what you proved).
-    reviewer resolves: explicit reviewer > MCP_REVIEWER_PROFILE > the ticket's
-    assignee; if none resolves the call is REFUSED, because the dispatcher
-    never spawns an unassigned review ticket and it would strand silently.
+    reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE. Whichever
+    value will END UP on the review row is verified against the installed
+    profile roster and REFUSED if the dispatcher could never spawn it, because
+    a review row on a non-profile assignee parks in 'review' forever. When
+    neither source supplies a reviewer the flag is omitted and the kernel
+    keeps its own choice (prior-reviewer provenance, else the existing
+    assignee) — that value is verified the same way. Moving a RUNNING ticket
+    additionally requires force: true (the bridge cannot verify claim
+    ownership behind one shared bearer token).
     Push your branch FIRST. Do NOT merge before the verdict: done means merge.
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
     review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
