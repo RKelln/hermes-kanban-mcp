@@ -210,12 +210,56 @@ in a session.
 
 ## Upgrading an existing install
 
+**For an existing install, use `deploy/upgrade.py` — it is the supported path.
+The manual steps below are the reference for a first install and for changing
+the unit file or the env file.**
+
+```sh
+python3 deploy/upgrade.py --dry-run                  # preflight and plan, changes nothing
+python3 deploy/upgrade.py --expect <sha-of-the-fix>  # build, back up, install, restart, verify
+```
+
+`--expect <ref>` is the flag to reach for whenever you are upgrading to ship a
+particular merged commit: the script refuses unless the commit it is about to
+deploy CONTAINS that ref, so a checkout that is behind cannot land a build
+predating the fix you meant to ship. It exists because that happened on
+2026-09-14 — a redeploy served a pre-fix binary and reported the old version.
+
+It is binary-only on purpose: it never writes the unit file (that is how the
+`__SERVICE_USER__` placeholder took the service down — systemd reports the
+result as `217/USER` inside an `activating (auto-restart)` loop, which reads
+like a slow start) and never writes `/etc/kanban-mcp.env`. It refuses a dirty
+working tree (unless `--allow-dirty`, which labels the build `…-dirty` so it is
+not journal-identical to a clean build), and refuses an installed unit that
+still carries a live placeholder. After the restart it reads the version the
+RUNNING process logged and fails if that is not the version it just built —
+because "I deployed it" and "what is running is what I built" are different
+claims, and the difference is how a stale binary gets served for hours. Both
+post-restart reads are bounded retries, so a slow bind is not reported as a
+failed deploy. A failing smoke test fails the upgrade.
+
+What it touches, and what it needs:
+
+- **Writes:** `/usr/local/bin/kanban-mcp` (the install) and the service restart.
+  Those are the only two privileged writes. The previous binary is copied to
+  `~/.local/state/kanban-mcp/backups/kanban-mcp.bak-<timestamp>` as the operator
+  (no sudo — the installed binary is world-readable), and the rollback command
+  is printed on success and on failure.
+- **Reads:** the unit file and the env file, to check them for the two traps.
+  The env file is only read, never replaced, so new keys still belong appended
+  by hand (never re-run §3 on a live host). On a host where it is `root:root
+  0600` — what §3 installs — the read uses `sudo -n` (read-only, and it never
+  prompts): run `sudo -v` once before a non-interactive run, and `--dry-run`
+  stays prompt-free.
+- **First install:** not this script. Follow sections 1–5 above.
+
 **Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example
 /etc/kanban-mcp.env` OVERWRITES the target, and the example contains placeholders —
 it would destroy the real `KANBAN_PASSWORD` and `MCP_BEARER_TOKEN`. Add new keys
 to the live file instead.
 
-From the repo, on the reviewed commit:
+The manual equivalent of what the script does, if you need to do it by hand
+from the repo, on the reviewed commit:
 
 ```sh
 # 1. build a static binary from the branch under review
@@ -231,15 +275,14 @@ sudo cp -a /etc/kanban-mcp.env /etc/kanban-mcp.env.bak-$(date +%Y%m%d-%H%M)
 sudo grep -q '^MCP_REVIEWER_PROFILE=' /etc/kanban-mcp.env || \
   printf '\nMCP_REVIEWER_PROFILE=default\n' | sudo tee -a /etc/kanban-mcp.env
 
-# 4. install the binary and the unit, then restart
+# 4. install the binary WITHOUT the unit, then restart
 sudo install -m 0755 kanban-mcp /usr/local/bin/kanban-mcp
-sudo install -m 0644 deploy/kanban-mcp.service /etc/systemd/system/kanban-mcp.service
-sudo systemctl daemon-reload
 sudo systemctl restart kanban-mcp.service
 systemctl is-active kanban-mcp.service
 
-# 5. verify the SERVED tool roster (now 12 names, including ticket_request_review)
+# 5. verify the SERVED tool roster and the running version
 URL=http://127.0.0.1:9130 MCP_BEARER_TOKEN=<token> scripts/smoke.sh
+journalctl -u kanban-mcp --since "-2 min" --no-pager | grep -o '"version":"[^"]*"' | tail -1
 ```
 
 After the restart, confirm the redacted startup config names the reviewer profile
