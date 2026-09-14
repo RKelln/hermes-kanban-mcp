@@ -62,11 +62,15 @@ type TicketEventsOut struct {
 }
 
 // rawEvent is the per-event wire shape inside the task detail envelope's
-// events array.
+// events array. RunID is the run the event was recorded against (nullable
+// in the kernel's schema); the request-review pre-check needs it to match a
+// `changes_requested` event to the run whose outcome selected it, the way
+// kanban_db._prior_reviewer does.
 type rawEvent struct {
 	ID        int64           `json:"id"`
 	Kind      string          `json:"kind"`
 	CreatedAt int64           `json:"created_at"`
+	RunID     *int64          `json:"run_id"`
 	Payload   json.RawMessage `json:"payload"`
 }
 

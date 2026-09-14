@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -45,6 +46,15 @@ type Config struct {
 	// dispatcher can spawn — a non-profile value makes the tool refuse,
 	// because a review row on an unspawnable assignee never runs.
 	// Env: MCP_REVIEWER_PROFILE.
+	//
+	// Load validates its SHAPE only (validReviewerProfile). Whether the name
+	// is actually installed cannot be answered here — that needs the live
+	// roster (the dashboard's /profiles endpoint) — so existence and
+	// spawnability are deliberately left to the tool's roster check, which
+	// refuses with the installed list in its message. Shape is what this
+	// layer can reject for free: "my reviewer" or "a/b" can never be a
+	// profile, and a server that starts with one only fails later, with the
+	// card already in 'review'.
 	MCPReviewerProfile string
 	// MCPRateLimit caps MCP calls per minute. Env: MCP_RATE_LIMIT.
 	MCPRateLimit int
@@ -67,19 +77,36 @@ const (
 	// on every deployment, and the tool already refuses (with the installed
 	// roster in the message) when no reviewer can be resolved.
 	defaultReviewerProfile = ""
-	defaultRateLimit     = 60
-	defaultLogLevel      = "info"
+	defaultRateLimit       = 60
+	defaultLogLevel        = "info"
 
 	minBearerTokenLen = 16
 )
+
+// profileNameShape is the on-disk profile-id rule, mirrored from the kernel
+// (hermes_cli/profiles.py: _PROFILE_ID_RE = `[a-z0-9][a-z0-9_-]{0,63}`).
+// Profiles are stored lowercase under profiles/<id>/, and "default" is the
+// alias for ~/.hermes itself.
+var profileNameShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+// validReviewerProfile reports whether value can name a profile at all. The
+// value is normalized the way the kernel normalizes an assignee
+// (normalize_profile_name: trim, then lowercase — "default" matches
+// case-insensitively), so a title-cased value the kernel would canonicalize
+// anyway is not rejected here. Being installed is a different question and
+// is not this layer's to answer (see Config.MCPReviewerProfile).
+func validReviewerProfile(value string) bool {
+	return profileNameShape.MatchString(strings.ToLower(strings.TrimSpace(value)))
+}
 
 // Load reads configuration from the environment, applying defaults for
 // unset optional variables and validating required ones.
 //
 // KANBAN_USERNAME, KANBAN_PASSWORD, and MCP_BEARER_TOKEN are required;
 // MCP_BEARER_TOKEN must also be at least 16 characters long.
-// MCP_COMPLETE_MODE must be either "review" or "done". Any error
-// names the offending environment variable.
+// MCP_COMPLETE_MODE must be either "review" or "done", and a non-empty
+// MCP_REVIEWER_PROFILE must be shaped like a profile id. Any error names
+// the offending environment variable.
 func Load() (*Config, error) {
 	cfg := &Config{
 		BindAddrs:          getEnv("BIND_ADDRS", defaultBindAddrs),
@@ -130,6 +157,14 @@ func Load() (*Config, error) {
 	if cfg.MCPCompleteMode != "review" && cfg.MCPCompleteMode != "done" {
 		return nil, fmt.Errorf("environment variable MCP_COMPLETE_MODE must be %q or %q, got %q",
 			"review", "done", cfg.MCPCompleteMode)
+	}
+
+	// Shape only: an installed-and-spawnable check needs the live roster,
+	// which the tool performs with the installed list in its refusal
+	// message. Rejecting an impossible name here keeps a server from
+	// starting with a value that can only strand a review row later.
+	if cfg.MCPReviewerProfile != "" && !validReviewerProfile(cfg.MCPReviewerProfile) {
+		return nil, fmt.Errorf("environment variable MCP_REVIEWER_PROFILE must be a profile id matching [a-z0-9][a-z0-9_-]{0,63} (case-insensitive; \"default\" is ~/.hermes), got %q", cfg.MCPReviewerProfile)
 	}
 
 	return cfg, nil

@@ -7,9 +7,16 @@ import (
 )
 
 // setRequired sets the three environment variables Load requires,
-// using distinctive values that tests can assert on.
+// using distinctive values that tests can assert on. It also unsets every
+// optional variable (optionalVars), so no Load assertion in this package can
+// read the ambient environment of whoever runs the suite. Without that, a host
+// with MCP_REVIEWER_PROFILE set to something invalid fails unrelated tests —
+// measured before this was fixed: MCP_REVIEWER_PROFILE='a b' go test
+// ./internal/config failed TestLoadBearerTokenMinLength, a token-length test
+// with nothing to do with reviewers.
 func setRequired(t *testing.T) {
 	t.Helper()
+	unsetEnv(t, optionalVars...)
 	t.Setenv("KANBAN_USERNAME", "test-user")
 	t.Setenv("KANBAN_PASSWORD", "test-password-42")
 	t.Setenv("MCP_BEARER_TOKEN", "test-token-ABCDEFGH")
@@ -38,6 +45,11 @@ func unsetEnv(t *testing.T, keys ...string) {
 	})
 }
 
+// optionalVars is every optional environment variable Load reads. Tests
+// unset all of them (see unsetEnv) so a default/override assertion can never
+// read the ambient environment of whoever runs the suite. A new key MUST be
+// added here with the field it feeds: MCP_REVIEWER_PROFILE was missing, so
+// any assertion on it was ambient-sensitive.
 var optionalVars = []string{
 	"BIND_ADDRS",
 	"KANBAN_BASE_URL",
@@ -47,6 +59,7 @@ var optionalVars = []string{
 	"MCP_ALLOW_SKIP_CLAIM",
 	"MCP_CLAIM_WORKER",
 	"MCP_COMMENT_AUTHOR",
+	"MCP_REVIEWER_PROFILE",
 	"MCP_RATE_LIMIT",
 	"LOG_LEVEL",
 }
@@ -73,6 +86,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"MCPAllowSkipClaim", cfg.MCPAllowSkipClaim, false},
 		{"MCPClaimWorker", cfg.MCPClaimWorker, "opencode-remote"},
 		{"MCPCommentAuthor", cfg.MCPCommentAuthor, "opencode-remote"},
+		// Deliberately empty: there is no safe universal reviewer, and the
+		// tool refuses (naming the installed roster) when none resolves.
+		{"MCPReviewerProfile", cfg.MCPReviewerProfile, ""},
 		{"MCPRateLimit", cfg.MCPRateLimit, 60},
 		{"LogLevel", cfg.LogLevel, "info"},
 	}
@@ -96,6 +112,7 @@ func TestLoadAppliesExplicitOverrides(t *testing.T) {
 	t.Setenv("MCP_ALLOW_SKIP_CLAIM", "1")
 	t.Setenv("MCP_CLAIM_WORKER", "worker-x")
 	t.Setenv("MCP_COMMENT_AUTHOR", "author-x")
+	t.Setenv("MCP_REVIEWER_PROFILE", "reviewer-x")
 	t.Setenv("MCP_RATE_LIMIT", "150")
 	t.Setenv("LOG_LEVEL", "debug")
 
@@ -136,6 +153,9 @@ func TestLoadAppliesExplicitOverrides(t *testing.T) {
 	}
 	if cfg.MCPCommentAuthor != "author-x" {
 		t.Errorf("MCPCommentAuthor = %q, want override", cfg.MCPCommentAuthor)
+	}
+	if cfg.MCPReviewerProfile != "reviewer-x" {
+		t.Errorf("MCPReviewerProfile = %q, want override", cfg.MCPReviewerProfile)
 	}
 	if cfg.MCPRateLimit != 150 {
 		t.Errorf("MCPRateLimit = %d, want 150", cfg.MCPRateLimit)
@@ -246,6 +266,66 @@ func TestLoadInvalidCompleteMode(t *testing.T) {
 	}
 }
 
+// MCP_REVIEWER_PROFILE was read but never validated, so a value that can
+// never name a profile (it is used as `--reviewer=` on the CLI and as the
+// review row's assignee) started the server happily and only surfaced later,
+// as a row the dispatcher will never spawn. Refuse the impossible shapes at
+// load; whether the profile is INSTALLED stays the tool's roster check,
+// because config cannot see the live roster.
+func TestLoadInvalidReviewerProfile(t *testing.T) {
+	setRequired(t)
+	cases := []string{
+		"my reviewer", // whitespace: never a profile directory name
+		"a/b",         // path separator
+		"profiles/alice",
+		".alice", // must start alphanumeric
+		"-alice",
+		"alice!",
+		"ALICE UPPER SPACE",
+		strings.Repeat("a", 65), // longer than the kernel's 64-char limit
+	}
+	for _, value := range cases {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("MCP_REVIEWER_PROFILE", value)
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load() with MCP_REVIEWER_PROFILE=%q: expected error, got %v", value, cfg)
+			}
+			if !strings.Contains(err.Error(), "MCP_REVIEWER_PROFILE") {
+				t.Errorf("error %q does not name MCP_REVIEWER_PROFILE", err)
+			}
+		})
+	}
+}
+
+// The shape check normalizes the way the kernel normalizes an assignee
+// (normalize_profile_name: trim, then lowercase), so a value the kernel
+// would canonicalize anyway is NOT rejected — a false rejection here would
+// refuse to start a server whose reviewer works today.
+func TestLoadReviewerProfileAccepted(t *testing.T) {
+	setRequired(t)
+	cases := []string{
+		"default", // the alias for ~/.hermes itself
+		"Default", // matched case-insensitively by the kernel
+		"  alice  ",
+		"reviewer-x",
+		"a",
+		strings.Repeat("a", 64), // exactly the kernel's limit
+	}
+	for _, value := range cases {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("MCP_REVIEWER_PROFILE", value)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() with MCP_REVIEWER_PROFILE=%q: unexpected error: %v", value, err)
+			}
+			if cfg.MCPReviewerProfile != value {
+				t.Errorf("MCPReviewerProfile = %q, want the value verbatim (%q)", cfg.MCPReviewerProfile, value)
+			}
+		})
+	}
+}
+
 func TestStringRedactsSecrets(t *testing.T) {
 	const (
 		password = "hunter2-secret-value"
@@ -279,7 +359,7 @@ func TestStringRedactsSecrets(t *testing.T) {
 		"BindAddrs=", "KanbanBaseURL=", "KanbanUsername=test-user",
 		"KanbanDefaultBoard=", "HermesBin=", "MCPCompleteMode=",
 		"MCPAllowSkipClaim=", "MCPClaimWorker=", "MCPCommentAuthor=",
-		"MCPRateLimit=", "LogLevel=",
+		"MCPReviewerProfile=", "MCPRateLimit=", "LogLevel=",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("String() missing %q: %q", want, s)

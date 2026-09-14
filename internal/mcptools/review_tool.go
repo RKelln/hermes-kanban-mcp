@@ -25,7 +25,10 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -76,10 +79,60 @@ const reviewNote = "a verdict of done authorises your merge, request-changes ret
 // a card, and the caller should know the check did not happen.
 const reviewUnverifiedNote = " reviewer profile could NOT be verified against the installed roster (the profiles endpoint did not answer); if this profile is not installed the card will sit in 'review' unspawned"
 
-// reviewProvenanceNote is used when no reviewer was supplied: the kernel
-// then resolves its own re-review provenance (the reviewer recorded by the
-// previous request-changes round) instead of this tool overriding it.
-const reviewProvenanceNote = " no reviewer supplied, so the kernel reused the reviewer from the previous review round"
+// The provenance note has TWO branches, because the kernel does two
+// different things when no reviewer is supplied and saying otherwise was
+// simply untrue (hermes_cli/kanban_db.py:3046-3054, :3060-3069, :3095-3108):
+//
+//   - FIRST review — the ticket has no `changes_requested` run, so
+//     _prior_reviewer returns None, `reviewer` stays None, `assignee_sql`
+//     is empty and the UPDATE PRESERVES the ticket's existing assignee.
+//     Nothing is reused from any previous round: there is no previous
+//     round.
+//   - RE-review — a `changes_requested` run exists, and the reviewer that
+//     round recorded is what request_review lands, OVERRIDING the existing
+//     assignee.
+//
+// Which one applies is decided from what actually landed (see the note
+// assembly in TicketRequestReview), not from what this tool predicted.
+
+// reviewProvenanceFirstNote is the FIRST-review branch: the kernel had no
+// prior round to draw on, so it left the assignee alone, and the assignee is
+// the value this tool verified against the roster.
+const reviewProvenanceFirstNote = " no reviewer supplied, so the kernel kept the ticket's assignee (verified as spawnable)"
+
+// reviewProvenanceFirstUnverifiedNote is the same branch when the roster
+// could not be read: the claim "(verified as spawnable)" would then be a
+// statement about a check that never ran — the exact kind of false assurance
+// this tool exists to avoid (the unverified-roster warning says the probe did
+// not answer; a note asserting it did contradicts it).
+const reviewProvenanceFirstUnverifiedNote = " no reviewer supplied, so the kernel kept the ticket's assignee (spawnability could NOT be verified against the installed roster)"
+
+// reviewProvenanceReReviewNote is the RE-review branch: the kernel reused
+// the reviewer recorded by the previous request-changes round.
+const reviewProvenanceReReviewNote = " no reviewer supplied, so the kernel reused the reviewer recorded by the previous request-changes round"
+
+// reviewStrandFix names the recovery that actually works for a review row
+// the dispatcher will never spawn. Both call sites are POST-execution: the
+// ticket is already in 'review', and this tool's own status preflight
+// accepts only ready/running (pinned by TestTRR_StatusPreflight), so "then
+// request again" — the advice this message used to end with — is refused by
+// the very tool that gives it. A retry the caller cannot perform is worse
+// than no advice: it burns a call to learn the row cannot be fixed from the
+// MCP surface. Name the two recoveries that do work instead.
+func reviewStrandFix(board, id string) string {
+	return fmt.Sprintf("Requesting again from this tool would be refused (it accepts ready/running only), so fix the row from outside the MCP surface: reassign it to an installed profile (dashboard or REST), or run `hermes kanban --board %s reopen-review %s` to send it back to ready, then request review again with an explicit reviewer.", board, id)
+}
+
+// containsNote reports whether notes already carries note, so a warning
+// cannot be appended twice when two probes both fail to answer.
+func containsNote(notes []string, note string) bool {
+	for _, n := range notes {
+		if n == note {
+			return true
+		}
+	}
+	return false
+}
 
 // profileRoster is the GET /profiles response shape (the dashboard's
 // assignee picker reads the same endpoint).
@@ -121,12 +174,123 @@ func (s *Server) profileSpawnable(ctx context.Context, reviewer string) (ok, che
 	return false, true, names
 }
 
+// rawRun is the slice of a task-detail run entry the kernel's re-review
+// provenance rule reads: request_review looks for the NEWEST run whose
+// outcome is `changes_requested` (kanban_db.py:3095-3103).
+type rawRun struct {
+	ID      int64  `json:"id"`
+	Outcome string `json:"outcome"`
+}
+
+// reviewPreflightEnvelope is the task-detail slice the preflight needs in
+// ONE call: the task itself (status/assignee) plus the runs and events —
+// the two tables the kernel's provenance rule reads. The same envelope
+// backs ticket_events, so the pre-check costs no extra round trip.
+type reviewPreflightEnvelope struct {
+	Task   kanban.TaskSummary `json:"task"`
+	Runs   []rawRun           `json:"runs"`
+	Events []rawEvent         `json:"events"`
+}
+
+// preflightReview fetches the ticket detail the request-review preflight
+// needs: the task, its runs and its events. It replaces a bare GetTask
+// because the reviewer that LANDS can come from the run history rather
+// than from the assignee, and the pre-check has to see that history.
+func (s *Server) preflightReview(ctx context.Context, board, id string) (*kanban.TaskSummary, []rawRun, []rawEvent, error) {
+	var env reviewPreflightEnvelope
+	if err := s.doJSON(ctx, http.MethodGet, "/tasks/"+url.PathEscape(id), url.Values{"board": []string{board}}, nil, &env); err != nil {
+		return nil, nil, nil, err
+	}
+	return &env.Task, env.Runs, env.Events, nil
+}
+
+// kernelPriorReviewer mirrors hermes_cli.kanban_db._prior_reviewer over the
+// runs and events the ticket detail already carries, so the pre-check can
+// verify the value the kernel will LAND rather than the one it was handed.
+//
+// The kernel's rule (:3046-3054, :3095-3108): with no reviewer argument it
+// takes the newest run whose outcome is `changes_requested` (:3095-3103),
+// then the NEWEST `changes_requested` event for that run (:3106 ->
+// _latest_event, "ORDER BY id DESC LIMIT 1"), reads payload["reviewer"] and
+// reassigns the task to it — so the assignee the caller can see is NOT what
+// lands on a re-review. No such run means a FIRST review: reviewer stays
+// None and the UPDATE preserves the assignee (:3054, :3060-3069).
+//
+// Three details are load-bearing, because the naive reading of each one
+// diverges from the kernel:
+//
+//   - Only the newest event for the selected run is read. An older
+//     `changes_requested` event with a perfectly good reviewer does NOT
+//     rescue a newest event whose provenance is missing or blank: the
+//     kernel returns False there and request_review refuses ("re-review has
+//     no durable reviewer provenance"). Scanning for any usable event would
+//     bless a row the kernel is about to refuse.
+//   - A non-string reviewer (JSON number, object) and a payload that is not
+//     a JSON object are both unusable (isinstance check + _json_dict).
+//   - The value that LANDS is canonicalised by request_review
+//     (:3048 -> _canonical_assignee -> normalize_profile_name: strip, then
+//     lowercase), so what is returned here is that landing form — the raw
+//     payload string is not what the dispatcher would spawn on. Profile
+//     directories are lowercase on disk, so this is the exact name, not an
+//     approximation ("default" included, which the kernel matches
+//     case-insensitively).
+//
+// found is false whenever this tool cannot read the prior reviewer the kernel
+// would land (first review, or a run whose newest event is missing/blank/
+// malformed — where the kernel refuses outright). The caller then falls back
+// to verifying the assignee, which is the value the kernel preserves when it
+// does not refuse. Deriving this from the ticket's own history (rather than
+// trusting a scripted answer) is the point: a test can now express "the
+// kernel will land a name nobody requested" instead of asserting only the
+// values this tool chooses.
+func kernelPriorReviewer(runs []rawRun, events []rawEvent) (string, bool) {
+	var (
+		runID   int64
+		haveRun bool
+	)
+	for _, r := range runs {
+		if r.Outcome == "changes_requested" && (!haveRun || r.ID > runID) {
+			runID, haveRun = r.ID, true
+		}
+	}
+	if !haveRun {
+		return "", false
+	}
+	var newest *rawEvent
+	for i := range events {
+		if e := &events[i]; e.Kind == "changes_requested" && e.RunID != nil && *e.RunID == runID {
+			if newest == nil || e.ID > newest.ID {
+				newest = e
+			}
+		}
+	}
+	if newest == nil || newest.Payload == nil {
+		return "", false
+	}
+	var p struct {
+		Reviewer string `json:"reviewer"`
+	}
+	if json.Unmarshal(newest.Payload, &p) != nil {
+		return "", false
+	}
+	// normalize_profile_name: strip, then lowercase ("default" is matched
+	// case-insensitively and profile directories are lowercase on disk). The
+	// value returned IS the value that lands, not the raw payload string.
+	name := strings.ToLower(strings.TrimSpace(p.Reviewer))
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
 // TicketRequestReview implements the ticket_request_review MCP tool:
 // validate, fail fast when HERMES_BIN is missing, preflight the ticket
 // over REST (ready or running only — the kernel refuses anything else),
-// resolve and verify the reviewer, shell out to the hermes CLI, then
-// re-read the ticket, confirm the transition actually happened, and
-// return the authoritative state.
+// resolve and verify the reviewer that will actually LAND on the row (the
+// kernel's prior-reviewer provenance when the ticket has a
+// request-changes round behind it, else the current assignee), shell out
+// to the hermes CLI, then re-read the ticket, confirm the transition
+// actually happened, and return the authoritative state.
 func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReviewInput) *ToolResult {
 	board := in.Board
 	if board == "" {
@@ -147,7 +311,7 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		return ErrorResult("%s", err)
 	}
 
-	ts, err := s.GetTask(ctx, board, in.ID)
+	ts, runs, events, err := s.preflightReview(ctx, board, in.ID)
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
@@ -179,43 +343,57 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	// verdict the kernel sets assignee = the implementer, so *substituting*
 	// it as the reviewer would make the next round a self-review.
 	//
-	// Two values matter and they are NOT the same one:
-	//   flagReviewer  — what we pass to the CLI. Empty means "omit
-	//                   --reviewer" and let the kernel make its own choice
-	//                   (prior-reviewer provenance, else preserve the
-	//                   existing assignee). Passing the assignee here would
-	//                   substitute it and defeat that provenance.
-	//   verifyValue   — what will END UP on the review row, which is what
-	//                   the dispatcher spawns on. Verified in every tier:
-	//                   an unspawnable assignee is the strand no matter who
-	//                   chose it. Verifying a value is not substituting it.
+	// Three values matter and they are NOT the same one:
+	//   flagReviewer   — what we pass to the CLI. Empty means "omit
+	//                   --reviewer" and let the kernel make its own choice.
+	//                   Passing the assignee here would substitute it and
+	//                   defeat the kernel's provenance.
+	//   priorReviewer  — the reviewer the kernel's OWN provenance would
+	//                   land, read from the ticket's run/event history when
+	//                   no reviewer is supplied and a previous
+	//                   request-changes round exists. On a re-review this
+	//                   OVERRIDES the assignee (:3046-3054), so it — not
+	//                   the assignee — is what will be spawned.
+	//   verifyValue   — what will END UP on the review row. Verified in
+	//                   every tier: an unspawnable assignee is the strand no
+	//                   matter who chose it. Verifying a value is not
+	//                   substituting it.
 	flagReviewer := strings.TrimSpace(in.Reviewer)
 	if flagReviewer == "" {
 		flagReviewer = strings.TrimSpace(os.Getenv("MCP_REVIEWER_PROFILE"))
 	}
 	useProvenance := flagReviewer == ""
 	verifyValue := flagReviewer
+	priorReviewer := ""
 	if useProvenance {
-		verifyValue = strings.TrimSpace(ts.Assignee)
-		if verifyValue == "" {
-			return ErrorResult("invalid_input: no reviewer resolved and ticket %s is unassigned. The dispatcher never spawns an unassigned review ticket — it would sit in 'review' silently and no reviewer would ever run. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID)
+		prior, ok := kernelPriorReviewer(runs, events)
+		if ok {
+			// The kernel lands this value on a re-review, and it OVERRIDES
+			// the assignee — verify the prior reviewer, not the assignee.
+			priorReviewer = prior
+			verifyValue = prior
+		} else {
+			verifyValue = strings.TrimSpace(ts.Assignee)
+			if verifyValue == "" {
+				return ErrorResult("invalid_input: no reviewer resolved and ticket %s is unassigned. The dispatcher never spawns an unassigned review ticket — it would sit in 'review' silently and no reviewer would ever run. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID)
+			}
 		}
 	}
 	notes := []string{reviewNote}
 	ok, checked, names := s.profileSpawnable(ctx, verifyValue)
 	switch {
 	case checked && !ok:
-		if useProvenance {
+		switch {
+		case priorReviewer != "":
+			return ErrorResult("invalid_input: no reviewer was supplied, and ticket %s's previous request-changes round recorded reviewer %q — the value the kernel lands on the review row, overriding the current assignee. %q is not an installed profile, so the dispatcher would never spawn a reviewer and the card would sit in 'review' unspawned. Installed profiles: %s. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID, priorReviewer, priorReviewer, strings.Join(names, ", "))
+		case useProvenance:
 			return ErrorResult("invalid_input: no reviewer was supplied and ticket %s carries assignee %q, which is not an installed profile. The kernel would preserve that assignee, so the card would sit in 'review' with no reviewer the dispatcher can ever spawn. Installed profiles: %s. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID, verifyValue, strings.Join(names, ", "))
+		default:
+			return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", verifyValue, strings.Join(names, ", "))
 		}
-		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", verifyValue, strings.Join(names, ", "))
 	case !checked:
 		notes = append(notes, reviewUnverifiedNote)
 	}
-	if useProvenance {
-		notes = append(notes, reviewProvenanceNote)
-	}
-	note := strings.Join(notes, ";")
 
 	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), flagReviewer, force); err != nil {
 		return ErrorResult("%s", cliFailureText(stderr, err))
@@ -233,19 +411,48 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		return ErrorResult("request-review did not take effect: ticket %s is still %s (expected review). Nothing was dispatched; re-check the ticket before retrying.", in.ID, after.Status)
 	}
 	if strings.TrimSpace(after.Assignee) == "" {
-		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. Set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server, or pass reviewer explicitly, then request again.", in.ID)
+		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. %s", in.ID, reviewStrandFix(board, in.ID))
 	}
 	// The row's assignee can differ from what we asked for: with no reviewer
 	// supplied the kernel prefers its own prior-reviewer provenance over the
 	// existing assignee. Verify what actually LANDED, not what was requested
 	// — the dispatcher spawns on this value and nothing else.
-	if aok, achecked, anames := s.profileSpawnable(ctx, after.Assignee); achecked && !aok {
-		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. Set MCP_REVIEWER_PROFILE (e.g. \"default\") or pass reviewer explicitly, then request again.", in.ID, after.Assignee, strings.Join(anames, ", "))
+	landed := strings.TrimSpace(after.Assignee)
+	aok, achecked, anames := s.profileSpawnable(ctx, landed)
+	if achecked && !aok {
+		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. %s", in.ID, landed, strings.Join(anames, ", "), reviewStrandFix(board, in.ID))
+	}
+	// landedVerified: was the value the dispatcher will spawn on actually
+	// checked against the roster? The pre-exec probe covers the value this
+	// tool predicted; the post-exec probe covers whatever the kernel wrote,
+	// which is the only one that counts if they differ. Never claim a
+	// verification that did not run — an unverifiable reviewer is exactly the
+	// case that strands a card.
+	landedVerified := achecked || (checked && strings.EqualFold(landed, verifyValue))
+	if !landedVerified && !containsNote(notes, reviewUnverifiedNote) {
+		notes = append(notes, reviewUnverifiedNote)
+	}
+	// The provenance note describes what the kernel DID, decided from the
+	// value that actually landed: on a re-review the prior reviewer is what
+	// request_review writes (and it can equal a preserved assignee by
+	// coincidence), otherwise the assignee was preserved. The old
+	// single-branch wording asserted "reused the reviewer from the previous
+	// review round" on a FIRST review, where no previous round exists and
+	// nothing is reused.
+	if useProvenance {
+		switch {
+		case priorReviewer != "" && strings.EqualFold(landed, priorReviewer):
+			notes = append(notes, reviewProvenanceReReviewNote)
+		case landedVerified:
+			notes = append(notes, reviewProvenanceFirstNote)
+		default:
+			notes = append(notes, reviewProvenanceFirstUnverifiedNote)
+		}
 	}
 	return SuccessResult(TicketRequestReviewOut{
 		ID:       after.ID,
 		Status:   after.Status,
 		Assignee: after.Assignee,
-		Note:     note,
+		Note:     strings.Join(notes, ";"),
 	})
 }

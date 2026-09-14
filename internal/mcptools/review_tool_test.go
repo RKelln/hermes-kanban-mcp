@@ -279,13 +279,308 @@ func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 	if strings.Contains(argv[0], "--reviewer=") {
 		t.Errorf("argv = %q, must omit --reviewer so the kernel's own choice applies", argv[0])
 	}
-	if out := decodeOut[TicketRequestReviewOut](t, res); !strings.Contains(out.Note, "previous review round") {
-		t.Errorf("note = %q, want it to state the kernel's provenance was used", out.Note)
+	// FIRST review: no `changes_requested` run exists, so the kernel's
+	// _prior_reviewer returns None, `reviewer` stays None and the UPDATE
+	// PRESERVES the assignee (kanban_db.py:3054, :3060-3069). The note must
+	// say that, not that a prior reviewer was reused — there is no prior
+	// round to reuse anything from.
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if !strings.Contains(out.Note, "kept the ticket's assignee") {
+		t.Errorf("note = %q, want the first-review branch: the kernel kept the assignee", out.Note)
+	}
+	if strings.Contains(out.Note, "previous request-changes round") {
+		t.Errorf("note = %q, must NOT claim a prior request-changes round on a first review", out.Note)
 	}
 	// The preserved assignee is still VERIFIED for spawnability — that is
 	// the difference between checking a value and substituting it.
 	if n := backend.profileProbes(); n != 2 {
 		t.Errorf("profile probes = %d, want 2 (the preserved assignee must still be verified)", n)
+	}
+}
+
+// --- re-review provenance: the value the KERNEL lands ---
+//
+// kernelPriorReviewer mirrors hermes_cli.kanban_db._prior_reviewer over the
+// ticket's OWN runs and events, so these fixtures state the kernel's rule as
+// a predicate over served data — "newest run whose outcome is
+// changes_requested, reviewer read off that run's changes_requested event" —
+// instead of a scripted answer. That is what lets a test express "the kernel
+// will land a name nobody requested".
+
+// reReviewBody is a preflight body for a ticket that already has a
+// request-changes round behind it: run 13 carries outcome
+// changes_requested, and event 162 (recorded against run 13) names the
+// reviewer that round used.
+func reReviewBody(status, assignee, reviewer string) string {
+	event := `{"id":162,"run_id":13,"kind":"changes_requested","payload":{"reviewer":"` + reviewer + `","reason":"fix it"}}`
+	return `{"task":{"id":"t_x1","title":"T","status":"` + status + `","assignee":"` + assignee + `"},` +
+		`"runs":[{"id":11,"outcome":"review_requested"},{"id":13,"outcome":"changes_requested"}],` +
+		`"events":[{"id":158,"run_id":13,"kind":"claimed"},` + event + `]}`
+}
+
+// Round-2 leftover F4 (the strand the post-condition could only announce):
+// the kernel PREFERS the prior request-changes round's reviewer over the
+// assignee, so a re-review whose prior reviewer is not an on-disk profile
+// lands a name nobody requested — after the row is already in 'review'. The
+// pre-check must verify the value that will land, and refuse before creating
+// that row.
+func TestTRR_PriorReviewerRefusedWhenNotSpawnable(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	// The assignee (alice) IS a spawnable profile — today's pre-check would
+	// pass on it and strand the row on "ghost".
+	backend.orders["t_x1"] = []string{reReviewBody("ready", "alice", "ghost")}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for a prior reviewer that is not an installed profile, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"ghost", "previous request-changes round", "not an installed profile", "alice"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0 (must not create the stranded row)", n)
+	}
+}
+
+// The same rule, other direction: when the kernel will OVERRIDE the assignee
+// with a spawnable prior reviewer, the request is safe even though the
+// current assignee is not a profile — the tool verifies the value that
+// lands, and reports the re-review branch of the note.
+func TestTRR_PriorReviewerOverridesUnspawnableAssignee(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	// Preflight: assignee is "ryan" (real non-spawnable assignee on this
+	// host), prior round recorded "bob". The kernel reassigns to bob.
+	backend.orders["t_x1"] = []string{
+		reReviewBody("ready", "ryan", "bob"),
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success (the prior reviewer overrides the assignee), got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if out.Assignee != "bob" {
+		t.Errorf("assignee = %q, want bob (the prior reviewer the kernel lands)", out.Assignee)
+	}
+	if !strings.Contains(out.Note, "reused the reviewer recorded by the previous request-changes round") {
+		t.Errorf("note = %q, want the re-review branch", out.Note)
+	}
+	argv := readArgv()
+	if len(argv) != 1 {
+		t.Fatalf("argv = %v, want one invocation", argv)
+	}
+	if strings.Contains(argv[0], "--reviewer=") {
+		t.Errorf("argv = %q, must omit --reviewer: the kernel's provenance is what lands", argv[0])
+	}
+	// Verified twice: the prior reviewer pre-exec, the landed assignee
+	// post-exec.
+	if n := backend.profileProbes(); n != 2 {
+		t.Errorf("profile probes = %d, want 2 (prior reviewer, then the value that landed)", n)
+	}
+}
+
+// A request-changes run whose event carries no readable reviewer is exactly
+// the case the kernel REFUSES ("re-review has no durable reviewer
+// provenance"); this tool cannot mirror that refusal from the detail alone,
+// so it falls back to the value the kernel would otherwise preserve — the
+// assignee — and the CLI's own error surfaces if the kernel refuses. What it
+// must not do is claim a prior reviewer it could not read.
+func TestTRR_PriorRoundWithoutReviewerFallsBackToAssignee(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"},` +
+			`"runs":[{"id":13,"outcome":"changes_requested"}],` +
+			`"events":[{"id":162,"run_id":13,"kind":"changes_requested","payload":{"reason":"fix it"}}]}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError (the assignee is not a profile), got success: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "ryan") || !strings.Contains(res.Content[0].Text, "not an installed profile") {
+		t.Errorf("error = %q, want the preserved-assignee refusal naming ryan", res.Content[0].Text)
+	}
+	if strings.Contains(res.Content[0].Text, "previous request-changes round") {
+		t.Errorf("error = %q, must not claim a prior reviewer it could not read", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// The exact-mirror case the pre-gate review produced: the kernel reads ONLY
+// the newest changes_requested event for the selected run (kanban_db.py:3106
+// -> _latest_event, "ORDER BY id DESC LIMIT 1"). An older event with a usable
+// reviewer does NOT rescue a newest one whose provenance is blank — the kernel
+// returns False there and request_review refuses. An implementation that
+// scanned for any usable event would bless the row the kernel is about to
+// refuse, having verified a name nobody will ever see.
+func TestTRR_PriorRoundNewerBlankEventShadowsOlder(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"},` +
+			`"runs":[{"id":13,"outcome":"changes_requested"}],` +
+			`"events":[{"id":161,"run_id":13,"kind":"changes_requested","payload":{"reviewer":"carol"}},` +
+			`{"id":162,"run_id":13,"kind":"changes_requested","payload":{"reason":"no reviewer recorded"}}]}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError (the assignee is not a profile), got success: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "ryan") || !strings.Contains(res.Content[0].Text, "not an installed profile") {
+		t.Errorf("error = %q, want the preserved-assignee refusal naming ryan", res.Content[0].Text)
+	}
+	if strings.Contains(res.Content[0].Text, "previous request-changes round") {
+		t.Errorf("error = %q, must NOT report the shadowed older event's reviewer (the kernel returns False here)", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// _prior_reviewer returns the RAW payload string, but the value request_review
+// LANDS is canonicalised (kanban_db.py:3048 -> _canonical_assignee ->
+// normalize_profile_name: strip, then lowercase). A whitespace-padded reviewer
+// must therefore be verified as the name that will actually be spawned rather
+// than refused for failing to match the roster verbatim — and the row lands
+// the canonical form.
+func TestTRR_PriorReviewerPaddedIsVerified(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		reReviewBody("ready", "ryan", "  bob  "),
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success (the kernel lands the canonicalised reviewer), got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if out.Assignee != "bob" {
+		t.Errorf("assignee = %q, want bob (normalize_profile_name strips the padding)", out.Assignee)
+	}
+	if !strings.Contains(out.Note, "reused the reviewer recorded by the previous request-changes round") {
+		t.Errorf("note = %q, want the re-review branch", out.Note)
+	}
+	if len(readArgv()) != 1 {
+		t.Errorf("argv = %v, want the transition to proceed", readArgv())
+	}
+}
+
+// The mirror returns the name the kernel LANDS, not the raw payload string:
+// request_review canonicalises it (normalize_profile_name: strip + lowercase,
+// kanban_db.py:3048) and profile directories are lowercase on disk. Naming the
+// raw value in a refusal would send the caller looking for a profile that
+// cannot exist ("GHOST" vs "ghost") — and the roster check itself is
+// case-insensitive, so only the reported name pins this.
+func TestTRR_PriorReviewerReportedCanonicalised(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{reReviewBody("ready", "bob", "GHOST")}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for the non-profile prior reviewer, got success: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, `"ghost"`) {
+		t.Errorf("error = %q, want the canonicalised name %q", res.Content[0].Text, "ghost")
+	}
+	if strings.Contains(res.Content[0].Text, "GHOST") {
+		t.Errorf("error = %q, must not report the raw payload case", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// The FIRST-review note used to end with "(verified as spawnable)" even when
+// /profiles never answered — an assurance about a check that never ran,
+// printed next to the warning saying it never ran (pre-gate finding 1). The
+// parenthetical is now gated on the probe that covers the value that landed.
+func TestTRR_UnverifiedRosterNoVerificationClaim(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.profiles = nil // /profiles 404s, before and after the transition
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"alice"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if !strings.Contains(out.Note, "the profiles endpoint did not answer") {
+		t.Errorf("note = %q, want the announced unverified-roster warning", out.Note)
+	}
+	if !strings.Contains(out.Note, "spawnability could NOT be verified") {
+		t.Errorf("note = %q, want the unverified first-review branch", out.Note)
+	}
+	if strings.Contains(out.Note, "(verified as spawnable)") {
+		t.Errorf("note = %q, must NOT claim a verification that did not run", out.Note)
+	}
+	if len(readArgv()) != 1 {
+		t.Errorf("argv = %v, want the transition to proceed", readArgv())
+	}
+}
+
+// An UNASSIGNED ticket is the original strand — unless the kernel's own
+// provenance supplies the assignee. The unassigned refusal must not fire
+// when a prior request-changes round will land a reviewer.
+func TestTRR_UnassignedWithPriorReviewerProceeds(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		reReviewBody("ready", "", "bob"),
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success (the prior reviewer is the assignee), got IsError: %s", res.Content[0].Text)
+	}
+	if out := decodeOut[TicketRequestReviewOut](t, res); out.Assignee != "bob" {
+		t.Errorf("assignee = %q, want bob", out.Assignee)
+	}
+	if len(readArgv()) != 1 {
+		t.Errorf("argv = %v, want the transition to proceed", readArgv())
 	}
 }
 
@@ -368,6 +663,7 @@ func TestTRR_PostconditionNonSpawnableAssignee(t *testing.T) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
 	}
+	assertNamesRecovery(t, res.Content[0].Text)
 }
 
 // The original guard, unchanged: an unassigned review row nobody will
@@ -433,6 +729,26 @@ func TestTRR_PostconditionEmptyAssignee(t *testing.T) {
 	})
 	if !res.IsError || !strings.Contains(res.Content[0].Text, "NO assignee") {
 		t.Errorf("got %q, want an IsError about the stranded review row", res.Content[0].Text)
+	}
+	assertNamesRecovery(t, res.Content[0].Text)
+}
+
+// assertNamesRecovery pins the wording of the two POST-execution strand
+// errors. Both fire while the ticket is already in 'review', and this tool's
+// own preflight accepts only ready/running (TestTRR_StatusPreflight/review),
+// so a bare "…then request again" tells the caller to do something this tool
+// refuses. The message must name a recovery that works from where the caller
+// actually is: fix the row outside the MCP surface (reassign it), or
+// reopen-review it and request again with an explicit reviewer.
+func assertNamesRecovery(t *testing.T, msg string) {
+	t.Helper()
+	for _, want := range []string{"reopen-review", "--board " + testBoard, "t_x1", "reassign"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to name the recovery (%q)", msg, want)
+		}
+	}
+	if strings.Contains(msg, "then request again") {
+		t.Errorf("error = %q, offers a retry this tool refuses (the ticket is already in 'review')", msg)
 	}
 }
 
