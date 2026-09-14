@@ -30,13 +30,24 @@ MCP tools for a Hermes kanban board:
     replaces per-board scans
 - ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
 - ticket_comment  log context/decisions as you work
+- ticket_request_review  request the FINAL REVIEW of finished work: ready/running ->
+    'review' (not a block). The dispatcher claims the row as a REVIEW run and
+    spawns the sdlc-review reviewer; APPROVE completes the ticket to done,
+    request-changes returns it to you. summary is REQUIRED — it is the
+    reviewer's handoff (what changed, the refs to verify, what you proved).
+    reviewer resolves: explicit reviewer > MCP_REVIEWER_PROFILE > the ticket's
+    assignee; if none resolves the call is REFUSED, because the dispatcher
+    never spawns an unassigned review ticket and it would strand silently.
+    Push your branch FIRST. Do NOT merge before the verdict: done means merge.
 - ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
     review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
     (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
     for MEDIUM/HIGH. repo/branch/sha are optional structured refs folded
     into the review-required block_reason (trimmed; single-line). done mode
     accepts created_cards (child ticket ids; kernel-verified, phantom ids
-    get a 400 naming the offenders).
+    get a 400 naming the offenders). This is the OLDER review convention
+    (a block a sweeper consumes); prefer ticket_request_review for a final
+    review when the server has review dispatch enabled.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
@@ -48,7 +59,11 @@ board is rejected, never silently defaulted, so multi-board setups can't
 land tickets in the wrong queue.
 
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
-ticket_comment -> ticket_complete.
+ticket_comment -> ticket_request_review -> wait (ticket_events) -> verdict.
+'done' means MERGE your branch; request-changes means fix and re-request.
+ticket_complete is the older path (review-required block); ticket_request_review
+is the review lane. Both are live — use whichever the server's review dispatch
+supports, and never merge before the verdict.
 
 Lifecycle facts:
 - Claims are kernel-enforced: a ticket with an open parent stays 'todo';
@@ -74,6 +89,16 @@ Lifecycle facts:
 - Push the commit BEFORE ticket_complete and pass repo/branch/sha so the
   review block carries the refs; a ticket reaching review with no sha is
   a workflow violation, not a code-review finding.
+- Review-lane facts (ticket_request_review): the dispatcher only spawns a
+  review row whose assignee is an installed profile, so an UNASSIGNED
+  review ticket is skipped EVERY tick with no reviewer, no runs and no
+  comments — that is why the tool refuses rather than performing a
+  transition nobody will act on. A ticket in 'review' has no branch
+  requirement of its own, but the reviewer must be able to see the work:
+  push first, and put the refs in summary. If your branch was already
+  merged and deleted, say so in summary and name the merge commit and the
+  range to diff — a reviewer that goes looking for a deleted branch burns
+  its run.
 - ticket_events is stateless long-polling: pass the last seen event id as
   since_event_id to wait for the next verdict; empty + timed_out means
   nothing new arrived. When truncated is set, some events were dropped to

@@ -284,11 +284,25 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
-	// Every registered tool must be covered by one of the three lists
-	// above; a tool added to Register() without a list here fails the
-	// wiring test rather than silently passing an uncategorized schema.
-	covered := make(map[string]bool, len(perTicket)+len(boardRequired)+len(noRequired))
-	for _, name := range append(append(append([]string{}, perTicket...), boardRequired...), noRequired...) {
+	// ticket_request_review additionally requires summary: the reviewer
+	// reads it as the handoff, and a request with no handoff burns a
+	// review run re-deriving what the implementer already knew.
+	reviewRequired := []string{"ticket_request_review"}
+	for _, name := range reviewRequired {
+		tool, ok := tools[name]
+		if !ok {
+			t.Fatalf("tool %q not registered", name)
+		}
+		if req := schemaRequired(tool.InputSchema); !reflect.DeepEqual(req, []string{"id", "board", "summary"}) {
+			t.Errorf("%s required = %v, want [id board summary]", name, req)
+		}
+	}
+
+	// Every registered tool must be covered by one of the lists above; a
+	// tool added to Register() without a list here fails the wiring test
+	// rather than silently passing an uncategorized schema.
+	covered := make(map[string]bool, len(perTicket)+len(boardRequired)+len(noRequired)+len(reviewRequired))
+	for _, name := range append(append(append(append([]string{}, perTicket...), boardRequired...), noRequired...), reviewRequired...) {
 		covered[name] = true
 	}
 	for name := range tools {
