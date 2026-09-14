@@ -38,8 +38,9 @@ ProtectSystem=full
 # directory for no functional gain, so it is deliberately withheld.
 #
 # Known trade-off (intentional, NOT relaxed silently): shell-outs that
-# WRITE under $HOME — e.g. `hermes kanban claim` via $HERMES_BIN, which
-# updates ~/.hermes/kanban.db — will fail under read-only /home. If that
+# WRITE under $HOME — e.g. `hermes kanban claim`, `hermes kanban block
+# --kind`, and `hermes kanban request-review` via $HERMES_BIN, all of which
+# update ~/.hermes/kanban.db — will fail under read-only /home. If that
 # becomes a requirement, document it in README.md (docs task owns that
 # note) instead of setting ProtectHome=false here. A narrower carve-out
 # is possible once __SERVICE_USER__ is known: keep ProtectHome=read-only
@@ -47,7 +48,8 @@ ProtectSystem=full
 ProtectHome=read-only
 
 # __SERVICE_USER__ placeholder: MUST be the account that can execute
-# `hermes` (used for claim and typed-block shell-outs via $HERMES_BIN).
+# `hermes` (used for the claim, typed-block and review-request shell-outs
+# via $HERMES_BIN).
 # It should also be the account whose ~/.hermes holds the board DB the
 # bridge manages, so those shell-outs operate on the same kanban the
 # REST API reads.

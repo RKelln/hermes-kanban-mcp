@@ -1,14 +1,23 @@
 package mcptools
 
 // review_tool_test.go exercises TicketRequestReview against the scripted
-// kanban REST backend and the fake hermes CLI.
+// kanban REST backend (which also serves GET /profiles) and the fake
+// hermes CLI.
 //
-// The load-bearing case is TestTRR_StrandGuard: an unassigned review
-// ticket is skipped by the dispatcher every tick, forever, with no
-// reviewer and no runs (t_44d19d72 / t_371b7d27, 5 days silent,
-// diagnosed in t_124ab31f). The tool must REFUSE rather than perform a
-// transition nothing will act on — so that test asserts the negative: no
-// CLI invocation and no status change.
+// The load-bearing cases, in the order they matter:
+//   - TestTRR_StrandGuard and TestTRR_NonProfileReviewerRefused: an
+//     unassigned OR non-profile review row is skipped by the dispatcher
+//     every tick, forever (t_44d19d72 / t_371b7d27, 5 days silent,
+//     t_124ab31f). Both must REFUSE, asserted as negatives (no CLI
+//     invocation, no status write).
+//   - TestTRR_AssigneeIsNotUsedAsReviewer: after a request-changes
+//     verdict the kernel sets assignee = the implementer, so falling back
+//     to the assignee would make round 2 a self-review.
+//   - TestTRR_RunningRequiresForce / TestTRR_ForceRejectedOnReady: the
+//     bridge cannot verify claim ownership, so releasing a live claim is
+//     an explicit caller decision and never automatic.
+//   - TestTRR_Postcondition*: never report "reviewer dispatched" for a
+//     ticket that did not reach a dispatchable review row.
 
 import (
 	"context"
@@ -38,10 +47,19 @@ func argvLog(t *testing.T) func() []string {
 }
 
 // noEnvReviewer makes sure the server-default knob is absent so tests
-// observe the argument/assignee resolution order, not ambient config.
+// observe the argument/default resolution, not ambient config.
 func noEnvReviewer(t *testing.T) {
 	t.Helper()
 	t.Setenv("MCP_REVIEWER_PROFILE", "")
+}
+
+// assertNoCLI asserts the CLI was never invoked (the refusal paths must
+// all refuse BEFORE exec).
+func assertNoCLI(t *testing.T, argv []string) {
+	t.Helper()
+	if len(argv) != 0 {
+		t.Errorf("argv = %v, want no CLI invocation", argv)
+	}
 }
 
 func TestTRR_SuccessReady(t *testing.T) {
@@ -70,12 +88,15 @@ func TestTRR_SuccessReady(t *testing.T) {
 	if out.Note != reviewNote {
 		t.Errorf("note = %q, want %q", out.Note, reviewNote)
 	}
-	// Authoritative state: preflight + re-read, and never a PATCH.
+	// Authoritative state: preflight + re-read, never a PATCH.
 	if n := backend.getCount("t_x1"); n != 2 {
 		t.Errorf("GET count = %d, want 2 (preflight + authoritative re-read)", n)
 	}
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0", n)
+	}
+	if n := backend.profileProbes(); n != 1 {
+		t.Errorf("profile probes = %d, want 1 (reviewer must be verified spawnable)", n)
 	}
 	argv := readArgv()
 	if len(argv) != 1 {
@@ -84,37 +105,188 @@ func TestTRR_SuccessReady(t *testing.T) {
 	if !strings.Contains(argv[0], "request-review t_x1") || !strings.Contains(argv[0], "--summary=shipped it") {
 		t.Errorf("argv = %q, want request-review with the summary", argv[0])
 	}
+	if !strings.Contains(argv[0], "--reviewer=alice") {
+		t.Errorf("argv = %q, want --reviewer=alice", argv[0])
+	}
 	if strings.Contains(argv[0], "--force") {
 		t.Errorf("argv = %q, must NOT force a ready ticket", argv[0])
 	}
 }
 
-func TestTRR_RunningPassesForce(t *testing.T) {
+// F2 regression: a running ticket holds a live claim the bridge cannot
+// attribute, so the caller must assert force explicitly.
+func TestTRR_RunningRequiresForce(t *testing.T) {
 	noEnvReviewer(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"alice","claim_lock":"exp:1","claim_expires":9999999999}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"other-profile","claim_lock":"holder-1","claim_expires":9999999999}}`,
 		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
 	}
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
-		ID: "t_x1", Board: testBoard, Summary: "shipped it",
+		ID: "t_x1", Board: testBoard, Summary: "shipped it", Reviewer: "alice",
+	})
+	if !res.IsError {
+		t.Fatalf("expected an IsError requiring explicit force, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"force: true", "live claim", "other-profile"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+
+	// With the explicit assertion the transition proceeds, carrying --force.
+	// Fresh backend: the scripted orders repeat their last body, so reusing
+	// this one would serve "review" to the second preflight.
+	backend2 := newClaimBackend()
+	backend2.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"other-profile","claim_lock":"holder-1","claim_expires":9999999999}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+	}
+	readArgv2 := argvLog(t)
+	s2 := newClaimToolServer(t, backend2)
+	res = s2.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "shipped it", Reviewer: "alice", Force: true,
 	})
 	if res.IsError {
-		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+		t.Fatalf("expected success with force, got IsError: %s", res.Content[0].Text)
 	}
-	// A running ticket holds our own live claim; the CLI has no
-	// --expected-run-id, so --force is the only release path.
-	argv := readArgv()
+	argv := readArgv2()
 	if len(argv) != 1 || !strings.Contains(argv[0], "--force") {
 		t.Fatalf("argv = %v, want exactly one invocation carrying --force", argv)
 	}
 }
 
-// TestTRR_StrandGuard is the negative control for the failure this whole
-// tool exists to prevent: a review row nobody will ever pick up.
+// F2 regression, other direction: force on a ready ticket is a
+// misunderstanding of the lifecycle and must not be silently ignored.
+func TestTRR_ForceRejectedOnReady(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice", Force: true,
+	})
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "only for a RUNNING ticket") {
+		t.Errorf("got %q, want an IsError about force-on-ready", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// F1 regression (HIGH): a reviewer that is not an installed profile parks
+// the card in 'review' forever. The tool must verify against the roster
+// and refuse.
+func TestTRR_NonProfileReviewerRefused(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "not-a-profile",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for a non-profile reviewer, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"not an installed profile", "not-a-profile", "alice"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+
+	// Same refusal via the env default: a stale/typo'd MCP_REVIEWER_PROFILE
+	// is the realistic production trigger.
+	t.Setenv("MCP_REVIEWER_PROFILE", "ghost")
+	res = s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "not an installed profile") {
+		t.Errorf("got %q, want the same refusal for a stale MCP_REVIEWER_PROFILE", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// When the roster cannot be read the check cannot run. Proceed, but SAY so:
+// a silently degraded guard is the failure mode this tool exists to prevent.
+func TestTRR_UnverifiedRosterAnnounced(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.profiles = nil // /profiles 404s
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if !strings.Contains(out.Note, "could NOT be verified") {
+		t.Errorf("note = %q, want an announced unverified-roster warning", out.Note)
+	}
+	if len(readArgv()) != 1 {
+		t.Errorf("argv = %v, want the transition to proceed", readArgv())
+	}
+}
+
+// F3 regression (MEDIUM): after request-changes the kernel sets
+// assignee = the implementer, so using the assignee as the reviewer makes
+// round 2 a self-review. With no reviewer configured the tool must omit
+// --reviewer and let the kernel resolve its own provenance.
+func TestTRR_AssigneeIsNotUsedAsReviewer(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"the-implementer"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"the-reviewer"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	argv := readArgv()
+	if len(argv) != 1 {
+		t.Fatalf("argv = %v, want one invocation", argv)
+	}
+	if strings.Contains(argv[0], "--reviewer=") {
+		t.Errorf("argv = %q, must omit --reviewer so the kernel's provenance applies", argv[0])
+	}
+	if strings.Contains(argv[0], "the-implementer") {
+		t.Errorf("argv = %q, the implementer must never become the reviewer", argv[0])
+	}
+	if out := decodeOut[TicketRequestReviewOut](t, res); !strings.Contains(out.Note, "previous review round") {
+		t.Errorf("note = %q, want it to state the kernel's provenance was used", out.Note)
+	}
+	if n := backend.profileProbes(); n != 0 {
+		t.Errorf("profile probes = %d, want 0 (no reviewer to verify)", n)
+	}
+}
+
+// The original guard, unchanged: an unassigned review row nobody will
+// ever pick up.
 func TestTRR_StrandGuard(t *testing.T) {
 	noEnvReviewer(t)
 	readArgv := argvLog(t)
@@ -123,7 +295,7 @@ func TestTRR_StrandGuard(t *testing.T) {
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
-		ID: "t_x1", Board: testBoard, Summary: "shipped it",
+		ID: "t_x1", Board: testBoard, Summary: "shipped it", Force: true,
 	})
 	if !res.IsError {
 		t.Fatalf("expected IsError for an unassigned review request, got success: %s", res.Content[0].Text)
@@ -133,10 +305,7 @@ func TestTRR_StrandGuard(t *testing.T) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
 	}
-	// It must refuse BEFORE acting: no CLI, no status write.
-	if argv := readArgv(); len(argv) != 0 {
-		t.Errorf("argv = %v, want no CLI invocation", argv)
-	}
+	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0 (must not flip the status)", n)
 	}
@@ -145,43 +314,40 @@ func TestTRR_StrandGuard(t *testing.T) {
 	}
 }
 
-func TestTRR_ReviewerResolution(t *testing.T) {
-	tests := []struct {
-		name         string
-		argReviewer  string
-		envReviewer  string
-		assignee     string
-		wantReviewer string
-	}{
-		{name: "explicit argument wins", argReviewer: "carol", envReviewer: "bob", assignee: "dave", wantReviewer: "carol"},
-		{name: "env used when argument empty", envReviewer: "bob", assignee: "dave", wantReviewer: "bob"},
-		{name: "existing assignee used when both empty", assignee: "dave", wantReviewer: "dave"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("MCP_REVIEWER_PROFILE", tt.envReviewer)
-			readArgv := argvLog(t)
-			backend := newClaimBackend()
-			backend.orders["t_x1"] = []string{
-				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"` + tt.assignee + `"}}`,
-				`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"` + tt.wantReviewer + `"}}`,
-			}
-			s := newClaimToolServer(t, backend)
+// F7 regression: the CLI exiting 0 without transitioning must not be
+// reported as a dispatched review.
+func TestTRR_PostconditionNotReview(t *testing.T) {
+	noEnvReviewer(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
 
-			res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
-				ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: tt.argReviewer,
-			})
-			if res.IsError {
-				t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
-			}
-			if out := decodeOut[TicketRequestReviewOut](t, res); out.Assignee != tt.wantReviewer {
-				t.Errorf("assignee = %q, want %q", out.Assignee, tt.wantReviewer)
-			}
-			argv := readArgv()
-			if len(argv) != 1 || !strings.Contains(argv[0], "--reviewer="+tt.wantReviewer) {
-				t.Errorf("argv = %v, want --reviewer=%s", argv, tt.wantReviewer)
-			}
-		})
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "did not take effect") {
+		t.Errorf("got %q, want an IsError about the transition not taking effect", res.Content[0].Text)
+	}
+}
+
+// F7/F3 regression: a review row with no assignee is exactly the stranded
+// state, and the tool must not report success for it.
+func TestTRR_PostconditionEmptyAssignee(t *testing.T) {
+	noEnvReviewer(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"review"}}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "NO assignee") {
+		t.Errorf("got %q, want an IsError about the stranded review row", res.Content[0].Text)
 	}
 }
 
@@ -200,6 +366,9 @@ func TestTRR_SummaryRequired(t *testing.T) {
 	// Validation precedes any backend call.
 	if n := backend.getCount("t_x1"); n != 0 {
 		t.Errorf("GET count = %d, want 0 (validation runs first)", n)
+	}
+	if n := backend.profileProbes(); n != 0 {
+		t.Errorf("profile probes = %d, want 0", n)
 	}
 }
 
@@ -227,9 +396,7 @@ func TestTRR_StatusPreflight(t *testing.T) {
 			if !res.IsError || !strings.Contains(res.Content[0].Text, tt.wantSub) {
 				t.Errorf("got %q, want an IsError mentioning %q", res.Content[0].Text, tt.wantSub)
 			}
-			if argv := readArgv(); len(argv) != 0 {
-				t.Errorf("argv = %v, want no CLI invocation from a rejected status", argv)
-			}
+			assertNoCLI(t, readArgv())
 		})
 	}
 }
@@ -244,8 +411,8 @@ func TestTRR_Validation(t *testing.T) {
 		want string
 	}{
 		{name: "board missing", in: TicketRequestReviewInput{ID: "t_x1", Summary: "s"}, want: "board required"},
-		{name: "bad board", in: TicketRequestReviewInput{ID: "t_x1", Board: "BAD BOARD", Summary: "s"}, want: "invalid_input"},
-		{name: "bad id", in: TicketRequestReviewInput{ID: "a b", Board: testBoard, Summary: "s"}, want: "invalid_input"},
+		{name: "bad board", in: TicketRequestReviewInput{ID: "t_x1", Board: "BAD BOARD", Summary: "s"}, want: "invalid board"},
+		{name: "bad id", in: TicketRequestReviewInput{ID: "a b", Board: testBoard, Summary: "s"}, want: "invalid ticket id"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,6 +445,7 @@ func TestTRR_CLIFailureSurfacesStderr(t *testing.T) {
 	}
 }
 
+// The binary check runs before any network call (TicketClaim's ordering).
 func TestTRR_BinaryMissing(t *testing.T) {
 	noEnvReviewer(t)
 	breakBin(t)
@@ -290,6 +458,13 @@ func TestTRR_BinaryMissing(t *testing.T) {
 	})
 	if !res.IsError || !strings.Contains(res.Content[0].Text, "request-review unavailable") {
 		t.Errorf("got %q, want a request-review-unavailable IsError", res.Content[0].Text)
+	}
+	// Fail fast: no REST preflight, no roster probe.
+	if n := backend.getCount("t_x1"); n != 0 {
+		t.Errorf("GET count = %d, want 0 (binary check must precede the preflight)", n)
+	}
+	if n := backend.profileProbes(); n != 0 {
+		t.Errorf("profile probes = %d, want 0", n)
 	}
 }
 

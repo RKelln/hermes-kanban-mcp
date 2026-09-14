@@ -46,16 +46,56 @@ type claimBackend struct {
 	mu     sync.Mutex
 	orders map[string][]string
 	reqs   []claimReq
+	// profiles is the roster served by GET /profiles. A nil slice makes
+	// the endpoint 404, which is how tests exercise the "roster could not
+	// be read" branch. Names mirror the installed-profile roster the
+	// dispatcher checks with profile_exists().
+	profiles []string
 }
 
 func newClaimBackend() *claimBackend {
-	return &claimBackend{orders: map[string][]string{}}
+	return &claimBackend{
+		orders:   map[string][]string{},
+		profiles: []string{"default", "alice", "bob", "carol", "dave"},
+	}
+}
+
+// profileProbes counts GETs to /profiles.
+func (b *claimBackend) profileProbes() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, rr := range b.reqs {
+		if rr.path == "/profiles" {
+			n++
+		}
+	}
+	return n
 }
 
 func (b *claimBackend) handler(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path == "/profiles" {
+		b.reqs = append(b.reqs, claimReq{method: r.Method, path: r.URL.Path})
+		if b.profiles == nil {
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"detail":"no roster"}`)
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString(`{"profiles":[`)
+		for i, p := range b.profiles {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, `{"name":%q}`, p)
+		}
+		sb.WriteString(`]}`)
+		io.WriteString(w, sb.String())
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/tasks/")
 	switch r.Method {
 	case http.MethodGet:

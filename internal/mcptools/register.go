@@ -84,6 +84,11 @@ func requestReviewSchema() map[string]any {
 		"id":       propStr(),
 		"summary":  propStr(),
 		"reviewer": propStr(),
+		"force": map[string]any{
+			"type":        "boolean",
+			"default":     false,
+			"description": "Required to move a RUNNING ticket (it releases your live claim; the CLI has no --expected-run-id). Must be omitted for a ready ticket. Only pass it if you claimed the ticket yourself and are requesting review of your own finished work.",
+		},
 	}, "id", "board", "summary")
 }
 func eventsSchema() map[string]any {
@@ -129,7 +134,7 @@ func Register(srv *mcp.Server, s *Server) {
 		completeSchema(),
 		s.TicketComplete)
 
-	addTool(srv, "ticket_request_review", "Request a FINAL REVIEW of a finished ticket: ready/running -> 'review' via the hermes CLI (not a block). The dispatcher then claims the ticket as a REVIEW run and spawns the sdlc-review reviewer; APPROVE completes it to done, changes come back to you. summary is required — it is the reviewer's handoff (what changed, the refs to verify, what you already proved). reviewer resolves as: explicit reviewer > MCP_REVIEWER_PROFILE > the ticket's existing assignee; if all are empty the call is REFUSED rather than performed, because the dispatcher never spawns an unassigned review ticket and it would strand silently. Do NOT merge your branch before the verdict: done means merge. (id, board and summary required)",
+	addTool(srv, "ticket_request_review", "Request a FINAL REVIEW of a finished ticket: ready/running -> 'review' via the hermes CLI (not a block). The dispatcher then claims the ticket as a REVIEW run and spawns the sdlc-review reviewer; APPROVE completes it to done, changes come back to you. summary is required — it is the reviewer's handoff (what changed, the refs to verify, what you already proved). reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE; it is VERIFIED against the installed profile roster and refused if it is not a profile the dispatcher can spawn (a non-profile reviewer parks the card in 'review' forever), and when neither source supplies one the kernel's own re-review provenance is used. Moving a RUNNING ticket additionally requires force: true — it releases your live claim, so pass it only for work you claimed yourself. Push your branch FIRST, and do NOT merge before the verdict: done means merge. (id, board and summary required)",
 		requestReviewSchema(),
 		s.TicketRequestReview)
 
