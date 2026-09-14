@@ -1,11 +1,18 @@
-# kanban-mcp.service — systemd unit for the kanban-mcp MCP bridge
+# kanban-mcp.service — systemd unit TEMPLATE for the kanban-mcp MCP bridge
+#
+# Do NOT install this file verbatim: it carries two placeholders (the service
+# user and that user's home) that do not resolve, and systemd then fails the
+# unit with status=217/USER while `systemctl status` reports
+# `activating (auto-restart)` — a credential failure that reads like a slow
+# start (that is how the bridge went down on 2026-09-14).
 #
 # Deploy steps:
 #   1. Install the static binary:  install -m 0755 bin/kanban-mcp /usr/local/bin/kanban-mcp
 #   2. Create /etc/kanban-mcp.env from deploy/kanban-mcp.env.example and
 #      chmod 600 it — it holds KANBAN_PASSWORD and MCP_BEARER_TOKEN secrets.
-#   3. Copy this file to /etc/systemd/system/kanban-mcp.service, then:
-#      systemctl daemon-reload && systemctl enable --now kanban-mcp
+#   3. Install THIS FILE through deploy/install.md §4, which substitutes both
+#      placeholders, refuses to install an unresolved copy, and only restarts
+#      the service when the generated unit actually changed.
 
 [Unit]
 Description=kanban-mcp MCP bridge to the Hermes kanban board
@@ -32,27 +39,42 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 # ProtectHome=read-only: the bridge only ever needs to READ hermes state
-# under the service user's home (kanban DB ~/.hermes/kanban.db, hermes
-# config) while proxying to the REST API. Full write access to $HOME
-# would let a compromised bridge rewrite the operator's whole home
-# directory for no functional gain, so it is deliberately withheld.
+# under the service user's home (the board DB, the hermes config) while
+# proxying to the REST API. Full write access to $HOME would let a
+# compromised bridge rewrite the operator's whole home directory for no
+# functional gain, so it is deliberately withheld.
 #
-# Known trade-off (intentional, NOT relaxed silently): shell-outs that
-# WRITE under $HOME — e.g. `hermes kanban claim`, `hermes kanban block
-# --kind`, and `hermes kanban request-review` via $HERMES_BIN, all of which
-# update ~/.hermes/kanban.db — will fail under read-only /home. If that
-# becomes a requirement, document it in README.md (docs task owns that
-# note) instead of setting ProtectHome=false here. A narrower carve-out
-# is possible once __SERVICE_USER__ is known: keep ProtectHome=read-only
-# and add ReadWritePaths=<path to that user's ~/.hermes/kanban.db>.
+# ReadWritePaths= below is the ONE carve-out that is REQUIRED, not an
+# option to consider later: three tools shell out through $HERMES_BIN and
+# WRITE the board database — `hermes kanban claim`, `hermes kanban block
+# --kind` and `hermes kanban request-review`. Under a read-only /home those
+# writes fail at runtime, after an install that looks healthy, because the
+# REST-only tools keep working.
+#
+# The carve-out is the ~/.hermes DIRECTORY, not the database file: SQLite
+# writes -wal/-shm siblings next to every database, and board DBs live in
+# ~/.hermes/kanban/boards/<slug>/, so a file-level carve-out fails the
+# first time the WAL is recreated. Nesting a writable path inside a
+# read-only one is the supported pattern (systemd.exec).
+#
+# Do not replace this with ProtectHome=false: that would hand the bridge
+# the whole home directory for a write it needs in exactly one tree.
 ProtectHome=read-only
+# The service-home placeholder on this line is substituted with the service
+# user's home by deploy/install.md §4 (which resolves it to <home>/.hermes).
+ReadWritePaths=__SERVICE_HOME__/.hermes
 
-# __SERVICE_USER__ placeholder: MUST be the account that can execute
-# `hermes` (used for the claim, typed-block and review-request shell-outs
-# via $HERMES_BIN).
-# It should also be the account whose ~/.hermes holds the board DB the
-# bridge manages, so those shell-outs operate on the same kanban the
-# REST API reads.
+# The placeholder on the next line MUST be substituted with the account that
+# can execute `hermes` (the claim, typed-block and review-request shell-outs
+# via $HERMES_BIN) and whose ~/.hermes holds the board DB this service
+# manages, so those shell-outs operate on the same kanban the REST API
+# reads. It is usually the account that owns the kanban dashboard
+# (e.g. experimance) — not root, not a purpose-made system user.
+#
+# The placeholder tokens appear ONLY on the two directive lines above and
+# below; no comment spells them out. The install block greps the generated
+# file for the token and refuses to install a copy that still has one, so a
+# comment that quoted the token would make a resolved unit look unresolved.
 User=__SERVICE_USER__
 
 [Install]
