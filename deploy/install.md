@@ -201,10 +201,12 @@ shell-outs write:
 tools shell out through `$HERMES_BIN` and WRITE the board database:
 `ticket_claim` (ready→running), `ticket_block` (typed kinds) and
 `ticket_request_review` (the native review lane, the recommended completion
-path). All three are the same shell-out class. Under a read-only `/home` those
-writes fail at runtime — a bridge that "installed successfully" and then refuses
-the tools that make it useful, while the REST-only tools keep working and make
-the install look healthy.
+path). All three are the same shell-out class, and under a read-only `/home` that
+shell-out fails at runtime: `ticket_claim` and `ticket_request_review` are
+refused outright, and `ticket_block` loses its kind (the REST downgrade below is
+the one exception, and it is not a reason to skip the carve-out). A bridge that
+"installed successfully" and then refuses the tools that make it useful, while
+the REST-only tools keep working, is an install that looks healthy and is not.
 
 **Why `~/.hermes` and not `~/.hermes/kanban.db`.** SQLite writes `-wal` and
 `-shm` siblings next to each database, and board databases live one level deeper
@@ -244,13 +246,37 @@ sudo systemd-run --unit=kanban-mcp-write-probe --collect \
 #                                                     spawnable assignee
 ```
 
-A read-only failure names itself: the bridge returns the CLI's stderr. If it
-appears, `systemctl show -p ReadWritePaths --value kanban-mcp.service` shows
-whether the carve-out reached the installed unit. If the claim shell-out is
-unavailable, `ticket_claim` degrades to comment-only advisory mode (per
-`MCP_ALLOW_SKIP_CLAIM`) rather than failing hard. `ticket_request_review` has no
-such fallback by design: it refuses and names the reason, because a review row
-nobody can dispatch is worse than a clear error.
+A read-only failure names itself: the bridge returns the CLI's stderr, and
+`systemctl show -p ReadWritePaths --value kanban-mcp.service` says whether the
+carve-out reached the installed unit. Per tool, what a failure looks like —
+none of these is an advisory mode:
+
+- `ticket_claim` **fails hard**, in one line naming the cause: the first
+  non-empty line of the CLI's stderr when the CLI exits non-zero (under a
+  read-only `/home` that is the CLI reporting it could not update the board DB),
+  or `claim unavailable: hermes CLI not found at … (set HERMES_BIN)` when
+  `$HERMES_BIN` does not resolve. Nothing is claimed, and nothing posts a
+  comment in its place.
+- `ticket_request_review` **fails hard** the same way, and additionally verifies
+  the transition took: after the CLI returns it re-reads the ticket and refuses
+  with `request-review did not take effect: ticket … is still <status>` rather
+  than reporting a success the kernel never applied.
+- `ticket_block` is the **one** tool with a REST downgrade: with the CLI
+  unavailable, a typed block is recorded as an untyped one via
+  `PATCH /tasks/{id}`, and the result carries `kind_applied=false` with the note
+  `typed kind unavailable; recorded as untyped block`. That PATCH is served by
+  the gateway that owns the board DB (`:9119`), a different process with no
+  `ProtectHome` restriction of its own, so it succeeds even under a read-only
+  `$HOME` — which is exactly why it is **not** evidence that the carve-out works.
+  Only (a) and (b) above are.
+
+`MCP_ALLOW_SKIP_CLAIM` is not a CLI fallback and appears in none of the above: it
+is `ticket_complete`'s claim-guard opt-out, the check that otherwise refuses to
+complete an unclaimed ticket. These behaviours are pinned by the repo's own
+tests — `TestTC_ClaimBinaryMissing`, `TestTC_ClaimFailure`,
+`TestTC_BlockFallbackWhenCLIUnavailable` in
+`internal/mcptools/claim_tool_test.go` — so if this page and the code disagree
+about a shell-out failure, the code is right and this page is the bug.
 
 ## 5. Smoke test
 

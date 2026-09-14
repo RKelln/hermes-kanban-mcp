@@ -61,7 +61,7 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 
 ## Deploy
 
-- `deploy/kanban-mcp.service` — systemd unit (install binary to `/usr/local/bin/kanban-mcp`)
+- `deploy/kanban-mcp.service` — systemd unit **template**, not installable as-is: `__SERVICE_USER__` / `__SERVICE_HOME__` must be substituted. Install or refresh it through `deploy/install.md` §4 (which does the substitution, the placeholder check and the restart gate) — installing this file raw is the 217/USER outage.
 - `deploy/kanban-mcp.env.example` — all configuration variables with defaults
 - `deploy/install.md` — install steps + opencode remote-MCP configuration snippet
 - `scripts/smoke.sh` — end-to-end smoke + secret-hygiene checks
