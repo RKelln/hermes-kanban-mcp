@@ -17,9 +17,10 @@ import (
 // without locks.
 type eventsBackend struct {
 	events atomic.Pointer[[]json.RawMessage]
-	// status is the task status served to the client; long-poll tests keep
-	// it "blocked" so the poll actually waits, while the instant-return
-	// tests set it to a terminal status.
+	// status is the task status served to the client. Tests set it
+	// explicitly; the default is "blocked" only because that is the
+	// convention's original waiting state, and the wait no longer depends
+	// on it — a review-lane state must wait just as well.
 	status atomic.Pointer[string]
 	// tickCount tracks how many task GETs have been served.
 	tickCount atomic.Int64
@@ -156,8 +157,10 @@ func TestTE_EmptyTimeout(t *testing.T) {
 	s := NewServer(b.server.URL, "hermes-agent")
 	SetBoardLister(s)
 
-	// No events ever.
+	// No events ever. A review-lane state, deliberately NOT the harness
+	// default: the wait must not depend on the ticket being blocked.
 	b.setEvents([]json.RawMessage{})
+	b.setStatus("review")
 
 	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
 	start := time.Now()
@@ -452,7 +455,12 @@ func restorePollInterval(t *testing.T) {
 	t.Cleanup(func() { eventsPollInterval = 1 * time.Second })
 }
 
-func TestTE_InstantReturnWhenAlreadyDone(t *testing.T) {
+// An already-terminal ticket is NOT special-cased. Replacing "any status but
+// blocked returns instantly" with "a terminal status returns instantly" would
+// be another convention assumption of exactly the kind that broke this tool.
+// A caller that has already consumed the verdict event stops polling on
+// ticket_status, and one that passes its cursor gets the event path.
+func TestTE_AlreadyTerminalIsNotSpecialCased(t *testing.T) {
 	defer restorePollInterval(t)
 	eventsPollInterval = 100 * time.Millisecond
 
@@ -462,11 +470,56 @@ func TestTE_InstantReturnWhenAlreadyDone(t *testing.T) {
 	s := NewServer(b.server.URL, "hermes-agent")
 	SetBoardLister(s)
 
-	// The ticket is already done: no events pending, status done. The
-	// poll must return immediately with the status, not wait out the
-	// timeout.
+	// Already done, no events pending, cursor caught up: the only honest
+	// answer is "nothing new", reported when the wait expires.
 	b.setEvents([]json.RawMessage{})
 	b.setStatus("done")
+
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+	start := time.Now()
+	res := s.TicketEvents(context.Background(), input)
+	elapsed := time.Since(start)
+
+	if res == nil || res.IsError {
+		t.Fatalf("TicketEvents returned error: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !out.TimedOut {
+		t.Errorf("TimedOut = false, want true (no events, so the wait runs to the timeout)")
+	}
+	if out.TicketStatus != "done" {
+		t.Errorf("TicketStatus = %q, want done (the status is reported either way)", out.TicketStatus)
+	}
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("returned after %v, want >= ~2s (a status-based shortcut has crept back in)", elapsed)
+	}
+}
+
+// The review-lane wait, which is what the opencode lane needed: the card sits
+// in "running" (a reviewer working) and the verdict lands mid-wait. Under the
+// old rule this returned at the FIRST fetch — "running" is not "blocked" — so
+// a caller could never wait for a verdict at all.
+func TestTE_ReturnsWhenStatusChangesMidPoll(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{})
+	b.setStatus("running") // a reviewer is working; nothing to report yet
+	go func() {
+		for b.tickCount.Load() < 3 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		b.setStatus("done") // the verdict landed
+	}()
 
 	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30}
 	start := time.Now()
@@ -484,50 +537,53 @@ func TestTE_InstantReturnWhenAlreadyDone(t *testing.T) {
 		t.Errorf("TicketStatus = %q, want done", out.TicketStatus)
 	}
 	if out.TimedOut {
-		t.Errorf("TimedOut = true, want false (instant return, not timeout)")
+		t.Errorf("TimedOut = true, want false (the status change ends the wait)")
 	}
 	if elapsed >= 5*time.Second {
-		t.Errorf("returned after %v, want immediate (did not short-circuit)", elapsed)
-	}
-	// Only the initial fetch happens; no polling ticks.
-	if n := b.tickCount.Load(); n != 1 {
-		t.Errorf("backend calls = %d, want 1 (instant return must not keep polling)", n)
+		t.Errorf("returned after %v, want an immediate return once the status changed", elapsed)
 	}
 }
 
-func TestTE_InstantReturnWhenReadyMidPoll(t *testing.T) {
+// The AC the review lane needs: a card in ANY review-lane state with no new
+// events WAITS the full timeout. Before the fix every case here returned in
+// ~0s with an empty result, which a polling caller can only read as broken.
+func TestTE_WaitsThroughReviewStates(t *testing.T) {
 	defer restorePollInterval(t)
-	eventsPollInterval = 50 * time.Millisecond
+	eventsPollInterval = 100 * time.Millisecond
 
-	b := newEventsBackend()
-	defer b.close()
+	for _, status := range []string{"review", "running", "ready", "todo"} {
+		t.Run(status, func(t *testing.T) {
+			b := newEventsBackend()
+			defer b.close()
 
-	s := NewServer(b.server.URL, "hermes-agent")
-	SetBoardLister(s)
+			s := NewServer(b.server.URL, "hermes-agent")
+			SetBoardLister(s)
 
-	b.setEvents([]json.RawMessage{})
-	// Flip to ready after the first poll so the short-circuit fires mid-wait.
-	go func() {
-		for b.tickCount.Load() < 2 {
-			time.Sleep(20 * time.Millisecond)
-		}
-		b.setStatus("ready")
-	}()
+			b.setEvents([]json.RawMessage{})
+			b.setStatus(status)
 
-	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30}
-	res := s.TicketEvents(context.Background(), input)
-	if res == nil || res.IsError {
-		t.Fatalf("TicketEvents returned error: %+v", res)
-	}
-	var out TicketEventsOut
-	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
-		t.Fatalf("decode result: %v", err)
-	}
-	if out.TicketStatus != "ready" {
-		t.Errorf("TicketStatus = %q, want ready", out.TicketStatus)
-	}
-	if out.TimedOut {
-		t.Errorf("TimedOut = true, want false")
+			input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+			start := time.Now()
+			res := s.TicketEvents(context.Background(), input)
+			elapsed := time.Since(start)
+
+			if res == nil || res.IsError {
+				t.Fatalf("TicketEvents returned error: %+v", res)
+			}
+			var out TicketEventsOut
+			if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+				t.Fatalf("decode result: %v", err)
+			}
+			if !out.TimedOut {
+				t.Errorf("status %q: TimedOut = false, want true (it must wait, not short-circuit)", status)
+			}
+			if out.TicketStatus != status {
+				t.Errorf("status %q: TicketStatus = %q, want it reported unchanged", status, out.TicketStatus)
+			}
+			if elapsed < 1500*time.Millisecond {
+				t.Errorf("status %q: returned after %v, want >= ~2s (short-circuit regression)", status, elapsed)
+			}
+		})
 	}
 }
 

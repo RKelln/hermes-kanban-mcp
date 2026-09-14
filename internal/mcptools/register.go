@@ -142,7 +142,7 @@ func Register(srv *mcp.Server, s *Server) {
 		blockSchema(),
 		s.TicketBlock)
 
-	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...); returns events newer than since_event_id or empty on timeout. Long-polls up to timeout_seconds (default 120, max 900). (id and board required)",
+	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...). The long-poll ends as soon as there are events newer than since_event_id, OR the ticket's STATUS CHANGES from the status it had when you called, OR timeout_seconds elapse (default 120, max 900). ticket_status is always the ticket's status on the last fetch, so a wait that returns with no events and a different ticket_status means the ticket moved — that is how a caller sees a review verdict land. id and board are required.",
 		eventsSchema(),
 		s.TicketEvents)
 
