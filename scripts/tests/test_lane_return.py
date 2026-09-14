@@ -66,7 +66,7 @@ FAKE_CLI = textwrap.dedent(
         print(json.dumps({"ok": True}))
         sys.exit(0)
     if "comment" in argv:
-        sys.exit(0)
+        sys.exit(1 if os.environ.get("FAKE_COMMENT_FAIL") == "1" else 0)
     print("fake: unhandled argv %r" % (argv,))
     sys.exit(2)
     """
@@ -104,7 +104,7 @@ class Harness(unittest.TestCase):
             clear=False,
         )
         self.env.start()
-        for key in ("FAKE_PROMOTE_FAIL", "FAKE_PROMOTE_NOOP"):
+        for key in ("FAKE_PROMOTE_FAIL", "FAKE_PROMOTE_NOOP", "FAKE_COMMENT_FAIL"):
             os.environ.pop(key, None)
         self.addCleanup(self.env.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -279,6 +279,42 @@ class TestActing(Harness):
         rc, out = self.run_tick("--max-actions", "2")
         self.assertEqual(rc, 0, out)
         self.assertEqual(len([c for c in self.calls() if "promote" in c]), 2)
+
+    def test_a_failed_audit_comment_fails_the_tick(self):
+        # The promote committed, so the state is right — but an unattributed
+        # action is not a warning: exit non-zero and say the move happened.
+        os.environ["FAKE_COMMENT_FAIL"] = "1"
+        self.add_card("t_n", reason="review-required: REQUEST_CHANGES")
+        rc, out = self.run_tick()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.status("t_n"), "ready", "the promote did commit")
+        self.assertIn("WAS moved to ready", out)
+        self.assertIn("not in the trail", out)
+
+    def test_the_audit_comment_names_the_resulting_status(self):
+        self.add_card("t_s", reason="review-required: REQUEST_CHANGES")
+        self.run_tick()
+        comment = [c for c in self.calls() if "comment" in c][0]
+        self.assertIn("status=ready", " ".join(comment))
+
+    def test_board_limits_the_tick_to_one_board(self):
+        self.add_card("t_here", reason="review-required: REQUEST_CHANGES", board="probe")
+        self.add_card("t_other", reason="review-required: REQUEST_CHANGES", board="default")
+        rc, out = self.run_tick("--board", "probe")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.status("t_here", board="probe"), "ready")
+        self.assertEqual(self.status("t_other", board="default"), "blocked",
+                         "--board must not touch another board")
+        promotes = [c for c in self.calls() if "promote" in c]
+        self.assertEqual(len(promotes), 1)
+        self.assertIn("probe", promotes[0])
+
+    def test_an_unknown_board_is_a_silent_no_op(self):
+        self.add_card("t_x", reason="review-required: REQUEST_CHANGES")
+        rc, out = self.run_tick("--board", "no-such-board")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, "", "an unknown board is not an error and not noise")
+        self.assertEqual(self.status("t_x"), "blocked")
 
 
 class TestNotActing(Harness):

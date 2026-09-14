@@ -26,10 +26,11 @@ WHAT MAKES A CARD ACTIONABLE
 ----------------------------
 Two independent gates must agree, so no single mistake can trigger a write:
 
-  1. STRUCTURAL — the block was written while the card was in the review phase
-     (`source_status == "review"` on the blocked event). Across the 153 blocked
-     cards on this box that field is set on every review-phase block and on no
-     worker, lane, or user one.
+  1. STRUCTURAL — the blocked event's `source_status` must be exactly "review".
+     Every run phase writes that field, so it is the VALUE that discriminates,
+     not its presence: on this box worker-phase blocks carry "ready" and
+     user/lane blocks carry nothing, while "review" appears only on blocks
+     written by review-phase runs.
   2. PROSE — the reason announces a changes-requested verdict ("review-required:"
      + REQUEST_CHANGES), and is not an ESCALATE.
 
@@ -38,14 +39,24 @@ and reason for every card the tick declined to touch, so silence is auditable.
 
 READS vs WRITES
 ---------------
-Reads are read-only SQL against the boards' own SQLite files: the CLI's
-`list --json` carries no block reason and dumps full bodies, and `show` is one
-process per card with a known crash bug. Reads cannot corrupt anything.
-Writes go through the CLI (`hermes kanban promote`) so every mutation is a
-kernel operation with an audit event, never a direct DB write.
+Reads are read-only SQL (`mode=ro`) against the boards' own SQLite files: the
+CLI's `list --json` carries no block reason and dumps full bodies, and `show` is
+one process per card with a known crash bug. A read-only connection cannot
+corrupt anything, but it does make the tick schema-coupled to
+`tasks(id, status, assignee, claim_lock)` and
+`task_events(task_id, kind, payload, created_at)` — a board-schema change breaks
+it loudly (`ERROR: cannot read <db>`), which is the intended failure mode.
+
+Writes go through the CLI (`hermes kanban promote`, `... comment`) so every
+mutation is a kernel operation with an audit event, never a direct DB write.
+That also keeps the CLI fence honest: the CLI refuses to mutate from a
+delegated-child context, and the cron scheduler does not set that marker for a
+`no_agent` script.
 
 Silence contract: an empty tick prints nothing. Actions and warnings print.
-Errors print loudly and set a non-zero exit so the cron surfaces them.
+Errors print loudly and set a non-zero exit so the cron surfaces them — including
+a failed audit comment AFTER a successful promote, which is reported as an error
+naming the state change that did happen.
 """
 
 from __future__ import annotations
@@ -170,12 +181,13 @@ def classify_block_event(payload: dict | None) -> str:
     """'changes' to act, 'leave' to do nothing — the full gate.
 
     Structural half FIRST: the block must have been written while the card was
-    in the review phase (`source_status == "review"`). Measured across this
-    box's 153 blocked cards, that field is set on exactly the blocks written by
-    review-phase runs and on none of the worker/lane/user ones, so it says "a
-    reviewer wrote this" without reading a word of the reviewer's prose. That
-    matters: a worker whose handoff reason happened to quote a changes-request
-    must not be promoted past its review.
+    in the review phase (`source_status == "review"`). The field is written by
+    every phase, so the discriminating fact is its VALUE: measured on this box,
+    worker-phase blocks carry "ready" and user/lane blocks carry nothing, while
+    "review" appears only on review-phase blocks. So it says "a reviewer wrote
+    this" without reading a word of the reviewer's prose. That matters: a
+    worker whose handoff reason happened to quote a changes-request must not be
+    promoted past its review.
 
     Then the prose half decides WHICH reviewer block this is, because a
     reviewer's verdicts are not all returns — an ESCALATE stays blocked for a
@@ -204,9 +216,21 @@ class Lock:
                 pid = 0
             if pid and _alive(pid):
                 return False
-        with open(self.path, "w", encoding="utf-8") as fh:
+            # Stale (dead pid, or unreadable): clear it before the O_EXCL
+            # create. Two processes may both unlink; one gets FileNotFoundError
+            # (ignored) and the O_EXCL create still admits only one winner.
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+        # O_EXCL: create-or-fail atomically, so two first-runs in the same
+        # instant cannot both acquire (a read-then-write test-then-open can).
+        try:
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(str(os.getpid()))
-        os.chmod(self.path, 0o600)
         self.acquired = True
         return True
 
@@ -306,9 +330,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _promote(slug: str, tid: str, reason: str, conn: sqlite3.Connection) -> bool:
-    """Promote, then VERIFY the effect from the board — never trust the exit code."""
+    """Promote, then VERIFY the effect from the board — never trust the exit code.
+
+    Returns True only when the card is verifiably `ready` AND the audit comment
+    landed. A failed comment after a successful promote is deliberately a
+    FAILURE (non-zero exit, so the cron alerts): the state change is correct, so
+    the message says so explicitly, but an unattributed action on a board whose
+    whole purpose is a trustworthy trail is not a warning-level event.
+    """
     note = ("%s: changes-requested verdict returned to the lane so it can re-claim "
-            "(block reason matched: %s)" % (AUTHOR, (reason or "").strip()[:80]))
+            "-> status=ready (block reason matched: %s)"
+            % (AUTHOR, (reason or "").strip()[:80]))
     rc, out = run_cli("--board", slug, "promote", tid, note, "--json")
     if rc != 0:
         print("lane-return: ERROR: promote %s/%s failed: %s" % (slug, tid, out))
@@ -321,8 +353,9 @@ def _promote(slug: str, tid: str, reason: str, conn: sqlite3.Connection) -> bool
     # Audit comment, attributed so it can never be mistaken for a reviewer verdict.
     rc, out = run_cli("--board", slug, "comment", tid, note, "--author", AUTHOR)
     if rc != 0:
-        print("lane-return: WARN: promoted %s/%s but the audit comment failed: %s"
-              % (slug, tid, out))
+        print("lane-return: ERROR: %s/%s WAS moved to ready, but the audit comment "
+              "failed so the action is not in the trail: %s" % (slug, tid, out))
+        return False
     return True
 
 
