@@ -587,7 +587,105 @@ func TestTE_WaitsThroughReviewStates(t *testing.T) {
 	}
 }
 
+// Both halves of the blocked-era contract: a blocked ticket with nothing new
+// still waits the full timeout (a "not blocked, so return" rule creeping back
+// in fires here), and the unblock itself — blocked -> ready — ends the wait at
+// the next tick with the NEW status and no events.
 func TestTE_BlockedStillLongPolls(t *testing.T) {
+	t.Run("stays blocked", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 100 * time.Millisecond
+
+		b := newEventsBackend()
+		defer b.close()
+
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
+
+		// Status stays blocked and no events arrive: must wait out the
+		// timeout and report timed_out with no ticket_status short-circuit.
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("blocked")
+
+		input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+		start := time.Now()
+		res := s.TicketEvents(context.Background(), input)
+		elapsed := time.Since(start)
+
+		if res == nil || res.IsError {
+			t.Fatalf("TicketEvents returned error: %+v", res)
+		}
+		var out TicketEventsOut
+		if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		if !out.TimedOut {
+			t.Errorf("TimedOut = false, want true (blocked ticket must long-poll to timeout)")
+		}
+		if out.TicketStatus != "blocked" {
+			t.Errorf("TicketStatus = %q, want blocked (last fetch status on timeout)", out.TicketStatus)
+		}
+		if elapsed < 1500*time.Millisecond {
+			t.Errorf("returned after %v, want ~2s long-poll (blocked ticket must not short-circuit)", elapsed)
+		}
+	})
+
+	// The unblock a blocked-era waiter is actually waiting for. Note the
+	// blocked ticket has no verdict EVENT in flight here: the status change
+	// alone has to end the wait, which is what a caller polling with a
+	// caught-up cursor depends on.
+	t.Run("unblocks to ready", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 50 * time.Millisecond
+
+		b := newEventsBackend()
+		defer b.close()
+
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
+
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("blocked")
+		go func() {
+			for b.tickCount.Load() < 3 { // the initial fetch plus two waits
+				time.Sleep(20 * time.Millisecond)
+			}
+			b.setStatus("ready") // unblocked: the ballot is back in the caller's lane
+		}()
+
+		input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 30}
+		start := time.Now()
+		res := s.TicketEvents(context.Background(), input)
+		elapsed := time.Since(start)
+
+		if res == nil || res.IsError {
+			t.Fatalf("TicketEvents returned error: %+v", res)
+		}
+		var out TicketEventsOut
+		if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		if out.TimedOut {
+			t.Errorf("TimedOut = true, want false (the unblock ends the wait)")
+		}
+		if out.TicketStatus != "ready" {
+			t.Errorf("TicketStatus = %q, want ready", out.TicketStatus)
+		}
+		if len(out.Events) != 0 {
+			t.Errorf("Events = %+v, want none (a status change returns no events)", out.Events)
+		}
+		if elapsed >= 5*time.Second {
+			t.Errorf("returned after %v, want an immediate return once the status changed", elapsed)
+		}
+	})
+}
+
+// The timeout path reports the status of the LAST successful fetch, not the
+// first. The case that separates them: an unreadable (empty) status on the
+// opening fetch disables the change test — statusChanged needs a known
+// baseline — so the wait is guaranteed to run out, and the caller must still
+// be told where the ticket stood when it expired.
+func TestTE_TimeoutReportsLastObservedStatus(t *testing.T) {
 	defer restorePollInterval(t)
 	eventsPollInterval = 100 * time.Millisecond
 
@@ -597,10 +695,14 @@ func TestTE_BlockedStillLongPolls(t *testing.T) {
 	s := NewServer(b.server.URL, "hermes-agent")
 	SetBoardLister(s)
 
-	// Status stays blocked and no events arrive: must wait out the
-	// timeout and report timed_out with no ticket_status short-circuit.
 	b.setEvents([]json.RawMessage{})
-	b.setStatus("blocked")
+	b.setStatus("") // the opening fetch cannot read a status
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		b.setStatus("review") // every later one can
+	}()
 
 	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
 	start := time.Now()
@@ -615,12 +717,12 @@ func TestTE_BlockedStillLongPolls(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	if !out.TimedOut {
-		t.Errorf("TimedOut = false, want true (blocked ticket must long-poll to timeout)")
+		t.Errorf("TimedOut = false, want true (an empty baseline disables the change test, so the wait runs out)")
 	}
-	if out.TicketStatus != "blocked" {
-		t.Errorf("TicketStatus = %q, want blocked (last fetch status on timeout)", out.TicketStatus)
+	if out.TicketStatus != "review" {
+		t.Errorf("TicketStatus = %q, want review (the last successful fetch's status)", out.TicketStatus)
 	}
 	if elapsed < 1500*time.Millisecond {
-		t.Errorf("returned after %v, want ~2s long-poll (blocked ticket must not short-circuit)", elapsed)
+		t.Errorf("returned after %v, want >= ~2s", elapsed)
 	}
 }

@@ -96,6 +96,10 @@ type rawEvent struct {
 // deliberate: every extra "if the status is X, return early" rule is another
 // convention assumption, which is exactly what broke.
 //
+// TicketStatus is set on every return path, the timeout included: there it
+// carries the status of the last successful fetch, so "nothing new arrived"
+// still tells the caller where the ticket stood.
+//
 // Transient backend failures during the wait are retried (up to
 // maxConsecutivePollErrors in a row) so a single blip does not discard the
 // caller's wait; definitive failures (4xx) abort immediately.
@@ -143,9 +147,16 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	// review") assumed the block-based convention and made every review-lane
 	// state return instantly.
 	baseline := status
+	// lastStatus is the status carried by the most recent successful fetch.
+	// The timeout path reports THIS rather than the first fetch's value: a
+	// caller that waited out the full window should learn where the ticket
+	// stood when the wait expired, and that is the only status it can get in
+	// the one case the change test cannot cover — an unreadable (empty) first
+	// fetch, which disables statusChanged and lets the wait run to timeout.
+	lastStatus := status
 	collected, truncated := collectEvents(events, in.SinceEventID)
 	if len(collected) > 0 {
-		return renderEvents(collected, truncated, false, status)
+		return renderEvents(collected, truncated, false, lastStatus)
 	}
 
 	var pollErrs int
@@ -155,9 +166,9 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			return ErrorResult("%s", ctx.Err())
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return renderEvents(nil, truncated, true, status)
+				return renderEvents(nil, truncated, true, lastStatus)
 			}
-			events, status, err := s.GetTaskEvents(ctx, board, in.ID)
+			polledEvents, current, err := s.GetTaskEvents(ctx, board, in.ID)
 			if err != nil {
 				if !transientPollError(err) {
 					return ErrorResult("%s", RestErrorMessage(err))
@@ -169,12 +180,13 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 				continue
 			}
 			pollErrs = 0
-			collected, truncated = collectEvents(events, in.SinceEventID)
+			lastStatus = current
+			collected, truncated = collectEvents(polledEvents, in.SinceEventID)
 			if len(collected) > 0 {
-				return renderEvents(collected, truncated, false, status)
+				return renderEvents(collected, truncated, false, lastStatus)
 			}
-			if statusChanged(baseline, status) {
-				return renderEvents(nil, false, false, status)
+			if statusChanged(baseline, lastStatus) {
+				return renderEvents(nil, false, false, lastStatus)
 			}
 		}
 	}
@@ -202,8 +214,9 @@ func transientPollError(err error) bool {
 // GetTaskEvents fetches the raw events array for a ticket from the
 // kanban REST backend. It reuses the taskDetailEnvelope decode path
 // already exercised by TicketGet. It also returns the task's current
-// status so the long-poll can short-circuit once the ticket leaves
-// blocked.
+// status: the long-poll keeps the first fetch's value as the baseline for
+// its status-change test and reports the newest value to the caller.
+// Nothing short-circuits on the ticket being (or leaving) 'blocked'.
 func (s *Server) GetTaskEvents(ctx context.Context, board, id string) ([]json.RawMessage, string, error) {
 	var env taskDetailEnvelope
 	if err := s.doJSON(ctx, "GET", "/tasks/"+url.PathEscape(id), url.Values{"board": []string{board}}, nil, &env); err != nil {

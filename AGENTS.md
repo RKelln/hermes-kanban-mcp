@@ -64,10 +64,12 @@ tools (`hermes-kanban-*`).
   whose branch is not on origin cannot be reviewed at all. If your work is already merged
   and the branch deleted, say so in `summary` and name the merge commit and the range to
   diff — a reviewer that goes looking for a deleted branch burns its run.
-- **Wait for the review — on either path.** Both leave the ticket in `review`. Poll `ticket_events` with
-  the last seen event id (default long-poll is 120s, max 15m — one call covers a full review
-  cycle; if the ticket already left that state it returns instantly with its
-  `ticket_status`), or `ticket_get`, until it leaves it:
+- **Wait for the review — on either path.** Both leave the ticket in `review`. Poll `ticket_events`
+  (default long-poll is 120s, max 15m — one call covers a full review cycle) or `ticket_get` until it
+  leaves that state. The wait ends on new events, on the ticket's status CHANGING from the status at
+  call time, or on `timeout_seconds`, and `ticket_status` comes back either way — so pass the last seen
+  event id: a verdict writes an event, and that is what returns immediately. A ticket that already left
+  the state, polled with a caught-up cursor, waits out `timeout_seconds` and reports the status then.
   - `done` → the review passed → merge your branch to main (the reviewer never merges);
   - `ready` → REQUEST CHANGES → re-claim, fix, push, request review again;
   - still `blocked` with an ESCALATE comment → surface to the human; do not re-loop;

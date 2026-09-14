@@ -23,8 +23,12 @@ MCP tools for a Hermes kanban board:
     every comment body and the clipped tail is usually the payload.
 - ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
     newer than since_event_id or empty on timeout (default 120s, max 15m).
-    If the ticket has already left 'blocked' (verdict landed), returns
-    IMMEDIATELY with its ticket_status instead of waiting the timeout.
+    The wait ends on new events, on the ticket's status CHANGING from the
+    status it had when you called, or on the timeout — whichever comes first.
+    ticket_status is reported on every return, so "no events + a different
+    ticket_status" is the "something happened" signal. A ticket that already
+    finished, polled with your cursor caught up, waits out the timeout: pass
+    the last seen event id (a verdict writes an event) for an instant answer.
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required marker via block_reason or latest_summary);
     replaces per-board scans
