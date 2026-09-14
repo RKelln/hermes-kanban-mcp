@@ -51,9 +51,10 @@ type EventOut struct {
 // TicketEventsOut is the ticket_events success result. Truncated is set
 // when events were dropped to fit the size budget or the maxReturnedEvents
 // cap, so callers know to fall back to ticket_get rather than trusting a
-// cursor that skipped unseen events. TicketStatus is the ticket's current
-// status on the last fetch; when it is set and not "blocked" the ticket has
-// left review and the poll returned immediately (no further waiting).
+// cursor that skipped unseen events. TicketStatus is the ticket's status as
+// of the last fetch; a wait that ends because the status CHANGED reports the
+// new value here with no events, which is how a caller learns a review
+// verdict landed.
 type TicketEventsOut struct {
 	Events       []EventOut `json:"events,omitempty"`
 	TimedOut     bool       `json:"timed_out"`
@@ -71,15 +72,33 @@ type rawEvent struct {
 }
 
 // TicketEvents implements the ticket_events MCP tool: long-poll a
-// ticket's event log, returning events with id > since_event_id or an
-// empty timed_out result when nothing new arrives within
-// timeout_seconds. When the ticket has already left "blocked" (e.g. a
-// review verdict landed before the call), it returns immediately with
-// ticket_status set instead of waiting the timeout — the caller learns
-// the outcome without burning the long-poll. Transient backend failures
-// during the wait are retried (up to maxConsecutivePollErrors in a row)
-// so a single blip does not discard the caller's wait; definitive
-// failures (4xx) abort immediately.
+// ticket's event log. The wait ends as soon as either
+//
+//   - events exist with id > since_event_id (returned in Events), or
+//   - the ticket's status has changed from the status observed on the
+//     first fetch (returned as TicketStatus, with no events), or
+//   - timeout_seconds elapse (TimedOut).
+//
+// The status-change path is what makes this usable for the native review
+// lane. A review runs ready -> review -> running -> done|ready, and the
+// tool's original rule — return instantly whenever the status is anything
+// but "blocked", because a non-blocked ticket must have already left review
+// — was written for the BLOCK-based convention, where a review request WAS
+// a block. Nothing blocks in the review lane, so that rule fired an instant
+// return in every state a waiter needed to wait through, and a caller
+// polling for a verdict could never actually wait for one.
+//
+// A verdict that ALREADY landed is served by the event path, provided the
+// caller passes its cursor: the verdict wrote an event (completed for
+// APPROVE, the landing-promote for REQUEST_CHANGES, review_requested for the
+// request). A caller that polls an already-finished ticket with a fully
+// caught-up cursor waits out the timeout and learns the status then. That is
+// deliberate: every extra "if the status is X, return early" rule is another
+// convention assumption, which is exactly what broke.
+//
+// Transient backend failures during the wait are retried (up to
+// maxConsecutivePollErrors in a row) so a single blip does not discard the
+// caller's wait; definitive failures (4xx) abort immediately.
 //
 // Note on the timeout budget: the immediate first fetch runs before the
 // deadline starts, so wall-clock can exceed timeout_seconds by up to one
@@ -118,14 +137,15 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
+	// The status the caller found the ticket in. A CHANGE from this is the
+	// signal a waiter wants, and it is the only status rule this tool makes:
+	// the previous rule ("anything but blocked means the ticket already left
+	// review") assumed the block-based convention and made every review-lane
+	// state return instantly.
+	baseline := status
 	collected, truncated := collectEvents(events, in.SinceEventID)
 	if len(collected) > 0 {
 		return renderEvents(collected, truncated, false, status)
-	}
-	if status != "" && status != "blocked" {
-		// The ticket has already left review: return instantly so the
-		// caller learns the verdict instead of waiting out the timeout.
-		return renderEvents(nil, false, false, status)
 	}
 
 	var pollErrs int
@@ -153,11 +173,19 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			if len(collected) > 0 {
 				return renderEvents(collected, truncated, false, status)
 			}
-			if status != "" && status != "blocked" {
+			if statusChanged(baseline, status) {
 				return renderEvents(nil, false, false, status)
 			}
 		}
 	}
+}
+
+// statusChanged reports whether the ticket moved out of the state the caller
+// found it in — the "something happened while you waited" signal. Requiring
+// a KNOWN baseline means an unreadable status on the first fetch degrades to
+// a plain event tail rather than a false "it moved".
+func statusChanged(baseline, current string) bool {
+	return baseline != "" && current != "" && current != baseline
 }
 
 // transientPollError reports whether a backend error is worth retrying
