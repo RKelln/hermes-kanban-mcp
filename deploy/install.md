@@ -201,10 +201,12 @@ shell-outs write:
 tools shell out through `$HERMES_BIN` and WRITE the board database:
 `ticket_claim` (ready→running), `ticket_block` (typed kinds) and
 `ticket_request_review` (the native review lane, the recommended completion
-path). All three are the same shell-out class, and under a read-only `/home` that
-shell-out fails at runtime: `ticket_claim` and `ticket_request_review` are
-refused outright, and `ticket_block` loses its kind (the REST downgrade below is
-the one exception, and it is not a reason to skip the carve-out). A bridge that
+path). All three are the same shell-out class, and under a read-only `/home` the
+shell-out fails at runtime with no exception: the binary still resolves and
+starts, then cannot write the board DB, and each of the three returns that
+failure. The one REST downgrade in the toolset belongs to `ticket_block`, and it
+answers an *unresolvable* CLI, not an unwritable one — the difference between a
+hard error and a silent downgrade is spelled out below. A bridge that
 "installed successfully" and then refuses the tools that make it useful, while
 the REST-only tools keep working, is an install that looks healthy and is not.
 
@@ -261,22 +263,31 @@ none of these is an advisory mode:
   the transition took: after the CLI returns it re-reads the ticket and refuses
   with `request-review did not take effect: ticket … is still <status>` rather
   than reporting a success the kernel never applied.
-- `ticket_block` is the **one** tool with a REST downgrade: with the CLI
-  unavailable, a typed block is recorded as an untyped one via
-  `PATCH /tasks/{id}`, and the result carries `kind_applied=false` with the note
-  `typed kind unavailable; recorded as untyped block`. That PATCH is served by
-  the gateway that owns the board DB (`:9119`), a different process with no
-  `ProtectHome` restriction of its own, so it succeeds even under a read-only
-  `$HOME` — which is exactly why it is **not** evidence that the carve-out works.
-  Only (a) and (b) above are.
+- `ticket_block` is the **one** tool with a REST downgrade, and it engages only
+  when the CLI is *unavailable*: `$HERMES_BIN` set to something that does not
+  resolve, or no `hermes` on `PATH`. A typed block is then recorded as an untyped
+  one via `PATCH /tasks/{id}`, and the result carries `kind_applied=false` with
+  the note `typed kind unavailable; recorded as untyped block`. A typed block
+  with the binary present but the board DB unwritable is **not** that case: it
+  hard-fails with the CLI's stderr, exactly like the other two, and sends no
+  `PATCH` at all. The probe behind "unavailable" is `exec.LookPath` — an
+  exists-and-executable test, nothing in it writes.
+- What does survive a read-only `$HOME` is the **untyped** block: with no `kind`
+  there is no CLI in the path at all, just the `PATCH`. That `PATCH`, and the
+  typed downgrade above, are served by the Hermes process that owns the board DB
+  (`:9119`), a different process with no `ProtectHome` restriction of its own —
+  which is exactly why neither is evidence that the carve-out works. Only (a) and
+  (b) above are.
 
 `MCP_ALLOW_SKIP_CLAIM` is not a CLI fallback and appears in none of the above: it
 is `ticket_complete`'s claim-guard opt-out, the check that otherwise refuses to
 complete an unclaimed ticket. These behaviours are pinned by the repo's own
-tests — `TestTC_ClaimBinaryMissing`, `TestTC_ClaimFailure`,
-`TestTC_BlockFallbackWhenCLIUnavailable` in
-`internal/mcptools/claim_tool_test.go` — so if this page and the code disagree
-about a shell-out failure, the code is right and this page is the bug.
+tests in `internal/mcptools/claim_tool_test.go` —
+`TestTC_ClaimBinaryMissing`, `TestTC_ClaimFailure` (both hard errors),
+`TestTC_BlockFallbackWhenCLIUnavailable` (the downgrade, from an unresolvable
+CLI) and `TestTC_BlockCLIFailure` (a CLI that runs and fails: hard error, zero
+`PATCH`) — so if this page and the code disagree about a shell-out failure, the
+code is right and this page is the bug.
 
 ## 5. Smoke test
 
