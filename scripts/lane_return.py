@@ -100,7 +100,30 @@ def board_db(home: str, slug: str) -> str:
 def run_cli(*argv: str) -> tuple[int, str]:
     cmd = [hermes_bin(), "kanban", *argv]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
+    if proc.returncode != 0:
+        # stderr carries why a call failed; stdout carries machine output.
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+    return proc.returncode, proc.stdout.strip()
+
+
+def json_document(out: str):
+    """The first JSON document in CLI output, ignoring notice lines around it.
+
+    `hermes` prints pending-restart and update notices on whichever stream the
+    call path chooses (update_serve_obligations.warn_pending_manual_serves picks
+    stdout or stderr from `startup`), so a tick that concatenated stdout+stderr
+    and required the whole string to be JSON died with
+    `Extra data: line 191 column 3` for the entire window in which a serve
+    restart was pending — a 4-tick outage on the first update after that warning
+    landed. Tolerate leading and trailing prose; still parse strictly.
+    """
+    for index, char in enumerate(out):
+        if char in "[{":
+            try:
+                return json.JSONDecoder().raw_decode(out[index:])[0]
+            except ValueError:
+                continue
+    raise ValueError("no JSON document in CLI output: %r" % out[:200])
 
 
 class BoardSelectionError(RuntimeError):
@@ -117,7 +140,7 @@ def board_slugs(only: str | None) -> list[str]:
     rc, out = run_cli("boards", "list", "--json")
     if rc != 0:
         raise RuntimeError("boards list failed: %s" % out)
-    slugs = [b.get("slug") for b in json.loads(out) if b.get("slug")]
+    slugs = [b.get("slug") for b in json_document(out) if b.get("slug")]
     if not slugs:
         # Every box has at least the default board, so an empty list is a read
         # that failed, not a board set that is genuinely empty.

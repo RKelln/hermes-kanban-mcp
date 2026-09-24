@@ -47,8 +47,21 @@ FAKE_CLI = textwrap.dedent(
         fh.write(json.dumps(argv) + "\\n")
     if "boards" in argv and "list" in argv:
         # FAKE_BOARDS="" is the empty board list (`boards list --json` -> []).
+        # FAKE_WARN replays the pending-manual-serve notice `hermes` prints on
+        # the stream the call path picks: "stderr" appends it to stderr (the
+        # observed outage), "stdout" trails the JSON on stdout.
+        warn = os.environ.get("FAKE_WARN", "")
         boards = [b for b in os.environ.get("FAKE_BOARDS", "probe").split(",") if b]
-        print(json.dumps([{"slug": b} for b in boards]))
+        payload = json.dumps([{"slug": b} for b in boards])
+        if warn == "stdout":
+            print(payload)
+            print("  \u26a0 dashboard [default] pid 1234: manual restart still pending; "
+                  "this process may still serve pre-update code.")
+        else:
+            print(payload)
+            if warn == "stderr":
+                print("  \u26a0 dashboard [default] pid 1234: manual restart still pending; "
+                      "this process may still serve pre-update code.", file=sys.stderr)
         sys.exit(0)
     if "promote" in argv:
         if os.environ.get("FAKE_PROMOTE_FAIL") == "1":
@@ -105,7 +118,7 @@ class Harness(unittest.TestCase):
             clear=False,
         )
         self.env.start()
-        for key in ("FAKE_PROMOTE_FAIL", "FAKE_PROMOTE_NOOP", "FAKE_COMMENT_FAIL"):
+        for key in ("FAKE_PROMOTE_FAIL", "FAKE_PROMOTE_NOOP", "FAKE_COMMENT_FAIL", "FAKE_WARN"):
             os.environ.pop(key, None)
         self.addCleanup(self.env.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -337,6 +350,27 @@ class TestActing(Harness):
         rc, out = self.run_tick()
         self.assertEqual(rc, 1, out)
         self.assertIn("no boards", out)
+
+    def test_a_pending_restart_notice_on_stderr_does_not_break_the_tick(self):
+        # 2026-09-24: `hermes` prints the pending-manual-serve reminder while a
+        # serve restart is outstanding, on whichever stream the call path picks.
+        # run_cli concatenated stdout+stderr before parsing, so every tick died
+        # with "Extra data: line 191 column 3" until the restart was done — four
+        # consecutive ticks lost, each one silently leaving a review card stuck.
+        os.environ["FAKE_WARN"] = "stderr"
+        self.add_card("t_w", reason="review-required: REQUEST_CHANGES")
+        rc, out = self.run_tick()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.status("t_w"), "ready")
+
+    def test_a_pending_restart_notice_on_stdout_does_not_break_the_tick(self):
+        # Same notice on stdout (the other branch of that function): the parse
+        # must tolerate it trailing the JSON, not just accept clean stdout.
+        os.environ["FAKE_WARN"] = "stdout"
+        self.add_card("t_w2", reason="review-required: REQUEST_CHANGES")
+        rc, out = self.run_tick()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.status("t_w2"), "ready")
 
     def test_a_registered_board_with_no_db_yet_is_still_silent(self):
         # The loud cases are selection failures. A board the tick can see but
