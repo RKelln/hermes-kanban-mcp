@@ -13,7 +13,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `board_list` | List boards (slug, name, per-status counts) |
   | `ticket_list` | List tickets with status/assignee filters; summary-only, never full bodies |
   | `ticket_get` | Full ticket detail with truncation + size budgets; `detail: full` returns complete comment/body text |
-  | `ticket_events` | Long-poll a ticket's events; returns events newer than since_event_id or empty on timeout |
+  | `ticket_events` | Long-poll a ticket's events; the wait ends on events newer than `since_event_id`, on the ticket's status CHANGING from the status at call time, or on the timeout — `ticket_status` is reported on every return |
   | `review_queue` | Single-call scan for review-required tickets across **all boards** (one call replaces per-board scans) |
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`) |
   | `ticket_comment` | Append a comment |

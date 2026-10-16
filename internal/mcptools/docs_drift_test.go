@@ -20,6 +20,14 @@ package mcptools
 // on `blocked` (predicate fixed in t_4bc509aa, its four prose surfaces in
 // t_ff1915b0). The second family is here because that same class of fossil cost
 // one card 769 hours of being blocked before anyone read the card again.
+//
+// The gate has two halves. The negative one is below: no surface may still
+// prescribe a retired contract. The positive ones (TestDocs_Serve*) cover the
+// other failure mode — a surface that says NOTHING about the contract, which is
+// invisible to a grep for retired phrasings. t_6168a2d3 extended the positive
+// half to README.md and deploy/install.md and added install.md to the list
+// below: README's tool table had described ticket_events without its
+// status-change return for as long as the gate existed.
 
 import (
 	"os"
@@ -55,6 +63,7 @@ var proseSurfaces = []string{
 	"../../AGENTS.md",
 	"../../README.md",
 	"../../deploy/AGENTS.kanban-mcp.template.md",
+	"../../deploy/install.md",
 	"../../internal/config/config.go",
 	"../../internal/mcptools/register.go",
 	"../../internal/mcptools/events_tool.go",
@@ -97,6 +106,28 @@ func TestDocs_ServeTheRealWaitContract(t *testing.T) {
 	for _, want := range []string{"status CHANGING", "timeout"} {
 		if !strings.Contains(helpDoc, want) {
 			t.Errorf("helpDoc no longer states the real wait contract (no %q); a lane would poll against the removed short-circuit", want)
+		}
+	}
+}
+
+// TestDocs_ProseSurfacesNameTheStatusChange is the third positive half, over
+// the surfaces that are NOT the served help. README's tool table described
+// ticket_events as "returns events newer than since_event_id or empty on
+// timeout": every retired phrase absent, and still wrong about the return a
+// review-lane waiter most needs — which is exactly what a negative-only gate
+// cannot see. deploy/install.md is included because the smoke test it
+// documents pins the tool roster and nothing about the wait, so a binary can
+// pass that test while serving the wrong contract (the state the deployed
+// bridge was in when t_ff1915b0 was reviewed).
+func TestDocs_ProseSurfacesNameTheStatusChange(t *testing.T) {
+	for _, rel := range []string{"../../README.md", "../../deploy/install.md"} {
+		b, err := os.ReadFile(filepath.Clean(rel))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", rel, err)
+			continue
+		}
+		if !strings.Contains(string(b), "status CHANGING") {
+			t.Errorf("%s no longer names the status-change return (%q): a reader would take the wait for an event-only tail and never learn that a verdict writing no event still ends it", rel, "status CHANGING")
 		}
 	}
 }

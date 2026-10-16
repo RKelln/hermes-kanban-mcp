@@ -170,6 +170,15 @@ ticket_events, kanban_help, review_queue`); `board_list` → includes
 password, or set-cookie in recent journald output; no real secrets in git). It
 exits non-zero with the failing step named.
 
+The roster is all that the script pins about `ticket_events` — it does not
+exercise the wait, so a binary can pass the smoke test while serving the wrong
+wait contract. `ticket_events` ends its wait on new events, on the ticket's
+status CHANGING from the status at call time, or on the timeout, and reports
+`ticket_status` on every return. That status-change return is what a
+review-lane waiter depends on (a verdict that writes no event still ends the
+wait), and a binary predating it polls to the timeout instead: a wait that ends
+on the change is the one call worth making by hand after an upgrade.
+
 For a remote host (e.g. framework over Tailscale):
 
 ```sh
