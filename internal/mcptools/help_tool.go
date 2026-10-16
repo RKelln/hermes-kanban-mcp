@@ -4,8 +4,21 @@ import "context"
 
 // MaxHelpOutputBytes is the hard cap on the rendered kanban_help result.
 // Help is called rarely and on demand, so it may exceed the 2 KB
-// write-tool budget — but it stays well under the read-tool ceiling.
-const MaxHelpOutputBytes = 8 * 1024
+// write-tool budget — but it stays inside the read-tool range (the
+// largest read budget is ticket_get detail=full at 32 KB).
+//
+// An over-cap help result is a HARD ERROR, not a degradation:
+// renderResult refuses an over-budget result rather than clipping it, so
+// a helpDoc that outgrew the cap would break kanban_help for every MCP
+// client at once. At 23406ae the doc measured 7859 B served, i.e. 333 B
+// under the former 8 KiB cap — too small to be a budget and too easy to
+// spend by accident. The cap was raised to 12 KiB (4429 B of headroom)
+// on 2026-10-16 rather than trimming served contract text to buy bytes:
+// the help IS the contract agents self-serve, and a doc loss is silent
+// where an over-budget error is at least loud. help_tool_test.go holds
+// the floor, so the next edit that eats the margin fails the suite
+// instead of every client.
+const MaxHelpOutputBytes = 12 * 1024
 
 // helpDoc is the full usage documentation returned by kanban_help. It is
 // the MCP-native replacement for a docs page: agents self-serve the
