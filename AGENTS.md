@@ -55,14 +55,16 @@ tools (`hermes-kanban-*`).
     requires `force: true`** — the bridge cannot verify claim ownership (one shared bearer
     token), so releasing a live claim is your explicit call; pass it only for work you
     claimed yourself, never for a ticket someone else holds mid-implementation.
-  - `ticket_complete` — the older path. Completion is review-gated: the ticket lands
-    `blocked` (review-required) for a human or the review-sweeper, not `done`.
+  - `ticket_complete` — same review gate, one call: `LOW` completes straight to `done`,
+    `MEDIUM`/`HIGH` (and omitted) post the completion comment and hand the card to the
+    native review lane, so it lands in `review` exactly as `ticket_request_review` leaves
+    it. It does **not** write the older `review-required` block: nothing consumes that
+    shape since the review-sweeper retired, so a card blocked that way strands.
 - **Push BEFORE requesting review.** The reviewer reads the pushed commit, and a ticket
   whose branch is not on origin cannot be reviewed at all. If your work is already merged
   and the branch deleted, say so in `summary` and name the merge commit and the range to
   diff — a reviewer that goes looking for a deleted branch burns its run.
-- **Wait for the review — on either path.** `ticket_request_review` leaves the ticket in
-  `review`; a review-gated `ticket_complete` leaves it `blocked`. Poll `ticket_events` with
+- **Wait for the review — on either path.** Both leave the ticket in `review`. Poll `ticket_events` with
   the last seen event id (default long-poll is 120s, max 15m — one call covers a full review
   cycle; if the ticket already left that state it returns instantly with its
   `ticket_status`), or `ticket_get`, until it leaves it:
