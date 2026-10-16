@@ -45,15 +45,22 @@ MCP tools for a Hermes kanban board:
     additionally requires force: true (the bridge cannot verify claim
     ownership behind one shared bearer token).
     Push your branch FIRST. Do NOT merge before the verdict: done means merge.
-- ticket_complete finish; REVIEW-GATED by default (comment + review-required block).
-    review_tier: LOW completes direct to done; MEDIUM/HIGH stay review-gated
+- ticket_complete finish; review-gated by default, and review-gated now means
+    the NATIVE lane: the tool posts the completion comment, then hands the
+    card to 'hermes kanban request-review', so it lands in 'review' — the
+    state the dispatcher claims as a REVIEW run. It does NOT write the older
+    'review-required' block: nothing has consumed that shape since the
+    review-sweeper retired (lane_return.py ignores worker-phase blocks by
+    design), so a card blocked that way strands with no verdict.
+    review_tier: LOW completes direct to done; MEDIUM/HIGH take the handoff
     (default MEDIUM when omitted). MCP_COMPLETE_MODE=done also forces done
-    for MEDIUM/HIGH. repo/branch/sha are optional structured refs folded
-    into the review-required block_reason (trimmed; single-line). done mode
-    accepts created_cards (child ticket ids; kernel-verified, phantom ids
-    get a 400 naming the offenders). This is the OLDER review convention
-    (a block a sweeper consumes); prefer ticket_request_review for a final
-    review when the server has review dispatch enabled.
+    for MEDIUM/HIGH. repo/branch/sha are optional structured refs carried
+    into the comment and the reviewer's summary. done mode accepts
+    created_cards (child ticket ids; kernel-verified, phantom ids get a 400
+    naming the offenders). The handoff needs a reviewer the dispatcher can
+    spawn: MCP_REVIEWER_PROFILE is verified against the installed roster and
+    the completion is REFUSED when it resolves to nothing spawnable, because
+    a review row on a non-profile assignee parks in 'review' forever.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported
 - kanban_help     this doc
