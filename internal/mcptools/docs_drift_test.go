@@ -34,7 +34,6 @@ var retiredReviewPhrases = []string{
 	"comment + `review-required` block",                  // README knob text
 	"block for human review",                             // config.go knob comment
 	"review-required block_reason",                       // write_tools.go + shape.go prose
-	"a `review-required` block is a strand, not a queue", // kanban-operations phrasing, kept honest in the skill
 }
 
 // agentFacingDocs are the files that tell an agent or an operator what a
