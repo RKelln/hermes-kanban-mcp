@@ -680,49 +680,105 @@ func TestTE_BlockedStillLongPolls(t *testing.T) {
 	})
 }
 
-// The timeout path reports the status of the LAST successful fetch, not the
-// first. The case that separates them: an unreadable (empty) status on the
-// opening fetch disables the change test — statusChanged needs a known
-// baseline — so the wait is guaranteed to run out, and the caller must still
-// be told where the ticket stood when it expired.
+// The timeout path reports the last status the wait could actually READ.
+// Both cases below are the same shape — an empty status disables the change
+// test (statusChanged needs a known baseline), so the wait is guaranteed to
+// run out and that status is the caller's only signal:
+//
+//   - an empty status on the OPENING fetch leaves no baseline to compare to;
+//   - an empty status on the LAST fetch must not erase the one the wait
+//     already knew.
 func TestTE_TimeoutReportsLastObservedStatus(t *testing.T) {
-	defer restorePollInterval(t)
-	eventsPollInterval = 100 * time.Millisecond
+	t.Run("empty opening fetch, readable later", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 100 * time.Millisecond
 
-	b := newEventsBackend()
-	defer b.close()
+		b := newEventsBackend()
+		defer b.close()
 
-	s := NewServer(b.server.URL, "hermes-agent")
-	SetBoardLister(s)
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
 
-	b.setEvents([]json.RawMessage{})
-	b.setStatus("") // the opening fetch cannot read a status
-	go func() {
-		for b.tickCount.Load() < 2 {
-			time.Sleep(20 * time.Millisecond)
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("") // the opening fetch cannot read a status
+		go func() {
+			for b.tickCount.Load() < 2 {
+				time.Sleep(20 * time.Millisecond)
+			}
+			b.setStatus("review") // every later one can
+		}()
+
+		input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+		start := time.Now()
+		res := s.TicketEvents(context.Background(), input)
+		elapsed := time.Since(start)
+
+		if res == nil || res.IsError {
+			t.Fatalf("TicketEvents returned error: %+v", res)
 		}
-		b.setStatus("review") // every later one can
-	}()
+		var out TicketEventsOut
+		if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		if !out.TimedOut {
+			t.Errorf("TimedOut = false, want true (an empty baseline disables the change test, so the wait runs out)")
+		}
+		if out.TicketStatus != "review" {
+			t.Errorf("TicketStatus = %q, want review (the last successful fetch's status)", out.TicketStatus)
+		}
+		if elapsed < 1500*time.Millisecond {
+			t.Errorf("returned after %v, want >= ~2s", elapsed)
+		}
+	})
 
-	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
-	start := time.Now()
-	res := s.TicketEvents(context.Background(), input)
-	elapsed := time.Since(start)
+	// The mirror case, and the one a degraded backend produces in practice:
+	// the wait HAS a status and every poll after it serves none. Tracking the
+	// last fetch literally blanks the only thing the timeout can report.
+	t.Run("readable baseline, empty last poll", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 100 * time.Millisecond
 
-	if res == nil || res.IsError {
-		t.Fatalf("TicketEvents returned error: %+v", res)
-	}
-	var out TicketEventsOut
-	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
-		t.Fatalf("decode result: %v", err)
-	}
-	if !out.TimedOut {
-		t.Errorf("TimedOut = false, want true (an empty baseline disables the change test, so the wait runs out)")
-	}
-	if out.TicketStatus != "review" {
-		t.Errorf("TicketStatus = %q, want review (the last successful fetch's status)", out.TicketStatus)
-	}
-	if elapsed < 1500*time.Millisecond {
-		t.Errorf("returned after %v, want >= ~2s", elapsed)
-	}
+		b := newEventsBackend()
+		defer b.close()
+
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
+
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("review") // the baseline the wait knows
+		go func() {
+			for b.tickCount.Load() < 2 {
+				time.Sleep(20 * time.Millisecond)
+			}
+			b.setStatus("") // every later poll serves no status at all
+		}()
+
+		input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+		start := time.Now()
+		res := s.TicketEvents(context.Background(), input)
+		elapsed := time.Since(start)
+
+		if res == nil || res.IsError {
+			t.Fatalf("TicketEvents returned error: %+v", res)
+		}
+		var out TicketEventsOut
+		if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+			t.Fatalf("decode result: %v", err)
+		}
+		// Witness the scenario: the poll in flight at the deadline served no
+		// status, so the assertion below cannot pass on a backend that is
+		// still answering.
+		if got := *b.status.Load(); got != "" {
+			t.Fatalf("backend status = %q, want an empty last poll (the case under test)", got)
+		}
+		if !out.TimedOut {
+			t.Errorf("TimedOut = false, want true (an empty status cannot trip the change test, so the wait runs out)")
+		}
+		if out.TicketStatus != "review" {
+			t.Errorf("TicketStatus = %q, want review (a degraded last fetch must not erase the status the wait read)", out.TicketStatus)
+		}
+		if elapsed < 1500*time.Millisecond {
+			t.Errorf("returned after %v, want >= ~2s", elapsed)
+		}
+	})
 }

@@ -52,9 +52,10 @@ type EventOut struct {
 // when events were dropped to fit the size budget or the maxReturnedEvents
 // cap, so callers know to fall back to ticket_get rather than trusting a
 // cursor that skipped unseen events. TicketStatus is the ticket's status as
-// of the last fetch; a wait that ends because the status CHANGED reports the
-// new value here with no events, which is how a caller learns a review
-// verdict landed.
+// of the last fetch that reported one; a wait that ends because the status
+// CHANGED reports the new value here with no events, which is how a caller
+// learns a review verdict landed. A degraded fetch that reports no status
+// leaves the previous observation in place rather than blanking it.
 type TicketEventsOut struct {
 	Events       []EventOut `json:"events,omitempty"`
 	TimedOut     bool       `json:"timed_out"`
@@ -97,8 +98,9 @@ type rawEvent struct {
 // convention assumption, which is exactly what broke.
 //
 // TicketStatus is set on every return path, the timeout included: there it
-// carries the status of the last successful fetch, so "nothing new arrived"
-// still tells the caller where the ticket stood.
+// carries the status of the last fetch that could be read, so "nothing new
+// arrived" still tells the caller where the ticket stood. A fetch that
+// serves no status does not erase an earlier one.
 //
 // Transient backend failures during the wait are retried (up to
 // maxConsecutivePollErrors in a row) so a single blip does not discard the
@@ -147,12 +149,21 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	// review") assumed the block-based convention and made every review-lane
 	// state return instantly.
 	baseline := status
-	// lastStatus is the status carried by the most recent successful fetch.
-	// The timeout path reports THIS rather than the first fetch's value: a
-	// caller that waited out the full window should learn where the ticket
-	// stood when the wait expired, and that is the only status it can get in
-	// the one case the change test cannot cover — an unreadable (empty) first
-	// fetch, which disables statusChanged and lets the wait run to timeout.
+	// lastStatus is the most recent status the wait could actually READ (a
+	// degraded fetch serves an empty status, and an empty value is not an
+	// observation). The timeout path reports THIS rather than the first
+	// fetch's value: a caller that waited out the full window should learn
+	// where the ticket stood when the wait expired. Two cases make that the
+	// only signal it can get, and both are the same shape — an empty status
+	// disables statusChanged, so the wait runs out with no other news:
+	//
+	//   - an unreadable (empty) FIRST fetch has no baseline to compare to;
+	//   - a degraded fetch that lands LAST would, if tracked literally, ERASE
+	//     the status the wait already knew.
+	//
+	// The second one is why this tracks non-empty observations rather than
+	// the last fetch: reporting nothing is strictly worse than reporting a
+	// status that was true a few seconds ago.
 	lastStatus := status
 	collected, truncated := collectEvents(events, in.SinceEventID)
 	if len(collected) > 0 {
@@ -180,7 +191,14 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 				continue
 			}
 			pollErrs = 0
-			lastStatus = current
+			// Keep the last status that could actually be read. A degraded
+			// fetch serves an empty status; tracking it literally would discard
+			// the one signal a timeout can still report, and that same empty
+			// value is what keeps statusChanged from firing, so nothing else
+			// would tell the caller anything either.
+			if current != "" {
+				lastStatus = current
+			}
 			collected, truncated = collectEvents(polledEvents, in.SinceEventID)
 			if len(collected) > 0 {
 				return renderEvents(collected, truncated, false, lastStatus)
