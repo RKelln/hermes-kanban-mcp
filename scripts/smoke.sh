@@ -176,6 +176,7 @@ for tool in board_list ticket_list ticket_get ticket_events ticket_claim \
     grep -Fq "\"name\":\"$tool\"" <<<"$RESP" || missing="$missing $tool"
 done
 [[ -z $missing ]] || fail "step 6 tools/list is missing tool(s):$missing"
+LIST_RESP=$RESP
 echo "  ok: all tools present (board_list, ticket_list, ticket_get, ticket_events, ticket_claim, ticket_comment, ticket_complete, ticket_request_review, ticket_block, ticket_create, kanban_help, review_queue)"
 
 # --- 7. board_list includes hermes-kanban-mcp -----------------------------------------
@@ -188,6 +189,24 @@ code=$(mcp_req good "$CALL" "$BODY" "$HDR") \
 RESP=$(extract_json "$BODY")
 grep -Fq 'hermes-kanban-mcp' <<<"$RESP" || fail "step 7 board_list result does not include the hermes-kanban-mcp board"
 echo "  ok: board_list includes hermes-kanban-mcp"
+
+# --- 7b. response envelope: the declared output contract must match the data ------
+# Two halves, because only one of them is ever legitimate to change:
+#   * an EMPTY structuredContent is ALWAYS a defect. Clients that prefer
+#     structured content over content[0].text (per the MCP tools spec) then
+#     render every tool as `{}` while clients reading the text block see
+#     nothing wrong, so the two client families disagree about a healthy server.
+#   * an advertised outputSchema with no structuredContent to satisfy it is an
+#     unsatisfiable contract, and it is what invites a client to trust the empty
+#     object in the first place. (A NON-empty structuredContent is a legitimate
+#     future change, so the check is consistency, not a ban.)
+if grep -qE '"structuredContent"[[:space:]]*:[[:space:]]*\{\}' <<<"$RESP"; then
+    fail "step 7 board_list returned an EMPTY structuredContent, which shadows the text payload for spec-following clients"
+fi
+if grep -q '"outputSchema"' <<<"$LIST_RESP" && ! grep -q '"structuredContent"' <<<"$RESP"; then
+    fail "step 7 a tool advertises an outputSchema while the server returns no structuredContent: the declared output contract is unsatisfiable"
+fi
+echo "  ok: response envelope consistent (no empty structuredContent, no unfulfilled outputSchema)"
 
 # --- secret hygiene: journald log scan -------------------------------------------
 echo "secret hygiene: scan kanban-mcp journal (last 10 min) for leaked credentials"
