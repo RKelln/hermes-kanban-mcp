@@ -35,6 +35,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
 // runningThenReview scripts the GET bodies the completion handoff needs.
@@ -181,6 +183,40 @@ func TestTCRL_ReviewHandoffSurfacesRefusal(t *testing.T) {
 	}
 	if !strings.Contains(res.Content[0].Text, "not an installed profile") {
 		t.Errorf("refusal = %q, want it to name the uninstalled reviewer profile", res.Content[0].Text)
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// TestTCRL_OverLongSummaryRefusesBeforeWriting pins the ORDER of the refusal
+// (reviewer finding F3 on t_affa85ca): a summary past the CLI's handoff bound
+// must fail before the completion comment is posted. Posting first leaves a
+// RUNNING card holding a completion comment for a transition that never
+// happened, which a human then has to unpick.
+func TestTCRL_OverLongSummaryRefusesBeforeWriting(t *testing.T) {
+	os.Unsetenv("MCP_COMPLETE_MODE")
+	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
+	t.Setenv("MCP_REVIEWER_PROFILE", "default")
+	readArgv := argvLog(t)
+
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default")
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{
+		Board:   testBoard,
+		ID:      "t_x1",
+		Summary: strings.Repeat("s", kanban.MaxReviewSummaryBytes+1),
+	})
+	if !res.IsError {
+		t.Fatalf("expected a refusal past the handoff bound, got: %s", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, "too long") {
+		t.Errorf("refusal = %q, want it to name the summary bound", res.Content[0].Text)
+	}
+	for _, rr := range backend.snapshot() {
+		if rr.method != http.MethodGet {
+			t.Errorf("the refusal still wrote to the backend: %s %s body=%s", rr.method, rr.path, rr.body)
+		}
 	}
 	assertNoCLI(t, readArgv())
 }

@@ -185,15 +185,15 @@ func TestRequestReviewInjection(t *testing.T) {
 	})
 
 	t.Run("oversized summary", func(t *testing.T) {
-		_, _, err := RequestReview(context.Background(), "task-ok", "default", strings.Repeat("x", maxSummaryBytes+1), "alice", false)
+		_, _, err := RequestReview(context.Background(), "task-ok", "default", strings.Repeat("x", MaxReviewSummaryBytes+1), "alice", false)
 		if err == nil || !strings.Contains(err.Error(), "summary too long") {
 			t.Errorf("err = %v, want summary-too-long rejection", err)
 		}
 	})
 
 	t.Run("summary at the cap is accepted", func(t *testing.T) {
-		if _, _, err := RequestReview(context.Background(), "task-ok", "default", strings.Repeat("x", maxSummaryBytes), "alice", false); err != nil {
-			t.Errorf("RequestReview() error = %v, want nil at exactly maxSummaryBytes", err)
+		if _, _, err := RequestReview(context.Background(), "task-ok", "default", strings.Repeat("x", MaxReviewSummaryBytes), "alice", false); err != nil {
+			t.Errorf("RequestReview() error = %v, want nil at exactly MaxReviewSummaryBytes", err)
 		}
 	})
 }

@@ -27,10 +27,14 @@ const (
 	// extra argv into the CLI. Reviewer values are profile names.
 	reviewerReStr = `^[A-Za-z0-9._-]{1,64}$`
 
-	// maxSummaryBytes bounds the handoff text. It is generous (a real
-	// handoff carries refs, scope and verification claims) but finite,
-	// so one caller cannot blow past the kernel's argv limits.
-	maxSummaryBytes = 16 << 10
+	// MaxReviewSummaryBytes bounds the handoff text. It is generous (a
+	// real handoff carries refs, scope and verification claims) but
+	// finite, so one caller cannot blow past the kernel's argv limits.
+	// Exported because a caller that BUILDS a handoff out of other fields
+	// (ticket_complete folds its refs into the summary) has to pre-check:
+	// posting its own completion record first and then failing the handoff
+	// leaves a card holding a record for a transition that never happened.
+	MaxReviewSummaryBytes = 16 << 10
 )
 
 var reviewerRe = regexp.MustCompile(reviewerReStr)
@@ -67,8 +71,8 @@ func RequestReview(ctx context.Context, id, board, summary, reviewer string, for
 	if strings.ContainsRune(summary, 0) || strings.ContainsRune(reviewer, 0) {
 		return "", "", fmt.Errorf("request-review: value contains a NUL byte")
 	}
-	if len(summary) > maxSummaryBytes {
-		return "", "", fmt.Errorf("request-review: summary too long (%d bytes, max %d)", len(summary), maxSummaryBytes)
+	if len(summary) > MaxReviewSummaryBytes {
+		return "", "", fmt.Errorf("request-review: summary too long (%d bytes, max %d)", len(summary), MaxReviewSummaryBytes)
 	}
 	bin, ok := resolveBin()
 	if !ok {

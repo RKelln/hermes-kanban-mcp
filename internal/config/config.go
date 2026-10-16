@@ -68,8 +68,8 @@ const (
 	// on every deployment, and the tool already refuses (with the installed
 	// roster in the message) when no reviewer can be resolved.
 	defaultReviewerProfile = ""
-	defaultRateLimit     = 60
-	defaultLogLevel      = "info"
+	defaultRateLimit       = 60
+	defaultLogLevel        = "info"
 
 	minBearerTokenLen = 16
 )

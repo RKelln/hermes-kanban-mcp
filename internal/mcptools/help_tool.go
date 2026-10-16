@@ -74,9 +74,9 @@ land tickets in the wrong queue.
 Workflow: board_list -> ticket_list/ticket_get -> ticket_claim -> work ->
 ticket_comment -> ticket_request_review -> wait (ticket_events) -> verdict.
 'done' means MERGE your branch; request-changes means fix and re-request.
-ticket_complete is the older path (review-required block); ticket_request_review
-is the review lane. Both are live — use whichever the server's review dispatch
-supports, and never merge before the verdict.
+ticket_complete is the same gate in one call: review_tier LOW completes
+straight to done, MEDIUM/HIGH hand the card to the review lane. Never merge
+before the verdict.
 
 Lifecycle facts:
 - Claims are kernel-enforced: a ticket with an open parent stays 'todo';
@@ -85,7 +85,8 @@ Lifecycle facts:
 - ticket_complete refuses an unclaimed ticket (must be 'running') unless
   MCP_ALLOW_SKIP_CLAIM=true; MCP_COMPLETE_MODE=done completes to 'done'
   instead of the review path. review_tier=LOW completes direct to done;
-  MEDIUM/HIGH default to review-gated (MCP_COMPLETE_MODE=done overrides).
+  MEDIUM/HIGH hand the card to the native review lane (MCP_COMPLETE_MODE=done
+  overrides), and the handoff summary is capped at 16 KiB.
 - Results are hard-capped (write tools 2 KB, ticket_list 6 KB, ticket_get
   8 KB partial / 32 KB full, ticket_events 6 KB, review_queue 8 KB) — they
   are summaries; use ticket_get for depth.

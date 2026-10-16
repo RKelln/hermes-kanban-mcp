@@ -198,10 +198,13 @@ func (s *Server) postComment(ctx context.Context, board, id, body, author string
 // board); result and metadata are optional free-form strings that are
 // folded into the review comment and, in done mode, the PATCH body;
 // review_tier is one of LOW|MEDIUM|HIGH, default MEDIUM when
-// empty/omitted — LOW completes to done directly, MEDIUM/HIGH stay
-// review-gated (subject to MCP_COMPLETE_MODE override). repo, branch,
-// and sha are optional structured refs folded into the review
-// block_reason and comment (trimmed, single-line); ignored in done mode.
+// empty/omitted — LOW completes to done directly, MEDIUM/HIGH hand the
+// card to the native review lane (subject to MCP_COMPLETE_MODE override).
+// repo, branch, and sha are optional structured refs carried into the
+// review comment and the reviewer's summary (trimmed, single-line);
+// ignored in done mode. The handoff summary is capped at
+// kanban.MaxReviewSummaryBytes (16 KiB) and refused before anything is
+// written when longer.
 // created_cards is the optional manifest of child ticket ids created
 // during this run; it is forwarded only in done mode, where the kernel's
 // created_cards audit gate verifies each id (phantom ids are rejected
@@ -293,10 +296,10 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		return ErrorResult("invalid_input: summary required")
 	}
 
-	// Structured refs are folded (trimmed, single-line) into the persisted block_reason
-	// and the comment, so enforce generous single-line length caps up
-	// front: oversized or multiline refs are rejected before any HTTP
-	// call, keeping the backend record bounded and single-line.
+	// Structured refs are folded (trimmed, single-line) into the comment and
+	// the reviewer's summary, so enforce generous single-line length caps up
+	// front: oversized or multiline refs are rejected before any HTTP call,
+	// keeping the record bounded and single-line.
 	for _, r := range []struct {
 		name string
 		val  string
@@ -413,6 +416,20 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 func (s *Server) completeIntoReviewLane(ctx context.Context, board string, in TicketCompleteInput,
 	ts *kanban.TaskSummary, out TicketCompleteOut) *ToolResult {
 
+	// The handoff summary is the brief the reviewer receives, and it is also the
+	// value the CLI bounds: request-review refuses anything past
+	// kanban.MaxReviewSummaryBytes. Check it BEFORE the comment lands — failing
+	// after the post leaves a RUNNING card holding a completion comment for a
+	// transition that never happened, which needs a human to unpick.
+	//
+	// The structured refs travel in this summary as well as the comment: the
+	// summary is what ticket_request_review hands the reviewer as the brief, and
+	// a reviewer told which branch to verify does not have to go looking for it.
+	summary := strings.TrimSpace(in.Summary + completeRefSuffix(in.Repo, in.Branch, in.SHA))
+	if len(summary) > kanban.MaxReviewSummaryBytes {
+		return ErrorResult("invalid_input: handoff summary too long (%d bytes, max %d); nothing was written — shorten the summary, or use review_tier LOW / MCP_COMPLETE_MODE=done when no review round is needed", len(summary), kanban.MaxReviewSummaryBytes)
+	}
+
 	comment := completeCommentBody(in.Summary, in.Result, in.Metadata)
 	if refs := completeCommentRefs(in.Repo, in.Branch, in.SHA); refs != "" {
 		comment += "\n" + refs
@@ -421,11 +438,6 @@ func (s *Server) completeIntoReviewLane(ctx context.Context, board string, in Ti
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
 
-	// The structured refs travel in the handoff summary as well as the
-	// comment: the summary is what ticket_request_review passes to the
-	// reviewer as the brief, and a reviewer told which branch to verify
-	// does not have to go looking for it.
-	summary := strings.TrimSpace(in.Summary + completeRefSuffix(in.Repo, in.Branch, in.SHA))
 	reviewRes := s.TicketRequestReview(ctx, TicketRequestReviewInput{
 		Board:   board,
 		ID:      in.ID,
@@ -477,10 +489,10 @@ func completeCommentBody(summary, result, metadata string) string {
 	return b.String()
 }
 
-// Ref length caps: refs are folded (trimmed, single-line) into the persisted
-// block_reason and the comment, so unbounded values could bloat the
-// backend record. Reasonable generous ceilings keep the structured
-// reason single-line without rejecting legitimate values.
+// Ref length caps: refs are folded (trimmed, single-line) into the comment
+// and the reviewer's summary, so unbounded values could bloat the record.
+// Reasonable generous ceilings keep each ref single-line without rejecting
+// legitimate values.
 const (
 	maxRepoChars   = 256
 	maxBranchChars = 256
@@ -488,8 +500,8 @@ const (
 )
 
 // collapseLineBreaks replaces CR/LF with spaces so a value folds into a
-// single line. Used to keep the review-required block_reason single-line
-// regardless of how summary or the refs were supplied.
+// single line. Used so one ref cannot inject a fake extra line into the
+// comment or the reviewer's summary, however it was supplied.
 func collapseLineBreaks(s string) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
@@ -498,7 +510,7 @@ func collapseLineBreaks(s string) string {
 
 // completeRefParts returns the present refs in canonical order (repo,
 // branch, sha), trimmed of surrounding whitespace and with CR/LF
-// collapsed to spaces so the structured block_reason stays single-line.
+// collapsed to spaces so each ref stays one line.
 func completeRefParts(repo, branch, sha string) []string {
 	clean := func(s string) string {
 		return strings.TrimSpace(collapseLineBreaks(s))

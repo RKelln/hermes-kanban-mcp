@@ -39,11 +39,11 @@ const (
 	MaxBlockedReasonChars = 120
 
 	// MaxRunSummaryChars truncates the latest/last run summary surfaced
-	// in ticket_get output. It must be large enough to hold a
-	// review-required block_reason at the maximum legal ref lengths
+	// in ticket_get output. It is sized for a handoff that is mostly refs
 	// (summary[:100] + " | repo: X; branch: Y; sha: Z" with each ref at
-	// its length cap ≈ 719 runes), so the sha tail survives read-back
-	// for reviewers on hosts without the checkout.
+	// its length cap ≈ 719 runes). A long free-text handoff is truncated
+	// head-first on read-back, which is why the refs also ride the
+	// completion comment — that one re-reads whole with detail=full.
 	MaxRunSummaryChars = 1024
 
 	// MaxBranchNameChars caps the branch_name identity field. Real branch

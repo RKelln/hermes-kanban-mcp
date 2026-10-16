@@ -84,8 +84,9 @@ const reviewProvenanceNote = " no reviewer supplied, so the kernel reused the re
 // noImplementerNote is announced when a handoff cannot name an
 // implementer, so the caller knows the round-trip is one-way for this
 // card. request_review records the implementer from the current run's
-// profile (a bridge-driven claim writes none) or from the ticket's
-// assignee, falling back to NULL when neither exists — and NULL is not
+// profile (empty for a bridge-driven claim, which passes no profile), and
+// falls back to the ticket's assignee only when that assignee is not the
+// reviewer itself — so NULL is what an unassigned card gets, and NULL is not
 // cosmetic: request_changes refuses such a handoff with "review handoff
 // has no valid implementer provenance", so a changes-requested verdict
 // has nowhere to route and needs a human. The bridge cannot repair it at

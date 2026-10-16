@@ -1000,7 +1000,7 @@ func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
 	if len(argv) != 1 || !strings.Contains(argv[0], "--summary=s ") {
 		t.Errorf("argv = %v, want a bare summary with no ref suffix", argv)
 	}
-	if strings.Contains(argv[0], "--summary=s |") {
+	if len(argv) == 1 && strings.Contains(argv[0], "--summary=s |") {
 		t.Errorf("argv = %q, want no ref separator when all three refs are empty", argv[0])
 	}
 }
@@ -1208,5 +1208,42 @@ func TestTComplete_RefsLengthCaps(t *testing.T) {
 	}
 	if len(*rec) != 0 {
 		t.Errorf("no backend request must be issued for oversized refs, got %d", len(*rec))
+	}
+}
+
+// TestTComplete_DoneModePatchBackend500 restores coverage the review-path rename
+// dropped (reviewer finding F2 on t_affa85ca): the 500-on-PATCH case now belongs
+// to done mode, which is the only mode that still PATCHes, and nothing covered it.
+func TestTComplete_DoneModePatchBackend500(t *testing.T) {
+	t.Setenv("MCP_COMPLETE_MODE", "done")
+	argvLog(t)
+	var rec []recReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rec = append(rec, recReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(b)})
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"detail":"boom"}`)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
+	}))
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
+	if !res.IsError {
+		t.Fatalf("expected IsError for a 500 on the done-mode PATCH")
+	}
+	if res.Content[0].Text != "unavailable: boom" {
+		t.Errorf("error = %q, want %q", res.Content[0].Text, "unavailable: boom")
+	}
+	if len(rec) != 3 {
+		t.Fatalf("expected 3 requests (GET, comment POST, PATCH), got %d: %v", len(rec), rec)
+	}
+	if rec[1].method != http.MethodPost || rec[2].method != http.MethodPatch {
+		t.Errorf("request order = %s,%s,%s, want GET,POST,PATCH", rec[0].method, rec[1].method, rec[2].method)
 	}
 }
