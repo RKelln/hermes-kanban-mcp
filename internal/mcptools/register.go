@@ -11,29 +11,36 @@ import (
 // SDK's typed handler shape. The ToolResult wire shape is converted
 // directly: text content parts become mcp.TextContent, IsError maps to
 // the result flag.
-func adapt[In, Out any](fn func(context.Context, In) *ToolResult) mcp.ToolHandlerFor[In, Out] {
-	return func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+//
+// The structured-output parameter is `any` and is held at NIL on purpose.
+// The SDK marshals whatever the typed handler returns into the result's
+// `structuredContent` field, and any non-nil zero value marshals to `{}`
+// (a typed nil would marshal to `null`). Spec-following clients prefer
+// structuredContent over the text block when BOTH are present, so a zero
+// value here shadows the real payload and every tool renders as an empty
+// object. Our payload IS the text block, so the field must be absent, not
+// empty: the SDK skips it entirely for a nil `any`. Note the type must be
+// exactly `any` (not a concrete type, not a pointer to one) because
+// toolForErr skips output-schema derivation only in that case, which is
+// also what keeps `outputSchema` off the tool definitions.
+func adapt[In any](fn func(context.Context, In) *ToolResult) mcp.ToolHandlerFor[In, any] {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		tr := fn(ctx, in)
 		if tr == nil {
-			return nil, *new(Out), errors.New("internal error: nil tool result")
+			return nil, nil, errors.New("internal error: nil tool result")
 		}
 		parts := make([]mcp.Content, 0, len(tr.Content))
 		for _, p := range tr.Content {
 			parts = append(parts, &mcp.TextContent{Text: p.Text})
 		}
-		return &mcp.CallToolResult{Content: parts, IsError: tr.IsError}, *new(Out), nil
+		return &mcp.CallToolResult{Content: parts, IsError: tr.IsError}, nil, nil
 	}
 }
-
-// noOut is the shared structured-output type for Server-method tools:
-// the methods return *ToolResult (text content), so the typed handler's
-// Out value is always zero and unused by the SDK.
-type noOut struct{}
 
 // addTool registers one tool: name, description, JSON input schema, and
 // the Server-method implementation adapted to the SDK handler shape.
 func addTool[In any](srv *mcp.Server, name, desc string, schema map[string]any, fn func(context.Context, In) *ToolResult) {
-	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc, InputSchema: schema}, adapt[In, noOut](fn))
+	mcp.AddTool(srv, &mcp.Tool{Name: name, Description: desc, InputSchema: schema}, adapt[In](fn))
 }
 
 // --- per-ticket schemas (id and board required client-side) ---
