@@ -137,7 +137,7 @@ func Register(srv *mcp.Server, s *Server) {
 		commentSchema(),
 		s.TicketComment)
 
-	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH review-gated (default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs folded into the review block; created_cards (done mode only) is the manifest of child ticket ids the kernel's audit gate verifies. Prefer ticket_request_review for a final review when the server has review dispatch enabled — this gate is the older review-required BLOCK convention. (id and board required)",
+	addTool(srv, "ticket_complete", "Complete a ticket: review_tier LOW completes to done; MEDIUM/HIGH hand the card to the NATIVE review lane (status='review' via request-review, default MEDIUM). MCP_COMPLETE_MODE=done overrides MEDIUM/HIGH. repo/branch/sha are optional structured refs carried into the review comment and the reviewer's summary; created_cards (done mode only) is the manifest of child ticket ids the kernel's audit gate verifies. The review path never blocks the card: the older review-required BLOCK convention has had no consumer since the review-sweeper was retired, so a completion that blocked went to nobody. (id and board required)",
 		completeSchema(),
 		s.TicketComplete)
 

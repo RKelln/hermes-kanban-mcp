@@ -121,6 +121,14 @@ func (b *claimBackend) handler(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		b.reqs = append(b.reqs, claimReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(raw)})
 		io.WriteString(w, `{}`)
+	case http.MethodPost:
+		// Comment posts (the complete-path handoff writes its comment before
+		// the review transition). Recorded so a test can assert the comment
+		// precedes the CLI handoff; 200 with an empty object, like the real
+		// backend's comment route.
+		raw, _ := io.ReadAll(r.Body)
+		b.reqs = append(b.reqs, claimReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(raw)})
+		io.WriteString(w, `{}`)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -149,6 +157,17 @@ func (b *claimBackend) patches() []claimReq {
 			out = append(out, rr)
 		}
 	}
+	return out
+}
+
+// snapshot returns every captured request in order, so a test can assert
+// the ORDER of the traffic (e.g. the comment precedes the handoff) and
+// scan the whole wire for a marker that must not appear.
+func (b *claimBackend) snapshot() []claimReq {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]claimReq, len(b.reqs))
+	copy(out, b.reqs)
 	return out
 }
 

@@ -81,6 +81,20 @@ const reviewUnverifiedNote = " reviewer profile could NOT be verified against th
 // previous request-changes round) instead of this tool overriding it.
 const reviewProvenanceNote = " no reviewer supplied, so the kernel reused the reviewer from the previous review round"
 
+// noImplementerNote is announced when a handoff cannot name an
+// implementer, so the caller knows the round-trip is one-way for this
+// card. request_review records the implementer from the current run's
+// profile (a bridge-driven claim writes none) or from the ticket's
+// assignee, falling back to NULL when neither exists — and NULL is not
+// cosmetic: request_changes refuses such a handoff with "review handoff
+// has no valid implementer provenance", so a changes-requested verdict
+// has nowhere to route and needs a human. The bridge cannot repair it at
+// completion time because assign_task refuses to reassign a card that is
+// running under a claim; the fix is to give the card an assignee at
+// create time (ticket_create assignee), which the kernel's fallback then
+// reads as the implementer.
+const noImplementerNote = " no implementer recorded: the ticket is unassigned and a bridge claim writes no run profile, so the handoff carries implementer=null — an APPROVE still completes the card, but a request-changes verdict has no route back and needs a human; assign the card at create time to give the loop a return path"
+
 // profileRoster is the GET /profiles response shape (the dashboard's
 // assignee picker reads the same endpoint).
 type profileRoster struct {

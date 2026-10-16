@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
 // TicketCreateInput is the ticket_create tool input. Board is optional
@@ -216,29 +219,26 @@ type TicketCompleteInput struct {
 	CreatedCards []string `json:"created_cards"`
 }
 
-// TicketCompleteOut is the ticket_complete success projection: the
-// ticket id, the final status the PATCH requested, whether a human
-// review is required, the effective review tier, and the structured
-// refs echoed from the input. The note warning is gone: REST
-// completions in done mode now carry created_cards, so the kernel's
-// audit gate applies to them.
+// TicketCompleteOut is the ticket_complete success projection: the ticket
+// id, the final status the transition asked for, whether a review is
+// outstanding, the effective review tier, the reviewer the handoff landed
+// on (review path only) and any note the handoff wants the caller to see,
+// plus the structured refs echoed from the input.
+//
+// FinalStatus is "done" or "review". It is never "blocked": the review
+// path hands off to the native review lane, because a `review-required:`
+// block has had no consumer since the review-sweeper was retired
+// (t_affa85ca).
 type TicketCompleteOut struct {
 	ID             string `json:"id"`
 	FinalStatus    string `json:"final_status"`
 	ReviewRequired bool   `json:"review_required"`
 	ReviewTier     string `json:"review_tier"`
+	Reviewer       string `json:"reviewer,omitempty"`
+	Note           string `json:"note,omitempty"`
 	Repo           string `json:"repo,omitempty"`
 	Branch         string `json:"branch,omitempty"`
 	SHA            string `json:"sha,omitempty"`
-}
-
-// completeReviewBody is the review-mode PATCH /tasks/{id} body: a plain
-// status=blocked transition carrying the review-required reason. Kept
-// distinct from ticket_block's blockTaskBody so the two tools' wire
-// shapes cannot drift.
-type completeReviewBody struct {
-	Status      string `json:"status"`
-	BlockReason string `json:"block_reason"`
 }
 
 // completeDoneBody is the done-mode PATCH /tasks/{id} body. status and
@@ -259,13 +259,17 @@ type completeDoneBody struct {
 // completion comment, then PATCH /tasks/{id} to the final status.
 // Behaviour is keyed on review_tier (LOW completes direct to done) and,
 // for MEDIUM/HIGH/omitted, the MCP_COMPLETE_MODE environment variable
-// (default "review"): review posts a comment with the summary plus
-// result/metadata rendered compactly, then blocks the ticket with
-// reason "review-required: <summary[:100]>"; done posts the summary
-// comment, then transitions to done carrying summary/result/metadata
-// and, when supplied, created_cards (forwarded to the kernel's
-// created_cards audit gate — phantom ids get a 400 the tool surfaces
-// via CompleteErrorMessage). The comment always precedes the PATCH.
+// (default "review"): review posts a comment carrying the summary plus
+// result/metadata rendered compactly, then hands the card to the NATIVE
+// review lane (see completeIntoReviewLane) so it lands in 'review', where
+// the dispatcher claims it and spawns the reviewer. It must not write a
+// `review-required:` block: that block's only consumer, the review-sweeper
+// cron, was retired 2026-09-14, so a blocked completion went to nobody
+// (t_affa85ca). done posts the summary comment, then transitions to done
+// carrying summary/result/metadata and, when supplied, created_cards
+// (forwarded to the kernel's created_cards audit gate — phantom ids get a
+// 400 the tool surfaces via CompleteErrorMessage). The comment always
+// precedes the transition.
 //
 // Claim guard: unless MCP_ALLOW_SKIP_CLAIM=true, the ticket's current
 // status is read with GetTask first, and any status other than
@@ -340,7 +344,6 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		return ErrorResult("ticket is %s and unclaimed; call ticket_claim first (or set MCP_ALLOW_SKIP_CLAIM=true)", ts.Status)
 	}
 
-	var patchBody any
 	out := TicketCompleteOut{
 		ID:         in.ID,
 		ReviewTier: reviewTier,
@@ -348,39 +351,111 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 		Branch:     in.Branch,
 		SHA:        in.SHA,
 	}
-	comment := in.Summary
-	if doneMode {
-		patchBody = completeDoneBody{
-			Status:       "done",
-			Summary:      in.Summary,
-			Result:       in.Result,
-			Metadata:     in.Metadata,
-			CreatedCards: in.CreatedCards,
-		}
-		out.FinalStatus = "done"
-	} else {
-		comment = completeCommentBody(in.Summary, in.Result, in.Metadata)
-		patchBody = completeReviewBody{
-			Status:      "blocked",
-			BlockReason: "review-required: " + firstRunes(collapseLineBreaks(in.Summary), 100) + completeRefSuffix(in.Repo, in.Branch, in.SHA),
-		}
-		if refs := completeCommentRefs(in.Repo, in.Branch, in.SHA); refs != "" {
-			comment += "\n" + refs
-		}
-		out.FinalStatus = "blocked"
-		out.ReviewRequired = true
+	if !doneMode {
+		return s.completeIntoReviewLane(ctx, board, in, ts, out)
 	}
 
-	// Comment first, then the status transition: the review convention
-	// is that the unblock path respawns the worker with the comment
-	// thread, so the summary must be on the ticket before it blocks.
-	if err := s.postComment(ctx, board, in.ID, comment, os.Getenv("MCP_COMMENT_AUTHOR")); err != nil {
+	patchBody := completeDoneBody{
+		Status:       "done",
+		Summary:      in.Summary,
+		Result:       in.Result,
+		Metadata:     in.Metadata,
+		CreatedCards: in.CreatedCards,
+	}
+	out.FinalStatus = "done"
+
+	// Comment first, then the PATCH: the ticket carries the handoff
+	// before it closes.
+	if err := s.postComment(ctx, board, in.ID, in.Summary, os.Getenv("MCP_COMMENT_AUTHOR")); err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
 	if err := s.doJSON(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(in.ID),
 		url.Values{"board": []string{board}}, patchBody, nil); err != nil {
 		return ErrorResult("%s", CompleteErrorMessage(err))
 	}
+	return SuccessResult(out)
+}
+
+// completeIntoReviewLane finalises a MEDIUM/HIGH completion by handing the
+// card to the NATIVE review lane (status='review' via `hermes kanban
+// request-review`) instead of writing a `review-required:` BLOCK.
+//
+// Why the block had to go (t_affa85ca): a `review-required:` block needs a
+// consumer, and the only one was the review-sweeper cron, disabled
+// 2026-09-14. Its successor lane_return.py deliberately ignores unmarked
+// worker-phase `review-required:` blocks ("belong to whatever workflow
+// wrote them"), so a bridge-driven completion landed on a card nothing
+// would ever claim: t_ac950fce sat that way with no verdict and no
+// reviewer, and no queue entry anywhere held it. The native lane needs no
+// consumer: the dispatcher claims a review row itself and spawns the
+// sdlc-review reviewer.
+//
+// Order matters. The comment lands first, because it is the reviewer's
+// record of what was claimed and a handoff with no comment is a reviewer
+// with nothing to review against. Then the handoff runs through the same
+// guarded implementation ticket_request_review uses (reviewer resolution,
+// installed-profile verification, post-condition re-read), so the two
+// tools cannot drift.
+//
+// force: the claim guard above admits a RUNNING card, whose live claim
+// only request-review --force can release. Passing force here adds no
+// capability the old path did not already have — the block and the done
+// transition both dropped that same claim.
+//
+// Implementer provenance is the one thing this path cannot repair, and it
+// is announced rather than hidden: request_review records the implementer
+// from the current run's profile (a bridge claim writes none) or the
+// ticket's assignee. `assign_task` refuses to assign a card that is
+// running under a claim, so the bridge cannot supply one at completion
+// time. When the ticket is unassigned, the handoff carries
+// implementer=null: an APPROVE still completes the card, but a
+// request-changes verdict has no route back and needs a human.
+func (s *Server) completeIntoReviewLane(ctx context.Context, board string, in TicketCompleteInput,
+	ts *kanban.TaskSummary, out TicketCompleteOut) *ToolResult {
+
+	comment := completeCommentBody(in.Summary, in.Result, in.Metadata)
+	if refs := completeCommentRefs(in.Repo, in.Branch, in.SHA); refs != "" {
+		comment += "\n" + refs
+	}
+	if err := s.postComment(ctx, board, in.ID, comment, os.Getenv("MCP_COMMENT_AUTHOR")); err != nil {
+		return ErrorResult("%s", RestErrorMessage(err))
+	}
+
+	// The structured refs travel in the handoff summary as well as the
+	// comment: the summary is what ticket_request_review passes to the
+	// reviewer as the brief, and a reviewer told which branch to verify
+	// does not have to go looking for it.
+	summary := strings.TrimSpace(in.Summary + completeRefSuffix(in.Repo, in.Branch, in.SHA))
+	reviewRes := s.TicketRequestReview(ctx, TicketRequestReviewInput{
+		Board:   board,
+		ID:      in.ID,
+		Summary: summary,
+		Force:   ts.Status == "running",
+	})
+	if reviewRes.IsError {
+		// The refusal is the caller's to see. The comment above is already
+		// durable, which is the right residue: the work is recorded, the
+		// card is still in its previous state, and nothing claims a
+		// transition that did not happen.
+		return reviewRes
+	}
+	var requested TicketRequestReviewOut
+	if err := json.Unmarshal([]byte(reviewRes.Content[0].Text), &requested); err != nil {
+		return ErrorResult("review handoff returned an unreadable projection: %v", err)
+	}
+
+	out.FinalStatus = "review"
+	out.ReviewRequired = true
+	out.Reviewer = requested.Assignee
+
+	var notes []string
+	if requested.Note != "" {
+		notes = append(notes, requested.Note)
+	}
+	if strings.TrimSpace(ts.Assignee) == "" {
+		notes = append(notes, noImplementerNote)
+	}
+	out.Note = strings.Join(notes, "; ")
 	return SuccessResult(out)
 }
 
@@ -462,18 +537,4 @@ func completeCommentRefs(repo, branch, sha string) string {
 		return ""
 	}
 	return strings.Join(parts, "\n")
-}
-
-// firstRunes returns at most n runes of s without splitting a multibyte
-// character (the same convention as the idempotency-key truncation).
-// Used to cap the review-required reason at summary[:100] runes.
-func firstRunes(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
 }

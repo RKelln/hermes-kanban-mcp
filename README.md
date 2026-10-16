@@ -42,7 +42,7 @@ The binary resolves the CLI via `HERMES_BIN` (default `hermes`). Claim TTL is ~1
 
 **Related knobs** (env):
 - `MCP_ALLOW_SKIP_CLAIM=true` — `ticket_complete` skips its claim guard (it refuses to complete an unclaimed ticket otherwise).
-- `MCP_COMPLETE_MODE=done` — complete to `done` instead of the default review-gated path (comment + `review-required` block). Applies to `review_tier` `MEDIUM`/`HIGH`/omitted; an explicit `review_tier: "LOW"` always completes to `done`.
+- `MCP_COMPLETE_MODE=done` — complete to `done` instead of the default review path. The default hands a `review_tier` `MEDIUM`/`HIGH`/omitted completion to the **native review lane**: the tool posts the completion comment, then shells out to `hermes kanban request-review`, so the card lands in `review` — the state the dispatcher claims as a REVIEW run and spawns a reviewer on. It does **not** write the older `review-required` block, which has had no consumer since `review-sweeper` was retired (`lane_return.py` ignores worker-phase blocks by design). An explicit `review_tier: "LOW"` always completes to `done`. `MCP_REVIEWER_PROFILE` names the reviewer (verified against the installed profile roster).
 - `MCP_COMMENT_AUTHOR` — default comment author.
 - `KANBAN_DEFAULT_BOARD` — board slug surfaced by `board_list` (informational only; board-taking tools reject an omitted `board`).
 - `KANBAN_BASE_URL`, `KANBAN_USERNAME`, `KANBAN_PASSWORD` — the kanban REST backend + dashboard credentials. Note: the login route lives at the **dashboard root** (`/auth/password-login`), not under the plugin mount — the server strips the mount prefix before logging in.

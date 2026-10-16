@@ -40,10 +40,48 @@ func runnableRecServer(t *testing.T) (*httptest.Server, *[]recReq) {
 	return newRecServer(t, http.StatusOK, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
 }
 
+// reviewLaneRecServer is the review-path fixture for ticket_complete: it
+// serves the profile roster the reviewer check verifies against, the
+// pre-review status for the claim guard and request-review's own
+// preflight, then the review row that handoff's post-condition requires.
+// Requests are recorded in the same shape newRecServer uses, so
+// assertions keep their index habits.
+//
+// MCP_REVIEWER_PROFILE is pinned to "default" because the handoff refuses
+// to hand a card to a reviewer it cannot resolve: a card that lands in
+// 'review' with no assignee the dispatcher can spawn is exactly the
+// silent strand this path exists to prevent.
+func reviewLaneRecServer(t *testing.T, id, preReviewStatus string) (*httptest.Server, *[]recReq) {
+	t.Helper()
+	t.Setenv("MCP_REVIEWER_PROFILE", "default")
+	var rec []recReq
+	gets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rec = append(rec, recReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(b)})
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/profiles":
+			io.WriteString(w, `{"profiles":[{"name":"default"}]}`)
+		case r.Method == http.MethodGet:
+			gets++
+			status := preReviewStatus
+			if gets > 2 {
+				status = "review"
+			}
+			io.WriteString(w, `{"task":{"id":"`+id+`","title":"T","status":"`+status+`","assignee":"default"}}`)
+		default:
+			io.WriteString(w, `{}`)
+		}
+	}))
+	return srv, &rec
+}
+
 func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	readArgv := argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv) // server default board testBoard (board passed explicitly below)
 
@@ -57,10 +95,7 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	if len(*rec) != 3 {
-		t.Fatalf("expected 3 backend requests (GET, comment, PATCH), got %d", len(*rec))
-	}
-	// Order: GetTask first, then comment POST, then PATCH.
+	// Order: the claim-guard read, then the comment, then the handoff.
 	if (*rec)[0].method != http.MethodGet || (*rec)[0].path != "/tasks/t_x1" {
 		t.Errorf("request 0 = %s %s, want GET /tasks/t_x1", (*rec)[0].method, (*rec)[0].path)
 	}
@@ -79,27 +114,22 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 	if sent.Body != wantComment {
 		t.Errorf("comment body = %q, want %q", sent.Body, wantComment)
 	}
-	patch := (*rec)[2]
-	if patch.method != http.MethodPatch || patch.path != "/tasks/t_x1" || patch.query != "board=hermes-agent" {
-		t.Errorf("request 2 = %s %s?%s, want PATCH /tasks/t_x1?board=hermes-agent", patch.method, patch.path, patch.query)
+	// The transition is the CLI handoff, so nothing PATCHes a status. In
+	// particular the retired review-required block must not reappear: its
+	// only consumer was the review-sweeper cron, retired 2026-09-14.
+	for _, rr := range *rec {
+		if rr.method == http.MethodPatch {
+			t.Errorf("review path PATCHed the ticket: %s %s body=%s", rr.method, rr.path, rr.body)
+		}
 	}
-	if keys := bodyKeys(t, patch.body); strings.Join(keys, ",") != "block_reason,status" {
-		t.Errorf("PATCH body keys = %v, want exactly [block_reason status] (body=%s)", keys, patch.body)
-	}
-	var pb map[string]any
-	if err := json.Unmarshal([]byte(patch.body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	if pb["status"] != "blocked" || pb["block_reason"] != "review-required: Shipped the widget" {
-		t.Errorf("PATCH body = %v, want {status:blocked block_reason:review-required: Shipped the widget}", pb)
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "request-review t_x1") {
+		t.Errorf("argv = %v, want exactly one request-review handoff", argv)
 	}
 
 	out := decodeCompleteOut(t, res)
-	if out["id"] != "t_x1" || out["final_status"] != "blocked" || out["review_required"] != true {
-		t.Errorf("output = %v, want {id:t_x1 final_status:blocked review_required:true}", out)
-	}
-	if _, hasNote := out["note"]; hasNote {
-		t.Errorf("output still carries the dropped note warning: %v", out)
+	if out["id"] != "t_x1" || out["final_status"] != "review" || out["review_required"] != true {
+		t.Errorf("output = %v, want {id:t_x1 final_status:review review_required:true}", out)
 	}
 	if rendered := renderedSize(t, res); rendered > MaxToolResultBytes {
 		t.Errorf("rendered result %d bytes > %d", rendered, MaxToolResultBytes)
@@ -108,7 +138,8 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 
 func TestTComplete_ReviewExplicitEnv(t *testing.T) {
 	t.Setenv("MCP_COMPLETE_MODE", "review")
-	srv, rec := runnableRecServer(t)
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -116,18 +147,21 @@ func TestTComplete_ReviewExplicitEnv(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
-	if len(*rec) != 3 {
-		t.Fatalf("expected 3 requests, got %d", len(*rec))
+	for _, rr := range *rec {
+		if rr.method == http.MethodPatch {
+			t.Errorf("explicit review mode PATCHed the ticket: %s", rr.body)
+		}
 	}
 	out := decodeCompleteOut(t, res)
-	if out["final_status"] != "blocked" || out["review_required"] != true {
-		t.Errorf("output = %v, want review path", out)
+	if out["final_status"] != "review" || out["review_required"] != true {
+		t.Errorf("output = %v, want the review path", out)
 	}
 }
 
 func TestTComplete_ReviewOmitsEmptyResultMetadata(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
-	srv, rec := runnableRecServer(t)
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -338,8 +372,10 @@ func TestTComplete_ClaimGuard(t *testing.T) {
 
 func TestTComplete_SkipClaimReview(t *testing.T) {
 	t.Setenv("MCP_ALLOW_SKIP_CLAIM", "true")
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_x1","title":"T","status":"ready"}}`)
+	readArgv := argvLog(t)
+	// A ready ticket: the handoff must not force, because force releases a
+	// live claim that a ready ticket does not hold.
+	srv, rec := reviewLaneRecServer(t, "t_x1", "ready")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -347,12 +383,21 @@ func TestTComplete_SkipClaimReview(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success with skip-claim, got IsError: %s", res.Content[0].Text)
 	}
-	if len(*rec) != 3 {
-		t.Fatalf("expected 3 requests (GET, comment, PATCH), got %d", len(*rec))
+	for _, rr := range *rec {
+		if rr.method == http.MethodPatch {
+			t.Errorf("review path PATCHed the ticket: %s", rr.body)
+		}
 	}
 	out := decodeCompleteOut(t, res)
-	if out["final_status"] != "blocked" || out["review_required"] != true {
-		t.Errorf("output = %v, want review path despite ready status", out)
+	if out["final_status"] != "review" || out["review_required"] != true {
+		t.Errorf("output = %v, want the review path despite a ready status", out)
+	}
+	argv := readArgv()
+	if len(argv) != 1 {
+		t.Fatalf("argv = %v, want exactly one handoff", argv)
+	}
+	if strings.Contains(argv[0], "--force") {
+		t.Errorf("argv = %q, must NOT force a ready ticket", argv[0])
 	}
 }
 
@@ -378,7 +423,8 @@ func TestTComplete_SkipClaimDone(t *testing.T) {
 
 func TestTComplete_CommentAuthorFromEnv(t *testing.T) {
 	t.Setenv("MCP_COMMENT_AUTHOR", "robot")
-	srv, rec := runnableRecServer(t)
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -524,36 +570,42 @@ func TestTComplete_CommentBackend422(t *testing.T) {
 	}
 }
 
-func TestTComplete_PatchBackend500(t *testing.T) {
+func TestTComplete_CommentBackend500(t *testing.T) {
+	// The comment is the review path's first mutation. A backend failure
+	// there must surface as an error and must NOT be reported as a
+	// completed handoff.
+	readArgv := argvLog(t)
 	var rec []recReq
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		rec = append(rec, recReq{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: string(b)})
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPatch {
+		if r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, `{"detail":"boom"}`)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"task":{"id":"t_x1","title":"T","status":"running"}}`)
+		io.WriteString(w, `{"task":{"id":"t_x1","title":"T","status":"running","assignee":"default"}}`)
 	}))
 	defer srv.Close()
+	t.Setenv("MCP_REVIEWER_PROFILE", "default")
 	s := newTestServer(srv)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: "s"})
 	if !res.IsError {
-		t.Fatalf("expected IsError for 500 on the PATCH")
+		t.Fatalf("expected IsError for a 500 on the comment POST")
 	}
 	if res.Content[0].Text != "unavailable: boom" {
 		t.Errorf("error = %q, want %q", res.Content[0].Text, "unavailable: boom")
 	}
-	if len(rec) != 3 {
-		t.Fatalf("expected 3 requests (GET, comment POST, PATCH), got %d", len(rec))
+	if len(rec) != 2 {
+		t.Fatalf("expected 2 requests (guard, failed comment), got %d: %v", len(rec), rec)
 	}
-	if rec[1].method != http.MethodPost || rec[2].method != http.MethodPatch {
-		t.Errorf("request order = %s,%s,%s, want GET,POST,PATCH", rec[0].method, rec[1].method, rec[2].method)
+	if rec[1].method != http.MethodPost {
+		t.Errorf("request 1 = %s, want the comment POST", rec[1].method)
 	}
+	assertNoCLI(t, readArgv())
 }
 
 func TestTComplete_TransportError(t *testing.T) {
@@ -572,29 +624,24 @@ func TestTComplete_TransportError(t *testing.T) {
 	}
 }
 
-func TestTComplete_SummaryTruncated100Runes(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	// 150 em-dashes (450 bytes): rune-safe truncation must keep exactly
-	// 100 runes without splitting a character.
-	summary := strings.Repeat("—", 150)
-	srv, rec := runnableRecServer(t)
+func TestTComplete_SummaryReachesReviewerUncapped(t *testing.T) {
+	// The old 100-rune cap existed only to keep the review-required
+	// block_reason a bounded single line. That field is gone, so the
+	// handoff summary is bounded only by the CLI's own 16 KiB limit and
+	// must reach the reviewer whole.
+	readArgv := argvLog(t)
+	srv, _ := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
+	summary := strings.Repeat("—", 150)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{Board: testBoard, ID: "t_x1", Summary: summary})
 	if res.IsError {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	want := "review-required: " + strings.Repeat("—", 100)
-	if pb["block_reason"] != want {
-		t.Errorf("block_reason length/prefix wrong: got %q", pb["block_reason"])
-	}
-	if len([]rune(pb["block_reason"].(string))) != len("review-required: ")+100 {
-		t.Errorf("block_reason runes = %d, want %d", len([]rune(pb["block_reason"].(string))), len("review-required: ")+100)
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "--summary="+summary) {
+		t.Errorf("argv = %v, want the summary passed through uncapped", argv)
 	}
 }
 
@@ -625,9 +672,8 @@ func TestTComplete_ErrorsOneLine(t *testing.T) {
 }
 
 func TestTComplete_SizeInvariant(t *testing.T) {
-	// A large summary (review mode truncates only the block_reason; the
-	// comment carries the full text) must still render <= 2 KB.
-	srv, _ := runnableRecServer(t)
+	argvLog(t)
+	srv, _ := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -727,9 +773,8 @@ func TestTComplete_ReviewTierLowOverridesReviewEnv(t *testing.T) {
 }
 
 func TestTComplete_ReviewTierMediumDefaultReview(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -741,28 +786,20 @@ func TestTComplete_ReviewTierMediumDefaultReview(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	patch := (*rec)[2]
-	var pb map[string]any
-	if err := json.Unmarshal([]byte(patch.body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	if pb["status"] != "blocked" {
-		t.Errorf("PATCH status = %v, want blocked", pb["status"])
-	}
-	reason, ok := pb["block_reason"].(string)
-	if !ok || !strings.HasPrefix(reason, "review-required: ") {
-		t.Errorf("block_reason = %v, want prefix review-required:", pb["block_reason"])
+	for _, rr := range *rec {
+		if rr.method == http.MethodPatch {
+			t.Errorf("MEDIUM review path PATCHed the ticket: %s", rr.body)
+		}
 	}
 	out := decodeCompleteOut(t, res)
-	if out["final_status"] != "blocked" || out["review_required"] != true || out["review_tier"] != "MEDIUM" {
-		t.Errorf("output = %v, want {final_status:blocked review_required:true review_tier:MEDIUM}", out)
+	if out["final_status"] != "review" || out["review_required"] != true || out["review_tier"] != "MEDIUM" {
+		t.Errorf("output = %v, want {final_status:review review_required:true review_tier:MEDIUM}", out)
 	}
 }
 
 func TestTComplete_ReviewTierHigh(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -775,16 +812,14 @@ func TestTComplete_ReviewTierHigh(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	if pb["status"] != "blocked" {
-		t.Errorf("PATCH status = %v, want blocked", pb["status"])
+	for _, rr := range *rec {
+		if rr.method == http.MethodPatch {
+			t.Errorf("HIGH review path PATCHed the ticket: %s", rr.body)
+		}
 	}
 	out := decodeCompleteOut(t, res)
-	if out["final_status"] != "blocked" || out["review_required"] != true || out["review_tier"] != "HIGH" {
-		t.Errorf("output = %v, want {final_status:blocked review_required:true review_tier:HIGH}", out)
+	if out["final_status"] != "review" || out["review_required"] != true || out["review_tier"] != "HIGH" {
+		t.Errorf("output = %v, want {final_status:review review_required:true review_tier:HIGH}", out)
 	}
 }
 
@@ -897,9 +932,8 @@ func TestTComplete_ReviewTierCaseInsensitive(t *testing.T) {
 }
 
 func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	readArgv := argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -914,19 +948,6 @@ func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	if len(*rec) != 3 {
-		t.Fatalf("expected 3 requests, got %d", len(*rec))
-	}
-
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	wantReason := "review-required: s | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/x; sha: abc123def"
-	if pb["block_reason"] != wantReason {
-		t.Errorf("block_reason = %q, want %q", pb["block_reason"], wantReason)
-	}
-
 	var sent commentBody
 	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
@@ -935,7 +956,13 @@ func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 	if sent.Body != wantComment {
 		t.Errorf("comment body = %q, want %q", sent.Body, wantComment)
 	}
-
+	// The refs also travel in the reviewer's brief, so the reviewer does
+	// not have to go looking for the branch.
+	wantSummary := "s | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/x; sha: abc123def"
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "--summary="+wantSummary) {
+		t.Errorf("argv = %v, want --summary=%s", argv, wantSummary)
+	}
 	out := decodeCompleteOut(t, res)
 	if out["repo"] != "github.com/RKelln/hermes-kanban-mcp" {
 		t.Errorf("out repo = %v, want github.com/RKelln/hermes-kanban-mcp", out["repo"])
@@ -949,9 +976,8 @@ func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 }
 
 func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	readArgv := argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -963,15 +989,6 @@ func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	if pb["block_reason"] != "review-required: s" {
-		t.Errorf("block_reason = %q, want exact 'review-required: s'", pb["block_reason"])
-	}
-
 	var sent commentBody
 	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
@@ -979,12 +996,18 @@ func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
 	if sent.Body != "s" {
 		t.Errorf("comment body = %q, want exact 's'", sent.Body)
 	}
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "--summary=s ") {
+		t.Errorf("argv = %v, want a bare summary with no ref suffix", argv)
+	}
+	if strings.Contains(argv[0], "--summary=s |") {
+		t.Errorf("argv = %q, want no ref separator when all three refs are empty", argv[0])
+	}
 }
 
 func TestTComplete_ReviewRefsPartial(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+	readArgv := argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -997,22 +1020,16 @@ func TestTComplete_ReviewRefsPartial(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
-		t.Fatal(err)
-	}
-	wantReason := "review-required: s | sha: abc123"
-	if pb["block_reason"] != wantReason {
-		t.Errorf("block_reason = %q, want %q", pb["block_reason"], wantReason)
-	}
-
 	var sent commentBody
 	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
 	}
 	if sent.Body != "s\nsha: abc123" {
 		t.Errorf("comment body = %q, want 's\\nsha: abc123'", sent.Body)
+	}
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "--summary=s | sha: abc123") {
+		t.Errorf("argv = %v, want the present ref only, in canonical order", argv)
 	}
 }
 
@@ -1109,10 +1126,13 @@ func TestTComplete_ReviewTierLowRefsIgnored(t *testing.T) {
 	}
 }
 
-func TestTComplete_RefsCollapseNewlines(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+func TestTComplete_RefsNewlinesStayInTheComment(t *testing.T) {
+	// The single-line rule died with the block_reason field: refs now
+	// travel in the comment (multiline by design) and the reviewer's
+	// brief. completeRefParts still collapses each ref's own newlines so
+	// one ref cannot inject a fake extra line into the comment.
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -1127,22 +1147,21 @@ func TestTComplete_RefsCollapseNewlines(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if reason := pb["block_reason"].(string); strings.ContainsAny(reason, "\r\n") {
-		t.Errorf("block_reason must stay single-line, got %q", reason)
-	}
-	if !strings.Contains(pb["block_reason"].(string), "repo: acme/ prod") {
-		t.Errorf("block_reason = %q, want newline collapsed to space", pb["block_reason"])
+	if !strings.Contains(sent.Body, "repo: acme/ prod") {
+		t.Errorf("comment = %q, want the ref newline collapsed to a space", sent.Body)
 	}
 }
 
-func TestTComplete_SummaryNewlineCollapsed(t *testing.T) {
-	os.Unsetenv("MCP_COMPLETE_MODE")
-	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
-	srv, rec := runnableRecServer(t)
+func TestTComplete_SummaryNewlinesStayInTheComment(t *testing.T) {
+	// The comment is the multiline record of the handoff: a summary with
+	// newlines must survive intact there, because that is what the
+	// reviewer reads the claim against.
+	argvLog(t)
+	srv, rec := reviewLaneRecServer(t, "t_x1", "running")
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -1154,16 +1173,12 @@ func TestTComplete_SummaryNewlineCollapsed(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
-	var pb map[string]any
-	if err := json.Unmarshal([]byte((*rec)[2].body), &pb); err != nil {
+	var sent commentBody
+	if err := json.Unmarshal([]byte((*rec)[1].body), &sent); err != nil {
 		t.Fatal(err)
 	}
-	reason, _ := pb["block_reason"].(string)
-	if strings.ContainsAny(reason, "\r\n") {
-		t.Errorf("block_reason must stay single-line even with newlines in summary, got %q", reason)
-	}
-	if !strings.Contains(reason, "shipped injected payload") {
-		t.Errorf("block_reason = %q, want newlines collapsed to spaces", reason)
+	if sent.Body != "shipped\ninjected\rpayload" {
+		t.Errorf("comment body = %q, want the summary verbatim", sent.Body)
 	}
 }
 

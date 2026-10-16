@@ -32,7 +32,8 @@ type Config struct {
 	// HermesBin is the hermes CLI binary invoked for hermes-mediated operations. Env: HERMES_BIN.
 	HermesBin string
 	// MCPCompleteMode controls how ticket completion is finalized: "review"
-	// (block for human review) or "done" (complete directly). Env: MCP_COMPLETE_MODE.
+	// (hand the card to the native review lane via request-review) or "done"
+	// (complete directly). Env: MCP_COMPLETE_MODE.
 	MCPCompleteMode string
 	// MCPAllowSkipClaim permits operating on tickets without claiming them. Env: MCP_ALLOW_SKIP_CLAIM.
 	MCPAllowSkipClaim bool
