@@ -61,9 +61,16 @@ MCP tools for a Hermes kanban board:
     a review row on a non-profile assignee parks in 'review' forever. When
     neither source supplies a reviewer the flag is omitted and the kernel
     keeps its own choice (prior-reviewer provenance, else the existing
-    assignee) — that value is verified the same way. Moving a RUNNING ticket
+    assignee) — that value is verified the same way. worker is the IMPLEMENTER
+    label stamped on the card before the handoff (explicit worker >
+    MCP_CLAIM_WORKER; REFUSED when neither supplies one). The kernel records it
+    as the handoff's implementer, which is what lets a request-changes verdict
+    return the card to you — without it the reviewer's only exit is a block. It
+    must NOT be an installed profile, or the dispatcher spawns a worker for the
+    card when changes come back. Moving a RUNNING ticket
     additionally requires force: true (the bridge cannot verify claim
-    ownership behind one shared bearer token).
+    ownership behind one shared bearer token; force also authorises the stamp,
+    which reclaims that claim one step earlier).
     Push your branch FIRST. Do NOT merge before the verdict: done means merge.
 - ticket_complete finish; review-gated by default, and review-gated now means
     the NATIVE lane: the tool posts the completion comment, then hands the
@@ -78,9 +85,11 @@ MCP tools for a Hermes kanban board:
     into the comment and the reviewer's summary. done mode accepts
     created_cards (child ticket ids; kernel-verified, phantom ids get a 400
     naming the offenders). The handoff needs a reviewer the dispatcher can
-    spawn: MCP_REVIEWER_PROFILE is verified against the installed roster and
-    the completion is REFUSED when it resolves to nothing spawnable, because
-    a review row on a non-profile assignee parks in 'review' forever.
+    spawn (MCP_REVIEWER_PROFILE, verified against the installed roster) AND an
+    implementer label it must never spawn (MCP_CLAIM_WORKER); the completion is
+    REFUSED when either resolves to nothing usable, because a review row on a
+    non-profile assignee parks in 'review' forever and a handoff with no
+    implementer can only ever be blocked by a request-changes verdict.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
 - ticket_create   new ticket; title required; parents supported. There is NO
     triage flag: triage is the kernel's internal intake lane for
@@ -141,7 +150,14 @@ Lifecycle facts:
   review row whose assignee is an installed profile, so an UNASSIGNED
   review ticket is skipped EVERY tick with no reviewer, no runs and no
   comments — that is why the tool refuses rather than performing a
-  transition nobody will act on. A ticket in 'review' has no branch
+  transition nobody will act on. The handoff needs BOTH values, and they pull
+  opposite ways: a reviewer the dispatcher CAN spawn, and an implementer label
+  it must NEVER spawn. The kernel writes the implementer once, at request
+  time, from the ticket's assignee — so the tool stamps the label first (on a
+  RUNNING card that is reassign --reclaim, which is what force authorises)
+  and then reads the value back off the review_requested event; a handoff that
+  recorded null is reported as a broken round trip, not a success. A ticket in
+  'review' has no branch
   requirement of its own, but the reviewer must be able to see the work:
   push first, and put the refs in summary. If your branch was already
   merged and deleted, say so in summary and name the merge commit and the

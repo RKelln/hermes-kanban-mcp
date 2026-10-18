@@ -10,6 +10,16 @@ package mcptools
 //     every tick, forever (t_44d19d72 / t_371b7d27, 5 days silent,
 //     t_124ab31f). Both must REFUSE, asserted as negatives (no CLI
 //     invocation, no status write).
+//   - TestTRR_ImplementerStampedThenRecorded: the handoff's implementer
+//     is the OTHER half of the round trip. The kernel records it once, at
+//     request time, from the assignee — so the tool stamps the lane label
+//     first and then READS BACK what the kernel recorded. measured live
+//     2026-10-18 (t_a6e3ba60): a profile-less claim plus no assignee wrote
+//     implementer=null and the reviewer's only exit was a block.
+//   - TestTRR_ImplementerMustNotBeProfile: a label that collides with an
+//     installed profile makes the dispatcher spawn a worker when changes
+//     come back — the inverse strand, and the reason the label is checked
+//     in the opposite direction from the reviewer.
 //   - TestTRR_AssigneeIsNotUsedAsReviewer: after a request-changes
 //     verdict the kernel sets assignee = the implementer, so falling back
 //     to the assignee would make round 2 a self-review.
@@ -17,10 +27,12 @@ package mcptools
 //     bridge cannot verify claim ownership, so releasing a live claim is
 //     an explicit caller decision and never automatic.
 //   - TestTRR_Postcondition*: never report "reviewer dispatched" for a
-//     ticket that did not reach a dispatchable review row.
+//     ticket that did not reach a dispatchable review row, and never
+//     report a handoff whose implementer cannot route back.
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,11 +58,43 @@ func argvLog(t *testing.T) func() []string {
 	}
 }
 
+// noEnvClaimWorker makes sure the implementer knob is absent so tests
+// observe the argument/knob resolution, not ambient config.
+func noEnvClaimWorker(t *testing.T) {
+	t.Helper()
+	t.Setenv("MCP_CLAIM_WORKER", "")
+}
+
 // noEnvReviewer makes sure the server-default knob is absent so tests
 // observe the argument/default resolution, not ambient config.
 func noEnvReviewer(t *testing.T) {
 	t.Helper()
 	t.Setenv("MCP_REVIEWER_PROFILE", "")
+}
+
+// withClaimWorker sets the server-side implementer label (this install's
+// value) and returns it.
+func withClaimWorker(t *testing.T) string {
+	t.Helper()
+	t.Setenv("MCP_CLAIM_WORKER", "opencode-remote")
+	return "opencode-remote"
+}
+
+// reviewRow renders the post-transition GET body: the landed review row
+// plus the event log the tool reads the recorded implementer from.
+// implementer is a raw JSON value so a test can express the null the
+// kernel writes when it has no provenance.
+func reviewRow(id, assignee, implementer string) string {
+	return fmt.Sprintf(
+		`{"task":{"id":%q,"title":"T","status":"review","assignee":%q},`+
+			`"events":[{"id":9,"kind":"review_requested","payload":{"implementer":%s,"reviewer":%q}}]}`,
+		id, assignee, implementer, assignee)
+}
+
+// stampedRow renders the post-stamp GET body: the ticket after the
+// implementer label landed but before the handoff.
+func stampedRow(id, status, label string) string {
+	return fmt.Sprintf(`{"task":{"id":%q,"title":"T","status":%q,"assignee":%q}}`, id, status, label)
 }
 
 // assertNoCLI asserts the CLI was never invoked (the refusal paths must
@@ -62,13 +106,19 @@ func assertNoCLI(t *testing.T, argv []string) {
 	}
 }
 
-func TestTRR_SuccessReady(t *testing.T) {
+// TestTRR_ImplementerStampedThenRecorded is the whole point of the card:
+// an unassigned ready ticket gets the lane label BEFORE the handoff, the
+// handoff carries --reviewer, and the tool reports the implementer the
+// kernel actually recorded.
+func TestTRR_ImplementerStampedThenRecorded(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+		stampedRow("t_x1", "ready", label),
+		reviewRow("t_x1", "alice", fmt.Sprintf("%q", label)),
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -85,31 +135,190 @@ func TestTRR_SuccessReady(t *testing.T) {
 	if out.ID != "t_x1" || out.Status != "review" || out.Assignee != "alice" {
 		t.Errorf("out = %+v, want id t_x1 status review assignee alice", out)
 	}
-	if out.Note != reviewNote {
-		t.Errorf("note = %q, want %q", out.Note, reviewNote)
+	if out.Implementer != label {
+		t.Errorf("implementer = %q, want %q (the value the kernel recorded)", out.Implementer, label)
 	}
-	// Authoritative state: preflight + re-read, never a PATCH.
-	if n := backend.getCount("t_x1"); n != 2 {
-		t.Errorf("GET count = %d, want 2 (preflight + authoritative re-read)", n)
+	for _, want := range []string{reviewNote, "implementer=" + label} {
+		if !strings.Contains(out.Note, want) {
+			t.Errorf("note = %q, want it to contain %q", out.Note, want)
+		}
+	}
+	// preflight + post-stamp re-read + post-transition read. The event log
+	// rides the last one, so verification costs no extra fetch.
+	if n := backend.getCount("t_x1"); n != 3 {
+		t.Errorf("GET count = %d, want 3 (preflight, post-stamp, post-transition)", n)
 	}
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0", n)
 	}
-	if n := backend.profileProbes(); n != 2 {
-		t.Errorf("profile probes = %d, want 2 (verify the requested reviewer, then re-verify the assignee that actually landed)", n)
+	// reviewer verification, implementer verification, landed-assignee
+	// verification.
+	if n := backend.profileProbes(); n != 3 {
+		t.Errorf("profile probes = %d, want 3", n)
 	}
 	argv := readArgv()
-	if len(argv) != 1 {
-		t.Fatalf("argv lines = %v, want exactly 1 CLI invocation", argv)
+	if len(argv) != 2 {
+		t.Fatalf("argv lines = %v, want the stamp then the handoff", argv)
 	}
-	if !strings.Contains(argv[0], "request-review t_x1") || !strings.Contains(argv[0], "--summary=shipped it") {
-		t.Errorf("argv = %q, want request-review with the summary", argv[0])
+	if !strings.Contains(argv[0], "assign t_x1 "+label) {
+		t.Errorf("argv[0] = %q, want the implementer stamp first", argv[0])
 	}
-	if !strings.Contains(argv[0], "--reviewer=alice") {
-		t.Errorf("argv = %q, want --reviewer=alice", argv[0])
+	if strings.Contains(argv[0], "reassign") || strings.Contains(argv[0], "--reclaim") {
+		t.Errorf("argv[0] = %q, a READY ticket must not be reclaimed", argv[0])
 	}
-	if strings.Contains(argv[0], "--force") {
-		t.Errorf("argv = %q, must NOT force a ready ticket", argv[0])
+	if !strings.Contains(argv[1], "request-review t_x1") || !strings.Contains(argv[1], "--summary=shipped it") {
+		t.Errorf("argv[1] = %q, want request-review with the summary", argv[1])
+	}
+	if !strings.Contains(argv[1], "--reviewer=alice") {
+		t.Errorf("argv[1] = %q, want --reviewer=alice", argv[1])
+	}
+	if strings.Contains(argv[1], "--force") {
+		t.Errorf("argv[1] = %q, must NOT force a ready ticket", argv[1])
+	}
+}
+
+// The knob is the only implicit source, and its absence is a refusal that
+// names it. A silently invented default would become every lane's
+// identity, and an unnamed handoff is the defect this card exists to end.
+func TestTRR_ImplementerLabelRequired(t *testing.T) {
+	noEnvReviewer(t)
+	noEnvClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError with no implementer source, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"no implementer label", "MCP_CLAIM_WORKER", "request-changes"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// The inverse strand: a label that IS a profile makes the dispatcher spawn
+// a worker on the card when changes come back. Refuse in the opposite
+// direction from the reviewer check.
+func TestTRR_ImplementerLabelMustNotBeProfile(t *testing.T) {
+	noEnvReviewer(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	// "alice" is in the scripted roster. Case-insensitive, because the
+	// kernel canonicalises the assignee before writing it.
+	for _, label := range []string{"alice", "ALICE"} {
+		res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+			ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "bob", Worker: label,
+		})
+		if !res.IsError {
+			t.Fatalf("label %q: expected IsError for a profile label, got success: %s", label, res.Content[0].Text)
+		}
+		for _, want := range []string{"IS an installed profile", "MCP_CLAIM_WORKER", "spawns a worker"} {
+			if !strings.Contains(res.Content[0].Text, want) {
+				t.Errorf("label %q: error = %q, want it to mention %q", label, res.Content[0].Text, want)
+			}
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// The kernel only falls back to the assignee when it DIFFERS from the
+// reviewer, so a label equal to the reviewer still records null.
+func TestTRR_ImplementerLabelMustDifferFromReviewer(t *testing.T) {
+	noEnvReviewer(t)
+	noEnvClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "bob", Worker: "bob",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError when the label is the reviewer, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"also the reviewer", "implementer=null"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// An explicit worker argument is the first source and beats the knob.
+func TestTRR_WorkerArgumentBeatsKnob(t *testing.T) {
+	noEnvReviewer(t)
+	withClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		stampedRow("t_x1", "ready", "framework-lane"),
+		reviewRow("t_x1", "alice", `"framework-lane"`),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice", Worker: "framework-lane",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if out.Implementer != "framework-lane" {
+		t.Errorf("implementer = %q, want framework-lane (the argument, not the knob)", out.Implementer)
+	}
+	// argv[0] is the stamp carrying the ARGUMENT's label, argv[1] the
+	// handoff. A READY card, so no --reclaim.
+	argv := readArgv()
+	if len(argv) != 2 || !strings.Contains(argv[0], "assign t_x1 framework-lane") {
+		t.Fatalf("argv = %v, want the stamp (assign t_x1 framework-lane) then the handoff", argv)
+	}
+	if strings.Contains(argv[0], "--reclaim") {
+		t.Errorf("argv[0] = %q, a READY ticket must not be reclaimed", argv[0])
+	}
+}
+
+// A card already carrying the label must not be written again: on a
+// running card that write would reclaim a live claim for nothing.
+func TestTRR_ImplementerAlreadyStamped(t *testing.T) {
+	noEnvReviewer(t)
+	label := withClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		fmt.Sprintf(`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":%q}}`, label),
+		reviewRow("t_x1", "alice", fmt.Sprintf("%q", label)),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	if n := backend.getCount("t_x1"); n != 2 {
+		t.Errorf("GET count = %d, want 2 (no post-stamp re-read when nothing was written)", n)
+	}
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "request-review t_x1") {
+		t.Fatalf("argv = %v, want exactly one invocation (the handoff)", argv)
 	}
 }
 
@@ -117,11 +326,12 @@ func TestTRR_SuccessReady(t *testing.T) {
 // attribute, so the caller must assert force explicitly.
 func TestTRR_RunningRequiresForce(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"other-profile","claim_lock":"holder-1","claim_expires":9999999999}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+		reviewRow("t_x1", "alice", fmt.Sprintf("%q", label)),
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -138,13 +348,16 @@ func TestTRR_RunningRequiresForce(t *testing.T) {
 	}
 	assertNoCLI(t, readArgv())
 
-	// With the explicit assertion the transition proceeds, carrying --force.
+	// With the explicit assertion the stamp reclaims the claim and the
+	// handoff then needs no --force: the claim is already gone, and
+	// passing --force would assert an override nobody needs.
 	// Fresh backend: the scripted orders repeat their last body, so reusing
 	// this one would serve "review" to the second preflight.
 	backend2 := newClaimBackend()
 	backend2.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"other-profile","claim_lock":"holder-1","claim_expires":9999999999}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
+		stampedRow("t_x1", "ready", label),
+		reviewRow("t_x1", "alice", fmt.Sprintf("%q", label)),
 	}
 	readArgv2 := argvLog(t)
 	s2 := newClaimToolServer(t, backend2)
@@ -155,8 +368,14 @@ func TestTRR_RunningRequiresForce(t *testing.T) {
 		t.Fatalf("expected success with force, got IsError: %s", res.Content[0].Text)
 	}
 	argv := readArgv2()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--force") {
-		t.Fatalf("argv = %v, want exactly one invocation carrying --force", argv)
+	if len(argv) != 2 {
+		t.Fatalf("argv = %v, want the reclaim stamp then the handoff", argv)
+	}
+	if !strings.Contains(argv[0], "reassign t_x1 "+label) || !strings.Contains(argv[0], "--reclaim") {
+		t.Errorf("argv[0] = %q, want reassign --reclaim on a running ticket", argv[0])
+	}
+	if strings.Contains(argv[1], "--force") {
+		t.Errorf("argv[1] = %q, must not force once the stamp reclaimed the claim", argv[1])
 	}
 }
 
@@ -186,6 +405,7 @@ func TestTRR_ForceRejectedOnReady(t *testing.T) {
 // and refuse.
 func TestTRR_NonProfileReviewerRefused(t *testing.T) {
 	noEnvReviewer(t)
+	withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
@@ -219,32 +439,35 @@ func TestTRR_NonProfileReviewerRefused(t *testing.T) {
 	assertNoCLI(t, readArgv())
 }
 
-// When the roster cannot be read the check cannot run. Proceed, but SAY so:
-// a silently degraded guard is the failure mode this tool exists to prevent.
-func TestTRR_UnverifiedRosterAnnounced(t *testing.T) {
+// The roster is the oracle for BOTH directions: spawnable for the
+// reviewer, not-spawnable for the implementer label. When it cannot be
+// read, neither value can be checked, and a handoff that cannot be
+// checked is refused rather than risked — the implementer half fails to a
+// spawned worker, which is silent, so there is no "announce and proceed"
+// version of this branch.
+func TestTRR_UnverifiedRosterRefused(t *testing.T) {
 	noEnvReviewer(t)
+	withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.profiles = nil // /profiles 404s
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"}}`,
 	}
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
 		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
 	})
-	if res.IsError {
-		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	if !res.IsError {
+		t.Fatalf("expected IsError when the roster is unreadable, got success: %s", res.Content[0].Text)
 	}
-	out := decodeOut[TicketRequestReviewOut](t, res)
-	if !strings.Contains(out.Note, "could NOT be verified") {
-		t.Errorf("note = %q, want an announced unverified-roster warning", out.Note)
+	for _, want := range []string{"could not read the installed profile roster", "implementer label"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
 	}
-	if len(readArgv()) != 1 {
-		t.Errorf("argv = %v, want the transition to proceed", readArgv())
-	}
+	assertNoCLI(t, readArgv())
 }
 
 // F3 regression (MEDIUM): after request-changes the kernel sets
@@ -258,11 +481,13 @@ func TestTRR_UnverifiedRosterAnnounced(t *testing.T) {
 // non-spawnable case, which an earlier version of this test blessed.
 func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"bob"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+		stampedRow("t_x1", "ready", label),
+		reviewRow("t_x1", "bob", fmt.Sprintf("%q", label)),
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -273,19 +498,20 @@ func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
 	argv := readArgv()
-	if len(argv) != 1 {
-		t.Fatalf("argv = %v, want one invocation", argv)
+	if len(argv) != 2 {
+		t.Fatalf("argv = %v, want the stamp then the handoff", argv)
 	}
-	if strings.Contains(argv[0], "--reviewer=") {
-		t.Errorf("argv = %q, must omit --reviewer so the kernel's own choice applies", argv[0])
+	if strings.Contains(argv[1], "--reviewer=") {
+		t.Errorf("argv[1] = %q, must omit --reviewer so the kernel's own choice applies", argv[1])
 	}
 	if out := decodeOut[TicketRequestReviewOut](t, res); !strings.Contains(out.Note, "previous review round") {
 		t.Errorf("note = %q, want it to state the kernel's provenance was used", out.Note)
 	}
 	// The preserved assignee is still VERIFIED for spawnability — that is
-	// the difference between checking a value and substituting it.
-	if n := backend.profileProbes(); n != 2 {
-		t.Errorf("profile probes = %d, want 2 (the preserved assignee must still be verified)", n)
+	// the difference between checking a value and substituting it — and
+	// the implementer label is verified in the opposite direction.
+	if n := backend.profileProbes(); n != 3 {
+		t.Errorf("profile probes = %d, want 3 (reviewer, implementer, landed assignee)", n)
 	}
 }
 
@@ -295,6 +521,7 @@ func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 // tool must refuse before creating it.
 func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
 	noEnvReviewer(t)
+	withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	// "ryan" and "parent-worker" are real non-spawnable assignees on this
@@ -328,7 +555,8 @@ func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
 	backend2 := newClaimBackend()
 	backend2.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"bob"}}`,
+		stampedRow("t_x1", "ready", "opencode-remote"),
+		reviewRow("t_x1", "bob", `"opencode-remote"`),
 	}
 	readArgv2 := argvLog(t)
 	s2 := newClaimToolServer(t, backend2)
@@ -339,8 +567,8 @@ func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
 		t.Fatalf("expected success with a configured reviewer, got IsError: %s", res.Content[0].Text)
 	}
 	argv := readArgv2()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--reviewer=bob") {
-		t.Fatalf("argv = %v, want exactly one invocation with --reviewer=bob", argv)
+	if len(argv) != 2 || !strings.Contains(argv[1], "--reviewer=bob") {
+		t.Fatalf("argv = %v, want the stamp then a handoff with --reviewer=bob", argv)
 	}
 }
 
@@ -349,11 +577,13 @@ func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
 // The post-condition must check what landed, not what was asked for.
 func TestTRR_PostconditionNonSpawnableAssignee(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"parent-worker"}}`,
+		stampedRow("t_x1", "ready", label),
+		reviewRow("t_x1", "parent-worker", fmt.Sprintf("%q", label)),
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -403,9 +633,14 @@ func TestTRR_StrandGuard(t *testing.T) {
 // reported as a dispatched review.
 func TestTRR_PostconditionNotReview(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	argvLog(t)
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"}}`}
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		stampedRow("t_x1", "ready", label),
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"alice"}}`,
+	}
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
@@ -420,11 +655,13 @@ func TestTRR_PostconditionNotReview(t *testing.T) {
 // state, and the tool must not report success for it.
 func TestTRR_PostconditionEmptyAssignee(t *testing.T) {
 	noEnvReviewer(t)
+	label := withClaimWorker(t)
 	argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
-		`{"task":{"id":"t_x1","title":"T","status":"review"}}`,
+		stampedRow("t_x1", "ready", label),
+		reviewRow("t_x1", "", fmt.Sprintf("%q", label)),
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -433,6 +670,84 @@ func TestTRR_PostconditionEmptyAssignee(t *testing.T) {
 	})
 	if !res.IsError || !strings.Contains(res.Content[0].Text, "NO assignee") {
 		t.Errorf("got %q, want an IsError about the stranded review row", res.Content[0].Text)
+	}
+}
+
+// The read-back is the whole reason this tool exists: a handoff the kernel
+// recorded with implementer=null still APPROVES, but a request-changes
+// verdict cannot return it, and the caller must hear that at handoff time
+// rather than discover it when the verdict blocks.
+func TestTRR_ImplementerRecordedNullRefused(t *testing.T) {
+	noEnvReviewer(t)
+	withClaimWorker(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"default"}}`,
+		stampedRow("t_x1", "ready", "opencode-remote"),
+		reviewRow("t_x1", "alice", `null`),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError when the kernel recorded implementer=null, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"implementer=null", "request-changes", "block"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+}
+
+// A handoff that recorded someone else is not a failure of the transition,
+// but it is not the destination the caller asked for — say which it is.
+func TestTRR_ImplementerRecordedDifferentRefused(t *testing.T) {
+	noEnvReviewer(t)
+	withClaimWorker(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		stampedRow("t_x1", "ready", "opencode-remote"),
+		reviewRow("t_x1", "alice", `"someone-else"`),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError when the recorded implementer differs, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"someone-else", "opencode-remote"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+}
+
+// An event log without a review_requested event cannot answer the
+// question; the tool says so instead of implying the handoff is sound.
+func TestTRR_ImplementerUnreadableFromEvents(t *testing.T) {
+	noEnvReviewer(t)
+	label := withClaimWorker(t)
+	argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
+		stampedRow("t_x1", "ready", label),
+		`{"task":{"id":"t_x1","title":"T","status":"review","assignee":"alice"},"events":[]}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if !res.IsError || !strings.Contains(res.Content[0].Text, "cannot be verified") {
+		t.Errorf("got %q, want an IsError about an unverifiable implementer", res.Content[0].Text)
 	}
 }
 
@@ -514,6 +829,7 @@ func TestTRR_Validation(t *testing.T) {
 
 func TestTRR_CLIFailureSurfacesStderr(t *testing.T) {
 	noEnvReviewer(t)
+	withClaimWorker(t)
 	installFakeBin(t)
 	backend := newClaimBackend()
 	backend.orders["task-fail"] = []string{`{"task":{"id":"task-fail","title":"T","status":"ready"}}`}
@@ -525,8 +841,12 @@ func TestTRR_CLIFailureSurfacesStderr(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
-	if want := "error: task already claimed"; res.Content[0].Text != want {
-		t.Errorf("error = %q, want the fake's first stderr line %q", res.Content[0].Text, want)
+	// The CLI's own first stderr line is surfaced verbatim, and the tool
+	// says what did NOT happen (the handoff was never requested).
+	for _, want := range []string{"error: task already claimed", "handoff was NOT requested"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to contain %q", res.Content[0].Text, want)
+		}
 	}
 }
 

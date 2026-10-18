@@ -424,14 +424,15 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 // capability the old path did not already have — the block and the done
 // transition both dropped that same claim.
 //
-// Implementer provenance is the one thing this path cannot repair, and it
-// is announced rather than hidden: request_review records the implementer
-// from the current run's profile (a bridge claim writes none) or the
-// ticket's assignee. `assign_task` refuses to assign a card that is
-// running under a claim, so the bridge cannot supply one at completion
-// time. When the ticket is unassigned, the handoff carries
-// implementer=null: an APPROVE still completes the card, but a
-// request-changes verdict has no route back and needs a human.
+// Implementer provenance is not this path's business any more: it used to
+// be the one thing the review handoff could not repair, because a bridge
+// claim writes no run profile and `assign_task` refuses a card that is
+// running under a claim. ticket_request_review now stamps the lane's
+// implementer label before the transition (t_b917c3c6), so the handoff
+// carries a real implementer and a request-changes verdict has somewhere
+// to route. That stamp needs MCP_CLAIM_WORKER (or the caller's worker
+// argument) — the review call refuses without one rather than record
+// implementer=null again.
 func (s *Server) completeIntoReviewLane(ctx context.Context, board string, in TicketCompleteInput,
 	ts *kanban.TaskSummary, out TicketCompleteOut) *ToolResult {
 
@@ -482,9 +483,6 @@ func (s *Server) completeIntoReviewLane(ctx context.Context, board string, in Ti
 	var notes []string
 	if requested.Note != "" {
 		notes = append(notes, requested.Note)
-	}
-	if strings.TrimSpace(ts.Assignee) == "" {
-		notes = append(notes, noImplementerNote)
 	}
 	out.Note = strings.Join(notes, "; ")
 	return SuccessResult(out)

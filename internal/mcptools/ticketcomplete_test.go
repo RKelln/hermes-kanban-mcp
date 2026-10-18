@@ -43,17 +43,21 @@ func runnableRecServer(t *testing.T) (*httptest.Server, *[]recReq) {
 // reviewLaneRecServer is the review-path fixture for ticket_complete: it
 // serves the profile roster the reviewer check verifies against, the
 // pre-review status for the claim guard and request-review's own
-// preflight, then the review row that handoff's post-condition requires.
+// preflight, the ticket AFTER the implementer stamp (t_b917c3c6: the lane
+// label lands on a ready card before the handoff), then the review row and
+// the review_requested event the handoff's read-back needs.
 // Requests are recorded in the same shape newRecServer uses, so
 // assertions keep their index habits.
 //
 // MCP_REVIEWER_PROFILE is pinned to "default" because the handoff refuses
 // to hand a card to a reviewer it cannot resolve: a card that lands in
 // 'review' with no assignee the dispatcher can spawn is exactly the
-// silent strand this path exists to prevent.
+// silent strand this path exists to prevent. MCP_CLAIM_WORKER is pinned to
+// this install's lane label for the same reason on the implementer side.
 func reviewLaneRecServer(t *testing.T, id, preReviewStatus string) (*httptest.Server, *[]recReq) {
 	t.Helper()
 	t.Setenv("MCP_REVIEWER_PROFILE", "default")
+	label := withClaimWorker(t)
 	var rec []recReq
 	gets := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -65,16 +69,38 @@ func reviewLaneRecServer(t *testing.T, id, preReviewStatus string) (*httptest.Se
 			io.WriteString(w, `{"profiles":[{"name":"default"}]}`)
 		case r.Method == http.MethodGet:
 			gets++
-			status := preReviewStatus
-			if gets > 2 {
-				status = "review"
+			switch {
+			case gets <= 2:
+				// claim guard, then request-review's own preflight
+				io.WriteString(w, `{"task":{"id":"`+id+`","title":"T","status":"`+preReviewStatus+`","assignee":"default"}}`)
+			case gets == 3:
+				// the stamp landed: the card now carries the lane label
+				io.WriteString(w, `{"task":{"id":"`+id+`","title":"T","status":"ready","assignee":"`+label+`"}}`)
+			default:
+				// the landed review row, plus the event the tool reads the
+				// recorded implementer from
+				io.WriteString(w, `{"task":{"id":"`+id+`","title":"T","status":"review","assignee":"default"},`+
+					`"events":[{"id":9,"kind":"review_requested","payload":{"implementer":"`+label+`","reviewer":"default"}}]}`)
 			}
-			io.WriteString(w, `{"task":{"id":"`+id+`","title":"T","status":"`+status+`","assignee":"default"}}`)
 		default:
 			io.WriteString(w, `{}`)
 		}
 	}))
 	return srv, &rec
+}
+
+// handoffArgv returns the request-review argv line from the fake CLI's log.
+// The implementer stamp runs FIRST (t_b917c3c6), so the handoff is no
+// longer argv[0] and an index assertion would silently check the stamp.
+func handoffArgv(t *testing.T, argv []string) string {
+	t.Helper()
+	for i := len(argv) - 1; i >= 0; i-- {
+		if strings.Contains(argv[i], "request-review") {
+			return argv[i]
+		}
+	}
+	t.Fatalf("argv = %v, want a request-review handoff", argv)
+	return ""
 }
 
 func TestTComplete_ReviewDefaultMode(t *testing.T) {
@@ -123,8 +149,13 @@ func TestTComplete_ReviewDefaultMode(t *testing.T) {
 		}
 	}
 	argv := readArgv()
-	if len(argv) != 1 || !strings.Contains(argv[0], "request-review t_x1") {
-		t.Errorf("argv = %v, want exactly one request-review handoff", argv)
+	// The stamp runs first (t_b917c3c6), so assert on the handoff LINE and
+	// on the pair, not on argv[0].
+	if len(argv) != 2 {
+		t.Errorf("argv = %v, want the implementer stamp then the request-review handoff", argv)
+	}
+	if h := handoffArgv(t, argv); !strings.Contains(h, "request-review t_x1") {
+		t.Errorf("handoff argv = %q, want request-review t_x1", h)
 	}
 
 	out := decodeCompleteOut(t, res)
@@ -393,11 +424,11 @@ func TestTComplete_SkipClaimReview(t *testing.T) {
 		t.Errorf("output = %v, want the review path despite a ready status", out)
 	}
 	argv := readArgv()
-	if len(argv) != 1 {
-		t.Fatalf("argv = %v, want exactly one handoff", argv)
+	if len(argv) != 2 {
+		t.Fatalf("argv = %v, want the stamp then the handoff", argv)
 	}
-	if strings.Contains(argv[0], "--force") {
-		t.Errorf("argv = %q, must NOT force a ready ticket", argv[0])
+	if h := handoffArgv(t, argv); strings.Contains(h, "--force") {
+		t.Errorf("argv = %q, must NOT force a ready ticket", h)
 	}
 }
 
@@ -640,7 +671,7 @@ func TestTComplete_SummaryReachesReviewerUncapped(t *testing.T) {
 		t.Fatalf("expected success, got: %s", res.Content[0].Text)
 	}
 	argv := readArgv()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--summary="+summary) {
+	if h := handoffArgv(t, argv); !strings.Contains(h, "--summary="+summary) {
 		t.Errorf("argv = %v, want the summary passed through uncapped", argv)
 	}
 }
@@ -960,7 +991,7 @@ func TestTComplete_ReviewRefsVerbatim(t *testing.T) {
 	// not have to go looking for the branch.
 	wantSummary := "s | repo: github.com/RKelln/hermes-kanban-mcp; branch: feat/x; sha: abc123def"
 	argv := readArgv()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--summary="+wantSummary) {
+	if h := handoffArgv(t, argv); !strings.Contains(h, "--summary="+wantSummary) {
 		t.Errorf("argv = %v, want --summary=%s", argv, wantSummary)
 	}
 	out := decodeCompleteOut(t, res)
@@ -997,11 +1028,12 @@ func TestTComplete_ReviewRefsEmptyNoSuffix(t *testing.T) {
 		t.Errorf("comment body = %q, want exact 's'", sent.Body)
 	}
 	argv := readArgv()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--summary=s ") {
+	h := handoffArgv(t, argv)
+	if !strings.Contains(h, "--summary=s ") {
 		t.Errorf("argv = %v, want a bare summary with no ref suffix", argv)
 	}
-	if len(argv) == 1 && strings.Contains(argv[0], "--summary=s |") {
-		t.Errorf("argv = %q, want no ref separator when all three refs are empty", argv[0])
+	if strings.Contains(h, "--summary=s |") {
+		t.Errorf("argv = %q, want no ref separator when all three refs are empty", h)
 	}
 }
 
@@ -1028,7 +1060,7 @@ func TestTComplete_ReviewRefsPartial(t *testing.T) {
 		t.Errorf("comment body = %q, want 's\\nsha: abc123'", sent.Body)
 	}
 	argv := readArgv()
-	if len(argv) != 1 || !strings.Contains(argv[0], "--summary=s | sha: abc123") {
+	if h := handoffArgv(t, argv); !strings.Contains(h, "--summary=s | sha: abc123") {
 		t.Errorf("argv = %v, want the present ref only, in canonical order", argv)
 	}
 }

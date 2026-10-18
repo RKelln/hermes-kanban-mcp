@@ -187,3 +187,39 @@ func TestDocs_ServeTheClaimRefusalRule(t *testing.T) {
 		}
 	}
 }
+
+// TestDocs_ServeTheImplementerRule pins the ONE thing an implementer must know
+// to get a request-changes verdict back: the handoff records an implementer
+// label, it is not a profile, and without it the reviewer can only block.
+// (t_b917c3c6.) The positive pin is the only guard that survives a rewrite of
+// these paragraphs in a later edit.
+func TestDocs_ServeTheImplementerRule(t *testing.T) {
+	t.Run("served help", func(t *testing.T) {
+		for _, want := range []string{"MCP_CLAIM_WORKER", "IMPLEMENTER", "must NOT be an installed profile"} {
+			if !strings.Contains(helpDoc, want) {
+				t.Errorf("helpDoc no longer states the implementer rule (no %q)", want)
+			}
+		}
+	})
+
+	// The lane's AGENTS template and the install guide are the two prose
+	// surfaces an operator or implementer actually reads.
+	surfaces := []struct{ name, text string }{
+		{"deploy/AGENTS.kanban-mcp.template.md", ""},
+		{"deploy/install.md", ""},
+	}
+	for i := range surfaces {
+		b, err := os.ReadFile(filepath.Join("..", "..", surfaces[i].name))
+		if err != nil {
+			t.Fatalf("read %s: %v", surfaces[i].name, err)
+		}
+		surfaces[i].text = string(b)
+	}
+	for _, s := range surfaces {
+		for _, want := range []string{"MCP_CLAIM_WORKER", "implementer"} {
+			if !strings.Contains(strings.ToLower(s.text), strings.ToLower(want)) {
+				t.Errorf("%s no longer states the implementer rule (no %q)", s.name, want)
+			}
+		}
+	}
+}

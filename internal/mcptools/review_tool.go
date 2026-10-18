@@ -22,10 +22,33 @@ package mcptools
 // over HTTP (GET <base>/profiles, the endpoint the dashboard's assignee
 // picker uses, backed by hermes_cli.profiles.list_profiles) because it
 // has no access to the kernel.
+//
+// Two fields on the handoff decide whether the lane can ever get the card
+// back, and they pull in OPPOSITE directions:
+//
+//	reviewer    must be an installed profile the dispatcher can spawn;
+//	implementer must NOT be one, because the kernel lands the card back at
+//	            `ready` with assignee = implementer and the dispatcher
+//	            claims any ready card whose assignee is on-disk.
+//
+// The kernel writes the implementer once, at request time, from the
+// current run's profile, falling back to the ticket's assignee only when
+// that assignee is not the reviewer (kanban_db.request_review). A bridge
+// claim writes no run profile — `hermes kanban claim` has no profile flag
+// — and the external lane never assigned its cards, so both sources were
+// empty and every handoff recorded implementer=null. request_changes then
+// REFUSED (\"review handoff has no valid implementer provenance\") and the
+// reviewer's only remaining exit was a block: measured live 2026-10-18 on
+// board `togather`, ticket t_a6e3ba60 (t_b917c3c6). This tool therefore
+// stamps a durable lane label on the card BEFORE the handoff, which is
+// the kernel's own designed fallback, and then verifies the value the
+// kernel actually recorded.
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -38,18 +61,27 @@ import (
 // handoff re-derives everything the implementer already knew); reviewer
 // is optional and falls back to MCP_REVIEWER_PROFILE.
 //
+// worker is the implementer label stamped on the card before the handoff
+// (the same name ticket_claim accepts). It falls back to
+// MCP_CLAIM_WORKER, and the handoff is REFUSED when neither supplies one:
+// an unnamed implementer is the exact defect this parameter exists to
+// end. Do not read it as a profile — it must NOT be one (see the file
+// comment).
+//
 // force is required to move a RUNNING ticket, and must be omitted for a
 // ready one. It exists because the CLI exposes no --expected-run-id, so
 // clearing a live claim is only possible with --force — and this bridge
 // has no caller identity (one shared bearer token), so it cannot verify
 // that the caller owns the claim it is about to release. Requiring the
 // caller to assert it keeps that capability deliberate instead of
-// automatic.
+// automatic. On a running ticket the same assertion also authorises the
+// implementer stamp, which releases that claim one step earlier.
 type TicketRequestReviewInput struct {
 	Board    string `json:"board"`
 	ID       string `json:"id"`
 	Summary  string `json:"summary"`
 	Reviewer string `json:"reviewer"`
+	Worker   string `json:"worker"`
 	Force    bool   `json:"force"`
 }
 
@@ -58,43 +90,29 @@ type TicketRequestReviewInput struct {
 // the caller sees the kernel's state, not the CLI's stdout. Assignee is
 // the reviewer: request_review reassigns the task when a reviewer is
 // resolved, and that assignment is the durable provenance reopen-review
-// routes changes back to.
+// routes changes back to. Implementer is the value the kernel recorded on
+// the review_requested event, read back from the event log — the field a
+// request-changes verdict routes on.
 type TicketRequestReviewOut struct {
-	ID       string `json:"id"`
-	Status   string `json:"status"`
-	Assignee string `json:"assignee"`
-	Note     string `json:"note,omitempty"`
+	ID          string `json:"id"`
+	Status      string `json:"status"`
+	Assignee    string `json:"assignee"`
+	Implementer string `json:"implementer,omitempty"`
+	Note        string `json:"note,omitempty"`
 }
 
 // reviewNote is the stable note on every successful request: the verdict
 // arrives asynchronously, and "done" is what authorises the merge.
 const reviewNote = "a verdict of done authorises your merge, request-changes returns the ticket to you — do NOT merge before the verdict"
 
-// reviewUnverifiedNote is appended when the installed-profile roster
-// could not be read, so the spawnability check could not run. Announced,
-// never silent: an unverifiable reviewer is exactly the case that strands
-// a card, and the caller should know the check did not happen.
-const reviewUnverifiedNote = " reviewer profile could NOT be verified against the installed roster (the profiles endpoint did not answer); if this profile is not installed the card will sit in 'review' unspawned"
-
 // reviewProvenanceNote is used when no reviewer was supplied: the kernel
 // then resolves its own re-review provenance (the reviewer recorded by the
 // previous request-changes round) instead of this tool overriding it.
 const reviewProvenanceNote = " no reviewer supplied, so the kernel reused the reviewer from the previous review round"
 
-// noImplementerNote is announced when a handoff cannot name an
-// implementer, so the caller knows the round-trip is one-way for this
-// card. request_review records the implementer from the current run's
-// profile (empty for a bridge-driven claim, which passes no profile), and
-// falls back to the ticket's assignee only when that assignee is not the
-// reviewer itself — so NULL is what an unassigned card gets, and NULL is not
-// cosmetic: request_changes refuses such a handoff with "review handoff
-// has no valid implementer provenance", so a changes-requested verdict
-// has nowhere to route and needs a human. The bridge cannot repair it at
-// completion time because assign_task refuses to reassign a card that is
-// running under a claim; the fix is to give the card an assignee at
-// create time (ticket_create assignee), which the kernel's fallback then
-// reads as the implementer.
-const noImplementerNote = " no implementer recorded: the ticket is unassigned and a bridge claim writes no run profile, so the handoff carries implementer=null — an APPROVE still completes the card, but a request-changes verdict has no route back and needs a human; assign the card at create time to give the loop a return path"
+// implementerKnob is the server knob every implementer refusal names, so
+// the operator does not have to guess which setting the handoff needs.
+const implementerKnob = "MCP_CLAIM_WORKER"
 
 // profileRoster is the GET /profiles response shape (the dashboard's
 // assignee picker reads the same endpoint).
@@ -136,12 +154,147 @@ func (s *Server) profileSpawnable(ctx context.Context, reviewer string) (ok, che
 	return false, true, names
 }
 
+// resolveImplementerLabel decides which lane label the handoff records.
+//
+// Sources, in order: the explicit worker argument (the same name
+// ticket_claim accepts), then MCP_CLAIM_WORKER. There is deliberately no
+// third source and no default: a handoff with no provenance is the defect
+// this card exists to end, so the refusal names the knob instead of
+// inventing a label that would silently become every lane's identity.
+//
+// The label is then checked in the direction that is easy to forget: it
+// must NOT be an installed profile. The kernel lands the card back at
+// `ready` with assignee = implementer, and the dispatcher claims ready
+// cards assigned to on-disk profiles, so a profile here puts an agent
+// worker on the card when changes come back — the "reviewer writes code"
+// failure with a different actor. A label that is already the reviewer is
+// refused too, because the kernel only falls back to the assignee when it
+// DIFFERS from the reviewer: that handoff would still record null.
+//
+// The roster could not be read case is a refusal, not an announcement.
+// For the reviewer an unverified value strands a card (loud enough at the
+// next ticket_events); for the implementer an unverified COLLISION
+// spawns a worker on work the lane was supposed to resume, which is
+// silent by construction. Fail closed.
+func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestReviewInput, reviewer string) (label, source string, failure *ToolResult) {
+	label = strings.TrimSpace(in.Worker)
+	source = "the worker argument"
+	if label == "" {
+		label = strings.TrimSpace(os.Getenv(implementerKnob))
+		source = implementerKnob
+	}
+	if label == "" {
+		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"opencode-remote\").", implementerKnob, implementerKnob)
+	}
+	if !kanban.ValidLaneToken(label) {
+		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, "^[A-Za-z0-9._-]{1,64}$")
+	}
+	if strings.EqualFold(label, reviewer) {
+		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"opencode-remote\"), or a different reviewer.", label, implementerKnob)
+	}
+	ok, checked, names := s.profileSpawnable(ctx, label)
+	switch {
+	case !checked:
+		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so implementer label %q could NOT be checked. The handoff is refused rather than risked: if that label matches a profile, the dispatcher spawns a worker on the card when a request-changes verdict returns it. Retry once the dashboard API answers, or set %s to a label you know is not a profile (e.g. \"opencode-remote\").", label, implementerKnob)
+	case ok:
+		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"opencode-remote\"), not a profile.", label, strings.Join(names, ", "), implementerKnob)
+	}
+	return label, source, nil
+}
+
+// stampImplementer writes label onto the ticket's assignee when it is not
+// already the implementer of record.
+//
+// ready:  `assign <id> <label>` — ungated, and safe: the label is not a
+// profile (verified above), so the dispatcher skips the card.
+// running: `reassign <id> <label> --reclaim` — the only form that works
+// while a claim is live, because assign_task refuses a running claimed
+// task. This releases the claim, so it is gated behind the caller's
+// force assertion (that is the same authority --force would exercise a
+// step later) and the returned ticket is re-read, never assumed.
+//
+// The re-read after the write is the point: the kernel canonicalises the
+// assignee (lowercase) and the CLI can no-op, so the caller's next step
+// is decided from what LANDED, not from what was asked.
+func (s *Server) stampImplementer(ctx context.Context, board, id, label string, ts *kanban.TaskSummary) (*kanban.TaskSummary, *ToolResult) {
+	if strings.EqualFold(strings.TrimSpace(ts.Assignee), label) {
+		return ts, nil
+	}
+	reclaim := ts.Status == "running"
+	reason := ""
+	if reclaim {
+		reason = "review handoff: record implementer " + label
+	}
+	if _, stderr, err := kanban.AssignLabel(ctx, id, board, label, reason, reclaim); err != nil {
+		msg := cliFailureText(stderr, err)
+		if reclaim {
+			return nil, ErrorResult("could not stamp the implementer label: %s. The handoff was NOT requested. This write reclaims a RUNNING ticket's live claim before reassigning, so the ticket may now be ready — re-read it (ticket_get) before retrying.", msg)
+		}
+		return nil, ErrorResult("could not stamp the implementer label: %s. The handoff was NOT requested; the ticket is unchanged.", msg)
+	}
+	after, err := s.GetTask(ctx, board, id)
+	if err != nil {
+		return nil, ErrorResult("%s", RestErrorMessage(err))
+	}
+	if !strings.EqualFold(strings.TrimSpace(after.Assignee), label) {
+		return nil, ErrorResult("the implementer stamp did not take effect: ticket %s carries assignee %q, not %q. The handoff was NOT requested. Nothing was dispatched; source a different label (%s).", id, after.Assignee, label, implementerKnob)
+	}
+	return after, nil
+}
+
+// reviewHandoffImplementer reads the implementer recorded on the newest
+// review_requested event in a task detail envelope's event log. found is
+// false when no such event is readable; ok is false when one exists but
+// its payload cannot be decoded. recorded is "" for an explicit null,
+// which is the failure this tool exists to prevent and must be reported
+// as such rather than as "no event".
+func reviewHandoffImplementer(events []json.RawMessage) (recorded string, found, decoded bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		var e struct {
+			Kind    string          `json:"kind"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(events[i], &e); err != nil {
+			continue
+		}
+		if e.Kind != "review_requested" {
+			continue
+		}
+		var p struct {
+			Implementer *string `json:"implementer"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return "", true, false
+		}
+		if p.Implementer == nil {
+			return "", true, true
+		}
+		return strings.TrimSpace(*p.Implementer), true, true
+	}
+	return "", false, false
+}
+
+// getTaskDetail reads the ticket AND its event log in one GET
+// (GET /tasks/{id} returns comments/events/runs alongside the task). The
+// handoff verification uses one fetch for both facts so "the transition
+// landed" and "the implementer was recorded" can never be answered from
+// two different reads of a moving ticket.
+func (s *Server) getTaskDetail(ctx context.Context, board, id string) (*kanban.TaskSummary, []json.RawMessage, error) {
+	var env taskDetailEnvelope
+	if err := s.doJSON(ctx, http.MethodGet, "/tasks/"+url.PathEscape(id), url.Values{"board": []string{board}}, nil, &env); err != nil {
+		return nil, nil, err
+	}
+	return &env.Task.TaskSummary, env.Events, nil
+}
+
 // TicketRequestReview implements the ticket_request_review MCP tool:
 // validate, fail fast when HERMES_BIN is missing, preflight the ticket
 // over REST (ready or running only — the kernel refuses anything else),
-// resolve and verify the reviewer, shell out to the hermes CLI, then
-// re-read the ticket, confirm the transition actually happened, and
-// return the authoritative state.
+// resolve and verify the reviewer, resolve and verify the implementer
+// label, stamp that label on the card, shell out to the hermes CLI, then
+// re-read the ticket and the event log, confirm the transition actually
+// happened AND that the kernel recorded the implementer, and return the
+// authoritative state.
 func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReviewInput) *ToolResult {
 	board := in.Board
 	if board == "" {
@@ -174,7 +327,6 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		return ErrorResult("invalid_input: force is only for a RUNNING ticket (this one is ready and holds no claim); drop force. force clears a live claim, so a ready ticket never needs it.")
 	}
 
-	var force bool
 	switch ts.Status {
 	case "ready":
 		// Nothing holds it; the kernel transition needs no override.
@@ -182,9 +334,6 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		if !in.Force {
 			return ErrorResult("cannot request review: ticket %s is running under a live claim held by %q. The bridge cannot verify that you own it (every MCP client shares one bearer token), so this is your call to make explicitly: if YOU claimed it with ticket_claim and are requesting review of your OWN finished work, pass force: true. If a worker or the dispatcher holds it mid-implementation, do not — force clears the live claim and hands unfinished work to review.", in.ID, ts.Assignee)
 		}
-		// The CLI exposes no --expected-run-id, so --force is the only
-		// way to release a live claim.
-		force = true
 	default:
 		return ErrorResult("cannot request review: ticket is %s, request-review requires ready or running (a blocked ticket cannot enter the review lane; unblock it first)", ts.Status)
 	}
@@ -225,18 +374,44 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		}
 		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", verifyValue, strings.Join(names, ", "))
 	case !checked:
-		notes = append(notes, reviewUnverifiedNote)
+		// The roster is the oracle for both directions (spawnable
+		// reviewer, NOT-spawnable implementer), so an unreadable roster
+		// makes the whole handoff unverifiable. This used to proceed with
+		// an announced warning for the reviewer alone; the implementer
+		// half cannot be announced safely (a collision spawns a worker
+		// silently), so the handoff now fails closed in one sentence.
+		return ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so neither the reviewer %q nor the implementer label can be verified. The handoff is refused rather than risked: a non-profile reviewer strands the card, and an implementer label that collides with a profile makes the dispatcher spawn a worker when changes come back. Retry once the dashboard API answers.", verifyValue)
 	}
 	if useProvenance {
 		notes = append(notes, reviewProvenanceNote)
 	}
+
+	// Implementer provenance. Resolved and verified BEFORE the stamp,
+	// because a refused label must leave the ticket untouched.
+	label, labelSource, failure := s.resolveImplementerLabel(ctx, in, verifyValue)
+	if failure != nil {
+		return failure
+	}
+	stamped, failure := s.stampImplementer(ctx, board, in.ID, label, ts)
+	if failure != nil {
+		return failure
+	}
+	if strings.EqualFold(strings.TrimSpace(ts.Assignee), label) {
+		notes = append(notes, "implementer="+label+" (already on the card), so a request-changes verdict lands back here assigned to it — claimable by id, and never spawned because it is not an installed profile")
+	} else {
+		notes = append(notes, "implementer="+label+" (from "+labelSource+") stamped on the card, so a request-changes verdict lands back here assigned to it — claimable by id, and never spawned because it is not an installed profile")
+	}
+	// A live claim is gone once the stamp reclaimed it; the kernel's guard
+	// then has nothing to clear, and passing --force would claim an
+	// override this call no longer needs.
+	cliForce := stamped.Status == "running"
 	note := strings.Join(notes, ";")
 
-	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), flagReviewer, force); err != nil {
+	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), flagReviewer, cliForce); err != nil {
 		return ErrorResult("%s", cliFailureText(stderr, err))
 	}
 
-	after, err := s.GetTask(ctx, board, in.ID)
+	after, events, err := s.getTaskDetail(ctx, board, in.ID)
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
@@ -257,10 +432,29 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	if aok, achecked, anames := s.profileSpawnable(ctx, after.Assignee); achecked && !aok {
 		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. Set MCP_REVIEWER_PROFILE (e.g. \"default\") or pass reviewer explicitly, then request again.", in.ID, after.Assignee, strings.Join(anames, ", "))
 	}
+
+	// The implementer is the OTHER half of the round trip, and the kernel
+	// writes it once, from the ticket row it read inside its own txn. Read
+	// it back: a handoff that records null (or someone else) still APPROVES
+	// correctly, but a request-changes verdict cannot return the ticket and
+	// the reviewer is left with a block. This is the check whose absence
+	// produced t_b917c3c6, so it is a hard failure, not a note.
+	recorded, found, decoded := reviewHandoffImplementer(events)
+	switch {
+	case !found:
+		return ErrorResult("request-review moved ticket %s to 'review' and assigned %q, but the ticket's event log carries no readable review_requested event, so the recorded implementer cannot be verified. An APPROVE will still complete the card; a request-changes verdict may have nowhere to route. Check ticket_get before relying on the round trip.", in.ID, after.Assignee)
+	case !decoded:
+		return ErrorResult("request-review moved ticket %s to 'review' and assigned %q, but its newest review_requested payload could not be decoded, so the recorded implementer cannot be verified. An APPROVE will still complete the card; a request-changes verdict may have nowhere to route.", in.ID, after.Assignee)
+	case recorded == "":
+		return ErrorResult("request-review moved ticket %s to 'review' but the kernel recorded implementer=null on the handoff, so a request-changes verdict cannot return it (request_changes refuses a handoff with no implementer provenance) and the reviewer would be left with a block. The stamp did not reach the row the kernel read: check that the ticket's assignee was %q when the transition ran. Assign the lane label on a ready ticket and request again.", in.ID, label)
+	case !strings.EqualFold(recorded, label):
+		return ErrorResult("request-review moved ticket %s to 'review' but the kernel recorded implementer=%q, not %q. A request-changes verdict would route to %q. Nothing was undone; re-read the ticket and decide whether that destination is the lane you meant to hand back to.", in.ID, recorded, label, recorded)
+	}
 	return SuccessResult(TicketRequestReviewOut{
-		ID:       after.ID,
-		Status:   after.Status,
-		Assignee: after.Assignee,
-		Note:     note,
+		ID:          after.ID,
+		Status:      after.Status,
+		Assignee:    after.Assignee,
+		Implementer: recorded,
+		Note:        note,
 	})
 }

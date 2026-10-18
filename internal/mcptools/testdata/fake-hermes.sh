@@ -15,7 +15,7 @@ verb=""
 id=""
 for arg in "$@"; do
   case "$arg" in
-    claim|block|request-review) verb="$arg" ;;
+    claim|block|request-review|assign|reassign) verb="$arg" ;;
     *)
       if [ -n "$verb" ] && [ -z "$id" ]; then
         id="$arg"

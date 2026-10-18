@@ -40,15 +40,21 @@ import (
 )
 
 // runningThenReview scripts the GET bodies the completion handoff needs.
-// Three reads happen in order: the claim guard, request-review's own
-// preflight, and request-review's post-condition. The preflight requires
-// ready|running, so the second body must still be running; the third must
-// be the review row the post-condition asserts.
-func runningThenReview(id, reviewer string) []string {
+// Four reads happen in order: the claim guard, request-review's own
+// preflight, the post-stamp read (t_b917c3c6: the lane label lands on the
+// card before the handoff, and a running card is reclaimed to do it), and
+// the post-transition read. The preflight requires ready|running, so the
+// second body must still be running; the third must carry the label the
+// stamp wrote; the fourth must be the review row the post-condition
+// asserts, with the review_requested event the tool reads the recorded
+// implementer from.
+func runningThenReview(id, reviewer, label string) []string {
 	return []string{
 		`{"task":{"id":"` + id + `","title":"T","status":"running"}}`,
 		`{"task":{"id":"` + id + `","title":"T","status":"running"}}`,
-		`{"task":{"id":"` + id + `","title":"T","status":"review","assignee":"` + reviewer + `"}}`,
+		`{"task":{"id":"` + id + `","title":"T","status":"ready","assignee":"` + label + `"}}`,
+		`{"task":{"id":"` + id + `","title":"T","status":"review","assignee":"` + reviewer + `"},` +
+			`"events":[{"id":9,"kind":"review_requested","payload":{"implementer":"` + label + `","reviewer":"` + reviewer + `"}}]}`,
 	}
 }
 
@@ -76,10 +82,11 @@ func TestTCRL_ReviewNeverBlocks(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
 	t.Setenv("MCP_REVIEWER_PROFILE", "default")
+	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", label)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
@@ -101,10 +108,11 @@ func TestTCRL_ReviewHandsOffToNativeLane(t *testing.T) {
 	os.Unsetenv("MCP_COMPLETE_MODE")
 	os.Unsetenv("MCP_ALLOW_SKIP_CLAIM")
 	t.Setenv("MCP_REVIEWER_PROFILE", "default")
+	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", label)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
@@ -119,18 +127,27 @@ func TestTCRL_ReviewHandsOffToNativeLane(t *testing.T) {
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0 (the review transition is CLI-only): %v", n, backend.patches())
 	}
+	// Two CLI writes: the implementer stamp (which is also what releases
+	// the running ticket's claim, via reassign --reclaim) and the handoff.
 	argv := readArgv()
-	if len(argv) != 1 {
-		t.Fatalf("argv lines = %v, want exactly 1 CLI invocation", argv)
+	if len(argv) != 2 {
+		t.Fatalf("argv lines = %v, want the implementer stamp then the handoff", argv)
 	}
-	if !strings.Contains(argv[0], "request-review t_x1") {
-		t.Errorf("argv = %q, want the native request-review handoff", argv[0])
+	if !strings.Contains(argv[0], "reassign t_x1 "+label) || !strings.Contains(argv[0], "--reclaim") {
+		t.Errorf("argv[0] = %q, want the implementer stamp reclaiming the live claim", argv[0])
 	}
-	if !strings.Contains(argv[0], "--reviewer=default") {
-		t.Errorf("argv = %q, want --reviewer=default from MCP_REVIEWER_PROFILE", argv[0])
+	h := handoffArgv(t, argv)
+	if !strings.Contains(h, "request-review t_x1") {
+		t.Errorf("argv = %q, want the native request-review handoff", h)
 	}
-	if !strings.Contains(argv[0], "--force") {
-		t.Errorf("argv = %q, want --force: a running ticket's claim is only released with it", argv[0])
+	if !strings.Contains(h, "--reviewer=default") {
+		t.Errorf("argv = %q, want --reviewer=default from MCP_REVIEWER_PROFILE", h)
+	}
+	// The claim-release authority is exercised ONCE, by the stamp. The
+	// handoff must not also force: the claim is already gone, and a second
+	// override would assert ownership nobody needs.
+	if strings.Contains(h, "--force") {
+		t.Errorf("argv = %q, must not force after the stamp reclaimed the claim", h)
 	}
 
 	out := decodeCompleteOut(t, res)
@@ -172,7 +189,7 @@ func TestTCRL_ReviewHandoffSurfacesRefusal(t *testing.T) {
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "opencode-remote")
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
@@ -199,7 +216,7 @@ func TestTCRL_OverLongSummaryRefusesBeforeWriting(t *testing.T) {
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "opencode-remote")
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{

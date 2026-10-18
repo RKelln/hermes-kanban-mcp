@@ -91,10 +91,14 @@ func requestReviewSchema() map[string]any {
 		"id":       propStr(),
 		"summary":  propStr(),
 		"reviewer": propStr(),
+		"worker": map[string]any{
+			"type":        "string",
+			"description": "Implementer label stamped on the ticket before the handoff, so the kernel records implementer=<label> on the review_requested event and a request-changes verdict can return the card to you. Defaults to MCP_CLAIM_WORKER; the handoff is REFUSED when neither supplies one. It must NOT be an installed profile (the dispatcher would spawn a worker for it when the card comes back) — use the lane's control-plane label, e.g. opencode-remote.",
+		},
 		"force": map[string]any{
 			"type":        "boolean",
 			"default":     false,
-			"description": "Required to move a RUNNING ticket (it releases your live claim; the CLI has no --expected-run-id). Must be omitted for a ready ticket. Only pass it if you claimed the ticket yourself and are requesting review of your own finished work.",
+			"description": "Required to move a RUNNING ticket (it releases your live claim; the CLI has no --expected-run-id). Must be omitted for a ready ticket. Only pass it if you claimed the ticket yourself and are requesting review of your own finished work. It also authorises the implementer stamp, which releases that claim one step earlier.",
 		},
 	}, "id", "board", "summary")
 }
@@ -141,7 +145,7 @@ func Register(srv *mcp.Server, s *Server) {
 		completeSchema(),
 		s.TicketComplete)
 
-	addTool(srv, "ticket_request_review", "Request a FINAL REVIEW of a finished ticket: ready/running -> 'review' via the hermes CLI (not a block). The dispatcher then claims the ticket as a REVIEW run and spawns the sdlc-review reviewer; APPROVE completes it to done, changes come back to you. summary is required — it is the reviewer's handoff (what changed, the refs to verify, what you already proved). reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE; it is VERIFIED against the installed profile roster and refused if it is not a profile the dispatcher can spawn (a non-profile reviewer parks the card in 'review' forever), and when neither source supplies one the kernel's own re-review provenance is used. Moving a RUNNING ticket additionally requires force: true — it releases your live claim, so pass it only for work you claimed yourself. Push your branch FIRST, and do NOT merge before the verdict: done means merge. (id, board and summary required)",
+	addTool(srv, "ticket_request_review", "Request a FINAL REVIEW of a finished ticket: ready/running -> 'review' via the hermes CLI (not a block). The dispatcher then claims the ticket as a REVIEW run and spawns the sdlc-review reviewer; APPROVE completes it to done, changes come back to you. summary is required — it is the reviewer's handoff (what changed, the refs to verify, what you already proved). reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE; it is VERIFIED against the installed profile roster and refused if it is not a profile the dispatcher can spawn (a non-profile reviewer parks the card in 'review' forever), and when neither source supplies one the kernel's own re-review provenance is used. worker is the IMPLEMENTER label stamped on the card before the handoff (explicit worker > MCP_CLAIM_WORKER, and refused when neither supplies one): the kernel records it as the handoff's implementer, which is what lets a request-changes verdict return the card — without it the reviewer can only block. It must NOT be an installed profile, or the dispatcher spawns a worker for it when the card comes back. Moving a RUNNING ticket additionally requires force: true — it releases your live claim (and authorises the implementer stamp, which reclaims it one step earlier), so pass it only for work you claimed yourself. Push your branch FIRST, and do NOT merge before the verdict: done means merge. (id, board and summary required)",
 		requestReviewSchema(),
 		s.TicketRequestReview)
 
