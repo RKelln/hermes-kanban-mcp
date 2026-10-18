@@ -88,9 +88,14 @@ tools (`hermes-kanban-*`).
 - **Comment the refs on the ticket too.** The reviewer resolves the work from the ticket, not
   just from `summary`: after pushing, comment repo + branch + commit SHA + changed files. A
   ticket in review with no commit ref is unreviewable.
-- **Claims TTL ~15 min.** Re-claim before completing if yours expired — completion refuses an
-  unclaimed ticket. `ticket_request_review` accepts a `ready` ticket too, so an expired claim
-  is recoverable either way.
+- **Claim TTL is `MCP_CLAIM_TTL_SECONDS` (default 14400s = 4h).** The bridge passes `--ttl`
+  explicitly on every claim, so the CLI's own 900s default never applies to this lane. There is
+  no heartbeat verb, by design: a TTL that outlives a run plus re-claim as the fallback is the
+  fix, and a new verb for one field is the surface this bridge avoids. If a claim does expire
+  anyway, re-claim before completing — completion refuses an unclaimed ticket, and the
+  dispatcher's reclaim books a FAILED ATTEMPT against the ticket (two of those can give up a
+  ticket whose worker did nothing wrong). `ticket_request_review` accepts a `ready` ticket too,
+  so an expired claim is recoverable either way.
 - Never put credentials in ticket bodies — write `***`.
 
 Prohibited: touching the live `~/.hermes` install tree, SSH to framework, pushing without

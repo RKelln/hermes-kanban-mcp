@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -213,7 +214,10 @@ func decodeOut[T any](t *testing.T, res *ToolResult) T {
 
 func TestTC_ClaimSuccess(t *testing.T) {
 	installFakeBin(t)
-	exp := time.Now().Unix() + 900
+	// Pin the knob so the caller's environment cannot decide what this
+	// asserts; the default world is four hours.
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
 	backend := newClaimBackend()
 	backend.orders["task-ok"] = []string{
 		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
@@ -235,11 +239,15 @@ func TestTC_ClaimSuccess(t *testing.T) {
 	if out.ClaimExpires != exp {
 		t.Errorf("claim_expires = %d, want %d", out.ClaimExpires, exp)
 	}
-	if out.ClaimTTLSeconds <= 0 || out.ClaimTTLSeconds > 900 {
-		t.Errorf("claim_ttl_seconds = %d, want 1..900", out.ClaimTTLSeconds)
+	// The reported TTL is what the bridge ASKED the CLI for.
+	if out.ClaimTTLSeconds != kanban.DefaultClaimTTLSeconds {
+		t.Errorf("claim_ttl_seconds = %d, want %d", out.ClaimTTLSeconds, kanban.DefaultClaimTTLSeconds)
 	}
-	if out.Note != claimNote {
-		t.Errorf("note = %q, want %q", out.Note, claimNote)
+	if out.ClaimTTLSource != "default" {
+		t.Errorf("claim_ttl_source = %q, want %q", out.ClaimTTLSource, "default")
+	}
+	if want := claimNote(kanban.ClaimTTLSettings{Seconds: kanban.DefaultClaimTTLSeconds, Source: "default"}); out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
 	}
 	// authoritative state: exactly 2 GETs (preflight + re-read), no PATCH.
 	if n := backend.getCount("task-ok"); n != 2 {
@@ -247,6 +255,99 @@ func TestTC_ClaimSuccess(t *testing.T) {
 	}
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// TestTC_ClaimTTLFromKnob is the card's core case: the knob reaches the CLI's
+// argv and comes back in the response, with its source named. The argv half is
+// read from the fake CLI's capture file, so this test fails if the tool reports
+// a TTL it did not actually pass.
+func TestTC_ClaimTTLFromKnob(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "7200")
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	t.Setenv("HERMES_FAKE_ARGV_LOG", argvLog)
+	exp := time.Now().Unix() + 7200
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = []string{
+		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
+		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
+	out := decodeOut[TicketClaimOut](t, res)
+	if out.ClaimTTLSeconds != 7200 {
+		t.Errorf("claim_ttl_seconds = %d, want 7200 (the knob's value)", out.ClaimTTLSeconds)
+	}
+	if out.ClaimTTLSource != "MCP_CLAIM_TTL_SECONDS" {
+		t.Errorf("claim_ttl_source = %q, want %q", out.ClaimTTLSource, "MCP_CLAIM_TTL_SECONDS")
+	}
+	if !strings.Contains(out.Note, "7200s") || !strings.Contains(out.Note, "MCP_CLAIM_TTL_SECONDS") {
+		t.Errorf("note = %q, want it to state the applied TTL and its source", out.Note)
+	}
+	if strings.Contains(out.Note, "WARNING") {
+		t.Errorf("note = %q, want no mismatch warning when the kernel agrees with the argv", out.Note)
+	}
+	logged, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("fake CLI captured no argv (%v): the claim path did not reach the CLI", err)
+	}
+	wantArgv := "kanban --board " + testBoard + " claim --ttl 7200 task-ok"
+	if !strings.Contains(string(logged), wantArgv) {
+		t.Errorf("CLI argv = %q, want it to contain %q", strings.TrimSpace(string(logged)), wantArgv)
+	}
+}
+
+// TestTC_ClaimTTLDisagreementWarns is the runtime half of the "do the two
+// agree?" check. A CLI that ignores --ttl is otherwise invisible: the claim
+// succeeds, and the card quietly expires 15 minutes later.
+func TestTC_ClaimTTLDisagreementWarns(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	exp := time.Now().Unix() + 900 // the old CLI default, i.e. the flag was ignored
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = []string{
+		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
+		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
+	out := decodeOut[TicketClaimOut](t, res)
+	if !strings.Contains(out.Note, "WARNING") || !strings.Contains(out.Note, "may have ignored --ttl") {
+		t.Fatalf("note = %q, want a mismatch warning naming --ttl", out.Note)
+	}
+	// The warning must not cost the caller the fact it still needs.
+	if !strings.Contains(out.Note, "re-claim via ticket_claim") {
+		t.Errorf("note = %q, want the re-claim fallback kept alongside the warning", out.Note)
+	}
+	if out.ClaimTTLSeconds != kanban.DefaultClaimTTLSeconds {
+		t.Errorf("claim_ttl_seconds = %d, want the requested %d even though the kernel reported 900", out.ClaimTTLSeconds, kanban.DefaultClaimTTLSeconds)
+	}
+}
+
+// TestTC_ClaimTTLInvalidKnob says what happened: an unusable knob falls back to
+// the documented default and the response admits it rather than looking like the
+// operator's value was applied.
+func TestTC_ClaimTTLInvalidKnob(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "15m")
+	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = []string{
+		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
+		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
+	out := decodeOut[TicketClaimOut](t, res)
+	if out.ClaimTTLSeconds != kanban.DefaultClaimTTLSeconds {
+		t.Errorf("claim_ttl_seconds = %d, want the default %d", out.ClaimTTLSeconds, kanban.DefaultClaimTTLSeconds)
+	}
+	if !strings.Contains(out.ClaimTTLSource, "not a positive integer") {
+		t.Errorf("claim_ttl_source = %q, want it to say the knob was unusable", out.ClaimTTLSource)
 	}
 }
 

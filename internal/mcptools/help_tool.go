@@ -45,7 +45,13 @@ MCP tools for a Hermes kanban board:
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required marker via block_reason or latest_summary);
     replaces per-board scans
-- ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired).
+- ticket_claim    ready->running BEFORE editing. The claim TTL is the server's
+    MCP_CLAIM_TTL_SECONDS (default 14400s = 4h), passed as an explicit --ttl on
+    every call: this lane has no heartbeat verb, so the TTL is the whole margin a
+    run gets. The result reports claim_ttl_seconds and claim_ttl_source
+    (MCP_CLAIM_TTL_SECONDS | default), and says so when the kernel's expiry
+    disagrees with what was asked. If a claim expired anyway, re-claim — the
+    dispatcher's reclaim books a failed attempt against the ticket.
     A non-ready ticket is refused with the reason for THAT status, never a
     generic one — see the claim-refusal facts below before hunting for another
     verb: there is none.
@@ -107,6 +113,12 @@ Lifecycle facts:
 - Claims are kernel-enforced: a ticket with an open parent stays 'todo';
   gate tickets are wired as parents and complete when the human completes
   them (children promote immediately).
+- Claim TTL: MCP_CLAIM_TTL_SECONDS (default 14400s = 4h), passed as an
+  explicit --ttl. There is NO heartbeat verb here and none is planned: a new
+  verb for one field is the shape this bridge avoids, and a TTL that outlives
+  a run plus re-claim as the fallback ends the expiry failure without new
+  surface. At expiry the dispatcher re-queues the card to ready AND books a
+  failed attempt against it, so a reclaim is an alarm, not a tick.
 - Claim refusals are status-truthful, and there is no promote tool here: a
   card moves only by claim, block, request-review and complete. triage: an
   internal intake lane — a specifier rewrites the card, no agent action

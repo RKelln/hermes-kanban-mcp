@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,8 +124,87 @@ func validateTarget(id, board string) error {
 	return nil
 }
 
+// Claim TTL. MCP callers have no heartbeat verb (the kernel's
+// heartbeat_claim demands the same claim_lock as the caller, so a second
+// process cannot renew a claim it did not take), which makes the TTL the
+// entire margin a run gets. Two things make the CLI's own 900s default
+// unusable for this lane:
+//
+//   - at expiry the dispatcher's release_stale_claims re-queues the card to
+//     ready AND books a failed attempt against it (_record_task_failure,
+//     last_failure_error=stale_lock=<lock>), so two routine expiries can
+//     give up a ticket whose worker did nothing wrong; and
+//   - the bridge's claim records worker_pid=None and a claim_lock naming a
+//     subprocess that exited in under a second, so it falls through every
+//     liveness branch release_stale_claims uses to EXTEND a live host
+//     worker. A long TTL costs the local lane nothing and buys this lane
+//     the whole margin.
+//
+// The value is passed as an explicit --ttl argv flag rather than through
+// HERMES_KANBAN_CLAIM_TTL_SECONDS, because that variable does not win on
+// this path: the CLI's argparse default is an explicit call-site value,
+// which outranks the environment in the kernel's resolution order. Measured
+// 2026-10-18 on the live bridge: with HERMES_KANBAN_CLAIM_TTL_SECONDS=3600
+// set in /etc/kanban-mcp.env, claims still expired at created_at + 900s
+// exactly. That is why the env knob had been "fixed" twice without effect.
+const (
+	// DefaultClaimTTLSeconds applies when MCP_CLAIM_TTL_SECONDS is unset,
+	// empty, or not a positive integer: four hours. The statement the
+	// number makes is that a reclaim should mean something went very
+	// wrong, not that a run took a while. It is a knob, so moving it is
+	// cheap; this default is the contract.
+	DefaultClaimTTLSeconds int64 = 14400
+
+	// ClaimTTLEnv is the knob that overrides DefaultClaimTTLSeconds. It
+	// is read at call time by ResolveClaimTTL, not through
+	// internal/config: the value only ever becomes argv, and the claim
+	// shell-out is the only consumer.
+	ClaimTTLEnv = "MCP_CLAIM_TTL_SECONDS"
+)
+
+// Claim TTL source labels. Source is reported back to the caller so a claim
+// response says which world it is in: an operator-set value, the default,
+// or the default chosen because the operator's value could not be used.
+const (
+	claimTTLSourceEnv     = ClaimTTLEnv
+	claimTTLSourceDefault = "default"
+	claimTTLSourceInvalid = "default (MCP_CLAIM_TTL_SECONDS is not a positive integer)"
+)
+
+// ClaimTTLSettings is a resolved claim TTL: the seconds handed to the CLI
+// and a short label for where that number came from. Passing this struct
+// (rather than letting each layer re-read the environment) is what keeps
+// the reported TTL and the argv TTL from disagreeing.
+type ClaimTTLSettings struct {
+	Seconds int64  `json:"seconds"`
+	Source  string `json:"source"`
+}
+
+// ResolveClaimTTL reads MCP_CLAIM_TTL_SECONDS and returns the TTL to pass
+// plus its source. It never returns a non-positive TTL: a broken knob falls
+// back to the documented default and says so in Source, because a silent
+// fallback is the failure that let this defect survive two deployment-side
+// "fixes".
+func ResolveClaimTTL() ClaimTTLSettings {
+	raw := strings.TrimSpace(os.Getenv(ClaimTTLEnv))
+	if raw == "" {
+		return ClaimTTLSettings{Seconds: DefaultClaimTTLSeconds, Source: claimTTLSourceDefault}
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return ClaimTTLSettings{Seconds: DefaultClaimTTLSeconds, Source: claimTTLSourceInvalid}
+	}
+	return ClaimTTLSettings{Seconds: n, Source: claimTTLSourceEnv}
+}
+
 // Claim atomically claims a kanban task by shelling out to
-// `hermes kanban --board <board> claim <id>`.
+// `hermes kanban --board <board> claim --ttl <seconds> <id>`.
+//
+// The TTL comes from ResolveClaimTTL (MCP_CLAIM_TTL_SECONDS, default
+// DefaultClaimTTLSeconds). The flag position matches the real CLI: --ttl is
+// defined on the claim subparser so it parses before or after the id
+// (probed 2026-10-18), and the argv here follows the order `hermes kanban
+// claim --help` prints. --board still has to precede the verb.
 //
 // worker is accepted for API compatibility with the MCP layer but is not
 // passed to the CLI: as of 2026-08 the real `hermes kanban claim` defines
@@ -134,8 +214,22 @@ func validateTarget(id, board string) error {
 // stdout and stderr are the (4 KiB-capped) CLI streams; err is non-nil on
 // argument rejection, missing binary, timeout, or non-zero exit.
 func Claim(ctx context.Context, id, board, worker string) (stdout, stderr string, err error) {
+	return ClaimWithTTL(ctx, id, board, worker, ResolveClaimTTL())
+}
+
+// ClaimWithTTL is Claim with an explicit TTL, for the caller that has to
+// report the applied TTL to a user: it resolves once, passes it here, and
+// echoes the same struct back, so the two cannot drift.
+//
+// A non-positive Seconds is repaired to the default rather than emitted:
+// `hermes kanban claim --ttl 0` parses (the CLI does not validate it) and
+// would hand the dispatcher a claim that is stale on arrival.
+func ClaimWithTTL(ctx context.Context, id, board, worker string, ttl ClaimTTLSettings) (stdout, stderr string, err error) {
 	if err := validateTarget(id, board); err != nil {
 		return "", "", fmt.Errorf("claim: %w", err)
+	}
+	if ttl.Seconds <= 0 {
+		ttl = ClaimTTLSettings{Seconds: DefaultClaimTTLSeconds, Source: claimTTLSourceDefault}
 	}
 	bin, ok := resolveBin()
 	if !ok {
@@ -143,7 +237,7 @@ func Claim(ctx context.Context, id, board, worker string) (stdout, stderr string
 	}
 	// --board only parses before the verb in the real CLI (probed
 	// 2026-08); after the subcommand argparse rejects it.
-	argv := []string{"kanban", "--board", board, "claim", id}
+	argv := []string{"kanban", "--board", board, "claim", "--ttl", strconv.FormatInt(ttl.Seconds, 10), id}
 	return run(ctx, bin, argv, "claim")
 }
 

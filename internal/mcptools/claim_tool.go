@@ -9,6 +9,14 @@ package mcptools
 // the ticket and returns the authoritative post-claim state — never the
 // CLI's stdout.
 //
+// The claim TTL is passed explicitly (MCP_CLAIM_TTL_SECONDS, default four
+// hours — see internal/kanban/claim.go) because this lane has no heartbeat
+// verb: at the CLI's own 900s default every claim dies mid-run and the
+// dispatcher books a FAILED ATTEMPT against the ticket when it reclaims.
+// The response reports the TTL and its source, and warns when the kernel's
+// expiry disagrees with what was asked — the one runtime signal that the CLI
+// stopped honouring the flag.
+//
 // The preflight is also where the refusal has to be truthful. The old
 // blanket refusal boiled every non-ready status down to "not ready, so
 // not claimable": it said nothing about WHICH lane the ticket was in and
@@ -52,21 +60,57 @@ type TicketClaimInput struct {
 }
 
 // TicketClaimOut is the authoritative post-claim projection. Every field
-// is re-read from the backend after the claim (GetTask), so the caller
-// sees the kernel's state, not the CLI's output.
+// but the TTL pair is re-read from the backend after the claim (GetTask), so
+// the caller sees the kernel's state, not the CLI's output.
+//
+// ClaimTTLSeconds is the TTL the bridge ASKED the CLI for (MCP_CLAIM_TTL_
+// SECONDS, else the 4h default) — not the remaining lifetime; ClaimExpires
+// is the kernel's authoritative expiry, so remaining is ClaimExpires minus
+// now. ClaimTTLSource says which of those supplied the number, and Note
+// carries a warning when the two disagree, which is the signature of a CLI
+// that ignored --ttl.
 type TicketClaimOut struct {
 	ID              string `json:"id"`
 	Status          string `json:"status"`
 	Assignee        string `json:"assignee"`
 	ClaimExpires    int64  `json:"claim_expires"`
 	ClaimTTLSeconds int64  `json:"claim_ttl_seconds"`
+	ClaimTTLSource  string `json:"claim_ttl_source"`
 	Note            string `json:"note"`
 }
 
-// claimNote is the stable note on every successful claim: the claim TTL
-// is ~15 minutes, and once it expires the dispatcher re-queues the
-// ticket to ready, at which point ticket_claim works again.
-const claimNote = "claim TTL ~15m; re-claim via ticket_claim if it expires"
+// claimTTLGraceSeconds is how far the kernel's recorded expiry may fall
+// short of the requested TTL before claimTTLWarning calls it a mismatch.
+// The bridge re-reads the ticket within a second of the claim, so a healthy
+// claim is within one or two seconds of what was asked; a minute is slack
+// for clock skew between the bridge and the dashboard, not for a wrong TTL.
+const claimTTLGraceSeconds int64 = 60
+
+// claimNote is the note on every successful claim: the TTL the bridge asked
+// for, where that number came from, and the re-claim fallback. It replaces a
+// fixed fifteen-minute line that described the CLI's built-in default — that
+// is, the defect, stated as the contract (t_cb0d23c0).
+func claimNote(ttl kanban.ClaimTTLSettings) string {
+	return fmt.Sprintf("claim TTL %ds (%s); a reclaim books a failed attempt, so re-claim via ticket_claim if yours expired",
+		ttl.Seconds, ttl.Source)
+}
+
+// claimTTLWarning reports a disagreement between the TTL the bridge passed
+// and the expiry the kernel recorded, or "" when they agree. It is the
+// runtime half of the "do the two agree?" check: a CLI that ignores --ttl
+// would otherwise keep the old 900s silently, which is exactly how this
+// defect survived two fixes applied on the deployment side.
+func claimTTLWarning(ttl kanban.ClaimTTLSettings, claimExpires int64) string {
+	if claimExpires <= 0 {
+		return ""
+	}
+	rem := claimExpires - time.Now().Unix()
+	if rem+claimTTLGraceSeconds >= ttl.Seconds {
+		return ""
+	}
+	return fmt.Sprintf("WARNING: kernel expiry is %ds out but %ds was requested; the CLI may have ignored --ttl",
+		rem, ttl.Seconds)
+}
 
 // TicketClaim implements the ticket_claim MCP tool: validate, fail fast
 // when HERMES_BIN is missing, preflight the ticket status over REST
@@ -88,6 +132,9 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 	if err := kanban.CLIBinUnavailable("claim"); err != nil {
 		return ErrorResult("%s", err)
 	}
+	// Resolve the TTL once, here: the same value goes into argv and into the
+	// response, so a caller can never be told a TTL that was not passed.
+	ttl := kanban.ResolveClaimTTL()
 
 	ts, parents, err := s.claimPreflight(ctx, board, in.ID)
 	if err != nil {
@@ -102,7 +149,7 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 		return ErrorResult("%s", claimRefusal(ts.Status, parents))
 	}
 
-	if _, stderr, err := kanban.Claim(ctx, in.ID, board, in.Worker); err != nil {
+	if _, stderr, err := kanban.ClaimWithTTL(ctx, in.ID, board, in.Worker, ttl); err != nil {
 		return ErrorResult("%s", cliFailureText(stderr, err))
 	}
 
@@ -110,13 +157,23 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
+	// The TTL pair comes from what was ASKED (resolved once, above, and
+	// passed to the CLI), not from a fresh read of the environment, so the
+	// argv and the response cannot disagree. ClaimExpires is the kernel's
+	// own answer; a warning when the two are far apart is the only runtime
+	// way to see a CLI that stopped honouring --ttl.
+	note := claimNote(ttl)
+	if warn := claimTTLWarning(ttl, after.ClaimExpires); warn != "" {
+		note = warn + "; " + note
+	}
 	return SuccessResult(TicketClaimOut{
 		ID:              after.ID,
 		Status:          after.Status,
 		Assignee:        after.Assignee,
 		ClaimExpires:    after.ClaimExpires,
-		ClaimTTLSeconds: ttlSeconds(after.ClaimExpires),
-		Note:            claimNote,
+		ClaimTTLSeconds: ttl.Seconds,
+		ClaimTTLSource:  ttl.Source,
+		Note:            note,
 	})
 }
 
@@ -292,16 +349,4 @@ func cliFailureText(stderr string, err error) string {
 		}
 	}
 	return clampRunes(err.Error(), maxCLIErrorRunes)
-}
-
-// ttlSeconds is the remaining claim lifetime in whole seconds, floored
-// at zero when the lock already expired or the backend reported none.
-func ttlSeconds(claimExpires int64) int64 {
-	if claimExpires <= 0 {
-		return 0
-	}
-	if rem := claimExpires - time.Now().Unix(); rem > 0 {
-		return rem
-	}
-	return 0
 }
