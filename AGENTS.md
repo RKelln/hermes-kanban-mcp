@@ -40,7 +40,7 @@ tools (`hermes-kanban-*`).
   **Source** (repo, who asked, when, requirement verbatim — never a pointer to a file outside the repo).
 - Work on a **feature branch**, never `main`: `git checkout -b <type>/<ticket-id>-<desc>`.
   The human merges to main during review; the agent does not self-merge.
-- Workflow: `ticket_create` (lands `ready`; `triage: true` for triage) → `ticket_claim`
+- Workflow: `ticket_create` (lands `ready`, or `todo` behind `parents`) → `ticket_claim`
   right before editing (ready→running) → `ticket_comment` as you work → push → record the
   commit SHA in a ticket comment → **request review**. Two completion paths exist and both
   are live:
@@ -60,6 +60,15 @@ tools (`hermes-kanban-*`).
     native review lane, so it lands in `review` exactly as `ticket_request_review` leaves
     it. It does **not** write the older `review-required` block: nothing consumes that
     shape since the review-sweeper retired, so a card blocked that way strands.
+- **`triage` is not a lane you can use.** It is the kernel's internal intake lane for
+  under-specified input: its exit is a specifier that REWRITES the card's title and body,
+  run inside Hermes, and this bridge cannot spec. `ticket_create` refuses `triage: true`,
+  the bridge never writes there, and there is no agent "later" lane either — if a card is
+  not yours to start, comment why, or block it with `kind: "needs_input"`.
+  `ticket_claim`'s refusal tells you which lane you are actually in: triage names no verb
+  (surface it to a human), `todo` names the parent ids it is waiting on, `scheduled` is
+  waiting on time, and `running`/`review` are held by a claim or a reviewer. There is no
+  promote companion tool to look for.
 - **Push BEFORE requesting review.** The reviewer reads the pushed commit, and a ticket
   whose branch is not on origin cannot be reviewed at all. If your work is already merged
   and the branch deleted, say so in `summary` and name the merge commit and the range to
@@ -73,8 +82,9 @@ tools (`hermes-kanban-*`).
   - `done` → the review passed → merge your branch to main (the reviewer never merges);
   - `ready` → REQUEST CHANGES → re-claim, fix, push, request review again;
   - still `blocked` with an ESCALATE comment → surface to the human; do not re-loop;
-  - `triage` → the kernel's block-loop breaker parked it mid-cycle; surface to the human
-    rather than re-completing (each cycle worsens it).
+  - `triage` → the internal intake lane, which has nothing you can claim (the kernel's
+    block-loop breaker also parks a card here at its limit); surface it to the human rather
+    than re-completing (each cycle worsens it).
 - **Comment the refs on the ticket too.** The reviewer resolves the work from the ticket, not
   just from `summary`: after pushing, comment repo + branch + commit SHA + changed files. A
   ticket in review with no commit ref is unreviewable.

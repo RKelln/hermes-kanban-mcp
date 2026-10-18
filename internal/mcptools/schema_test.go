@@ -103,6 +103,9 @@ func TestNonPerTicketSchemasBoardRequired(t *testing.T) {
 		t.Errorf("ticket_list required = %v, want [board]", r)
 	}
 
+	// ticket_create advertises no triage property (t_6053ef34): the lane is
+	// internal intake, and a schema that offers it is a schema that promises
+	// an exit the bridge cannot give.
 	ticketCreate := objReq(map[string]any{
 		"board":           propStr(),
 		"title":           propStr(),
@@ -112,7 +115,6 @@ func TestNonPerTicketSchemasBoardRequired(t *testing.T) {
 		"workspace_kind":  propStr(),
 		"parents":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 		"skills":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-		"triage":          propBool(),
 		"idempotency_key": propStr(),
 	}, "board")
 	if r := objSchemaRequired(ticketCreate); !reflect.DeepEqual(r, []string{"board"}) {
@@ -298,6 +300,23 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 		}
 	}
 
+	// ticket_create must not advertise triage ON THE WIRE (t_6053ef34).
+	// The isolated schema tests pin a hand-built map; this reads what
+	// Register() actually serves to every MCP client, which is the surface
+	// an agent's tool list renders. Re-adding the property here reintroduces
+	// the lane with no agent step in and no agent step out.
+	tc, ok := tools["ticket_create"]
+	if !ok {
+		t.Fatalf("tool %q not registered", "ticket_create")
+	}
+	props := wireSchemaProps(tc.InputSchema)
+	if props == nil {
+		t.Fatalf("ticket_create InputSchema has no properties map: %#v", tc.InputSchema)
+	}
+	if _, ok := props["triage"]; ok {
+		t.Error("ticket_create advertises a triage input on the wire: triage is Hermes' internal intake lane (a specifier rewrites the card), and no agent-facing verb leaves it")
+	}
+
 	// Every registered tool must be covered by one of the lists above; a
 	// tool added to Register() without a list here fails the wiring test
 	// rather than silently passing an uncategorized schema.
@@ -310,6 +329,18 @@ func TestRegisterWiresRequiredSchemas(t *testing.T) {
 			t.Errorf("registered tool %q is not covered by the per-ticket/board-required/no-required lists", name)
 		}
 	}
+}
+
+// wireSchemaProps returns the "properties" map of a JSON Schema as it
+// arrives over the wire (mcp.Tool.InputSchema is `any`, decoded to
+// map[string]any by the client).
+func wireSchemaProps(schema any) map[string]any {
+	m, ok := schema.(map[string]any)
+	if !ok {
+		return nil
+	}
+	props, _ := m["properties"].(map[string]any)
+	return props
 }
 
 // schemaRequired extracts the "required" array from a JSON Schema object.

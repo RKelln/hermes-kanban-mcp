@@ -9,6 +9,17 @@ package mcptools
 // the ticket and returns the authoritative post-claim state — never the
 // CLI's stdout.
 //
+// The preflight is also where the refusal has to be truthful. The old
+// blanket refusal boiled every non-ready status down to "not ready, so
+// not claimable": it said nothing about WHICH lane the ticket was in and
+// read like a missing step the caller could take, which on t_a6e3ba60
+// (2026-10-18) sent an agent hunting for a promote verb that has never
+// existed in this bridge. Each non-claimable status now gets the reason
+// for that status, and only a status with a real agent action names one.
+// Triage in particular names no verb: it is the kernel's internal intake
+// lane, a specifier rewrites the card, and the only step for an agent is
+// to surface it to a human.
+//
 // ticket_block routes typed kinds (dependency|needs_input|capability|
 // transient) through the hardened CLI path and keeps T5's REST fallback
 // engaged: when the CLI is unavailable the untyped REST PATCH still runs,
@@ -16,6 +27,7 @@ package mcptools
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -77,7 +89,7 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 		return ErrorResult("%s", err)
 	}
 
-	ts, err := s.GetTask(ctx, board, in.ID)
+	ts, parents, err := s.claimPreflight(ctx, board, in.ID)
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
@@ -87,7 +99,7 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 	case ts.Status == "running" && ts.ClaimLock != "" && ts.ClaimExpires > time.Now().Unix():
 		return ErrorResult("already claimed (expires %d)", ts.ClaimExpires)
 	default:
-		return ErrorResult("cannot claim: ticket is %s, claim requires ready", ts.Status)
+		return ErrorResult("%s", claimRefusal(ts.Status, parents))
 	}
 
 	if _, stderr, err := kanban.Claim(ctx, in.ID, board, in.Worker); err != nil {
@@ -106,6 +118,73 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 		ClaimTTLSeconds: ttlSeconds(after.ClaimExpires),
 		Note:            claimNote,
 	})
+}
+
+// claimEnvelope is the claim preflight projection: the GET the tool
+// already makes, decoded for just the fields the decision needs. Parents
+// are the one extra fact (the envelope carries them twice — the task
+// dict's own `parents` array and the sibling `links.parents`), and they
+// are what turns "ticket is todo" into an actionable sentence. Parent
+// STATUSES are not in this projection and are not fetched: naming which
+// parent is still open would cost one request per parent, and the card
+// promotes itself when the last one completes.
+type claimEnvelope struct {
+	Task struct {
+		kanban.TaskSummary
+		Parents []string `json:"parents,omitempty"`
+	} `json:"task"`
+	Links *kanban.Links `json:"links"`
+}
+
+// claimPreflight reads the ticket once and returns the summary the claim
+// decision needs plus its parent ids. The preflight and the post-claim
+// re-read are separate GETs on purpose: the second one is the
+// authoritative state, and this one must not be cached.
+func (s *Server) claimPreflight(ctx context.Context, board, id string) (*kanban.TaskSummary, []string, error) {
+	var env claimEnvelope
+	if err := s.doJSON(ctx, http.MethodGet, "/tasks/"+url.PathEscape(id), url.Values{"board": []string{board}}, nil, &env); err != nil {
+		return nil, nil, err
+	}
+	parents := env.Task.Parents
+	if env.Links != nil && len(env.Links.Parents) > 0 {
+		parents = env.Links.Parents
+	}
+	return &env.Task.TaskSummary, parents, nil
+}
+
+// claimRefusal is the one-line reason a non-ready ticket cannot be
+// claimed, told per status. The rule: say what the lane MEANS and who
+// moves the card, and name an agent action only when one exists. Triage
+// gets no verb at all (no agent can spec it and no bridge tool leaves
+// it); todo names its parents because the kernel's promotion is what ends
+// that state; review and running name the holder to wait on. The
+// fallback still refuses, but admits it does not know the lane.
+func claimRefusal(status string, parents []string) string {
+	switch status {
+	case "triage":
+		return "cannot claim: ticket is triage, an internal intake lane where a specifier rewrites the card; no agent action exists, so surface it to a human"
+	case "todo":
+		if len(parents) > 0 {
+			return fmt.Sprintf("cannot claim: ticket is todo, waiting on parent dependencies: %s (the kernel promotes it to ready when they complete)", strings.Join(parents, ", "))
+		}
+		return "cannot claim: ticket is todo with no parent dependencies; the kernel should have promoted it to ready, so surface it to a human"
+	case "scheduled":
+		return "cannot claim: ticket is scheduled, waiting on its scheduled time and not dispatchable now"
+	case "blocked":
+		return "cannot claim: ticket is blocked and must be unblocked first; ticket_get shows the block_reason, and this bridge has no unblock tool"
+	case "running":
+		return "cannot claim: ticket is running without a live claim lock; the dispatcher owns it, so wait for ticket_events or surface it to a human"
+	case "review":
+		return "cannot claim: ticket is in review, the reviewer holds it; wait for the verdict with ticket_events"
+	case "done":
+		return "cannot claim: ticket is done, there is nothing left to claim"
+	case "archived":
+		return "cannot claim: ticket is archived, it is out of the workflow"
+	case "":
+		return "cannot claim: the ticket projection carries no status; surface it to a human"
+	default:
+		return fmt.Sprintf("cannot claim: ticket is %s, which is not a claimable state; surface it to a human", status)
+	}
 }
 
 // TicketBlockInput is the ticket_block tool input. ID and reason are
