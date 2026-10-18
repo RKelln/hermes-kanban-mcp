@@ -325,6 +325,15 @@ Then make one real `ticket_request_review` call and check the ticket reaches
 event means the call returned an error and you are looking at a handoff from an
 older build: the tool now refuses rather than recording null.
 
+The reviewer is settled BEFORE the implementer stamp, because that stamp moves
+the ticket's assignee: an explicit `reviewer`, else `MCP_REVIEWER_PROFILE`, else
+the reviewer recorded on the ticket's last changes-requested round. With no
+source at all the call is refused before anything is written: with the flag
+omitted the kernel keeps whatever assignee the card carries, and the stamp has
+just set that to the lane label. So the review row's assignee is always a value
+verified against the installed roster, and the handoff always passes it
+explicitly.
+
 ## Rollback
 
 ```sh

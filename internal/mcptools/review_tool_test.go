@@ -20,9 +20,15 @@ package mcptools
 //     installed profile makes the dispatcher spawn a worker when changes
 //     come back — the inverse strand, and the reason the label is checked
 //     in the opposite direction from the reviewer.
-//   - TestTRR_AssigneeIsNotUsedAsReviewer: after a request-changes
-//     verdict the kernel sets assignee = the implementer, so falling back
-//     to the assignee would make round 2 a self-review.
+//   - TestTRR_NoReviewerReusesPriorRoundReviewer / TestTRR_NoReviewer
+//     NoProvenanceRefusedBeforeStamp: with no reviewer argument and no
+//     MCP_REVIEWER_PROFILE the tool resolves the reviewer from the
+//     ticket's last changes-requested round and refuses (before the stamp)
+//     when there is none. The kernel's own fallback is the row's existing
+//     assignee, which the stamp has just moved to the lane label, so
+//     "verify the existing assignee as the reviewer" verified a value the
+//     handoff itself destroyed — the F1 defect in the round-2 review of
+//     t_b917c3c6.
 //   - TestTRR_RunningRequiresForce / TestTRR_ForceRejectedOnReady: the
 //     bridge cannot verify claim ownership, so releasing a live claim is
 //     an explicit caller decision and never automatic.
@@ -32,6 +38,7 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -470,24 +477,35 @@ func TestTRR_UnverifiedRosterRefused(t *testing.T) {
 	assertNoCLI(t, readArgv())
 }
 
-// F3 regression (MEDIUM): after request-changes the kernel sets
-// assignee = the implementer, so SUBSTITUTING the assignee as the reviewer
-// would make round 2 a self-review. With no reviewer configured the tool
-// must omit --reviewer and leave the kernel's own choice intact.
+// F1 (review, round 2) — the omit-reviewer path, rewritten against what
+// the kernel actually does.
 //
-// Note what this test does NOT claim: it is not a licence to skip
-// verification. The assignee here is a roster member, so the review row is
-// dispatchable; TestTRR_PreservedNonSpawnableAssigneeRefused covers the
-// non-spawnable case, which an earlier version of this test blessed.
-func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
+// The old version of this test asserted that the tool omits --reviewer and
+// leaves "the kernel's own choice" intact, then scripted the post row with
+// the ticket's PRE-STAMP assignee. With no --reviewer the kernel resolves an
+// actual re-review from the ticket's latest changes-requested round, but on
+// a first review it keeps whatever assignee the row already carries — and
+// the implementer stamp has moved that to the lane label by then. So the
+// fixture described a row the kernel can only produce when nothing was
+// stamped, and the case it existed to protect (round 2, a card that came
+// back from a verdict) was the one that could not run.
+//
+// The reusable case: a card whose last round was changes-requested carries
+// assignee = the lane label and the reviewer on its changes_requested
+// event. The tool reuses THAT reviewer, verifies it, and passes it
+// explicitly — never the assignee, which is the label.
+func TestTRR_NoReviewerReusesPriorRoundReviewer(t *testing.T) {
 	noEnvReviewer(t)
 	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
+	priorRound := `{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
+		`"events":[{"id":4,"kind":"review_requested","payload":{"implementer":"opencode-remote","reviewer":"bob"}},` +
+		`{"id":5,"kind":"changes_requested","payload":{"reason":"fix it","implementer":"opencode-remote","reviewer":"bob","status":"ready"}}]}`
 	backend.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"bob"}}`,
-		stampedRow("t_x1", "ready", label),
-		reviewRow("t_x1", "bob", fmt.Sprintf("%q", label)),
+		priorRound, // preflight
+		priorRound, // event log for the provenance lookup
+		reviewRow("t_x1", "bob", fmt.Sprintf("%q", label)), // post-transition
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -497,37 +515,74 @@ func TestTRR_AssigneeIsNotSubstitutedAsReviewer(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
 	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if out.Assignee != "bob" {
+		t.Errorf("assignee = %q, want bob (the prior round's reviewer)", out.Assignee)
+	}
+	if out.Implementer != label {
+		t.Errorf("implementer = %q, want %q", out.Implementer, label)
+	}
+	if !strings.Contains(out.Note, "changes-requested round") {
+		t.Errorf("note = %q, want it to name where the reviewer came from", out.Note)
+	}
 	argv := readArgv()
-	if len(argv) != 2 {
-		t.Fatalf("argv = %v, want the stamp then the handoff", argv)
+	// The label is already on the card, so there is nothing to stamp.
+	if len(argv) != 1 {
+		t.Fatalf("argv = %v, want only the handoff", argv)
 	}
-	if strings.Contains(argv[1], "--reviewer=") {
-		t.Errorf("argv[1] = %q, must omit --reviewer so the kernel's own choice applies", argv[1])
+	if !strings.Contains(argv[0], "request-review t_x1") || !strings.Contains(argv[0], "--reviewer=bob") {
+		t.Errorf("argv[0] = %q, want the handoff with --reviewer=bob", argv[0])
 	}
-	if out := decodeOut[TicketRequestReviewOut](t, res); !strings.Contains(out.Note, "previous review round") {
-		t.Errorf("note = %q, want it to state the kernel's provenance was used", out.Note)
-	}
-	// The preserved assignee is still VERIFIED for spawnability — that is
-	// the difference between checking a value and substituting it — and
-	// the implementer label is verified in the opposite direction.
-	if n := backend.profileProbes(); n != 3 {
-		t.Errorf("profile probes = %d, want 3 (reviewer, implementer, landed assignee)", n)
+	if strings.Contains(argv[0], "--reviewer="+label) {
+		t.Errorf("argv[0] = %q, substituted the lane label as the reviewer", argv[0])
 	}
 }
 
-// Round-2 F1 regression (HIGH): with no reviewer supplied, the kernel
-// PRESERVES the existing assignee. If that assignee is not a spawnable
-// profile the card sits in 'review' forever — the exact strand — so the
-// tool must refuse before creating it.
-func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
+// F1's core, first round: no reviewer argument, no server default, and no
+// earlier verdict to reuse one from. The old code fell back to the ticket's
+// assignee, verified it, stamped OVER it, and then handed off with no
+// --reviewer — at which point the kernel kept the stamped assignee, so the
+// review row landed on the lane label and stranded. Nothing may be written
+// before this refusal: no stamp, no PATCH, no CLI.
+func TestTRR_NoReviewerNoProvenanceRefusedBeforeStamp(t *testing.T) {
 	noEnvReviewer(t)
 	withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
-	// "ryan" and "parent-worker" are real non-spawnable assignees on this
-	// host (`hermes kanban assignees`: default yes, ryan no).
 	backend.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"}}`,
+		`{"task":{"id":"t_x1","title":"T","status":"running","assignee":"default"},"events":[]}`,
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Force: true,
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError with no reviewer source, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"no reviewer resolved", "MCP_REVIEWER_PROFILE", "keeps whatever assignee"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// The reused reviewer must still be a profile the dispatcher can spawn: a
+// reviewer profile deleted since the last round would park the card in
+// 'review' with nobody to run it. Refuse before the stamp, naming the
+// provenance so the operator knows which value is stale.
+func TestTRR_NoReviewerProvenanceNotSpawnableRefused(t *testing.T) {
+	noEnvReviewer(t)
+	withClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
+			`"events":[{"id":5,"kind":"changes_requested","payload":{"reason":"r","implementer":"opencode-remote","reviewer":"ryan","status":"ready"}}]}`,
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -535,46 +590,195 @@ func TestTRR_PreservedNonSpawnableAssigneeRefused(t *testing.T) {
 		ID: "t_x1", Board: testBoard, Summary: "s",
 	})
 	if !res.IsError {
-		t.Fatalf("expected IsError for a preserved non-spawnable assignee, got success: %s", res.Content[0].Text)
+		t.Fatalf("expected IsError for a stale prior reviewer, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"ryan", "not an installed profile", "MCP_REVIEWER_PROFILE", "alice"} {
+	for _, want := range []string{"ryan", "not an installed profile", "MCP_REVIEWER_PROFILE"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
 	}
 	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
-		t.Errorf("PATCH count = %d, want 0 (must not create the stranded row)", n)
-	}
-
-	// Same card, but with a configured reviewer: now it proceeds, and the
-	// configured reviewer is used rather than the preserved assignee.
-	// Fresh backend: scripted orders repeat their last body, and the first
-	// half already consumed a GET.
-	t.Setenv("MCP_REVIEWER_PROFILE", "bob")
-	backend2 := newClaimBackend()
-	backend2.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"ryan"}}`,
-		stampedRow("t_x1", "ready", "opencode-remote"),
-		reviewRow("t_x1", "bob", `"opencode-remote"`),
-	}
-	readArgv2 := argvLog(t)
-	s2 := newClaimToolServer(t, backend2)
-	res = s2.TicketRequestReview(context.Background(), TicketRequestReviewInput{
-		ID: "t_x1", Board: testBoard, Summary: "s",
-	})
-	if res.IsError {
-		t.Fatalf("expected success with a configured reviewer, got IsError: %s", res.Content[0].Text)
-	}
-	argv := readArgv2()
-	if len(argv) != 2 || !strings.Contains(argv[1], "--reviewer=bob") {
-		t.Fatalf("argv = %v, want the stamp then a handoff with --reviewer=bob", argv)
+		t.Errorf("PATCH count = %d, want 0", n)
 	}
 }
 
-// Round-2 F1, second half: the assignee that ACTUALLY LANDS can differ from
-// the one requested (the kernel prefers its own prior-reviewer provenance).
-// The post-condition must check what landed, not what was asked for.
+// The invariant F1 broke, asserted directly: every successful handoff
+// carries an explicit --reviewer, so the review row's assignee is always a
+// value this tool verified. A handoff that omits the flag hands the choice
+// to the kernel, and then nothing here can promise what the row carries —
+// which is how a review row ended up assigned to the lane label.
+func TestTRR_EverySuccessPathPassesReviewer(t *testing.T) {
+	cases := []struct {
+		name    string
+		review  string
+		env     string
+		bodies  []string
+		wantRev string
+	}{
+		{
+			name:   "from the argument",
+			review: "alice",
+			bodies: []string{
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"}}`,
+				reviewRow("t_x1", "alice", `"opencode-remote"`),
+			},
+			wantRev: "alice",
+		},
+		{
+			name: "from MCP_REVIEWER_PROFILE",
+			env:  "bob",
+			bodies: []string{
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"}}`,
+				reviewRow("t_x1", "bob", `"opencode-remote"`),
+			},
+			wantRev: "bob",
+		},
+		{
+			name: "from the prior changes-requested round",
+			bodies: []string{
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
+					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"opencode-remote"}}]}`,
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
+					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"opencode-remote"}}]}`,
+				reviewRow("t_x1", "carol", `"opencode-remote"`),
+			},
+			wantRev: "carol",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			noEnvReviewer(t)
+			withClaimWorker(t)
+			if tc.env != "" {
+				t.Setenv("MCP_REVIEWER_PROFILE", tc.env)
+			}
+			readArgv := argvLog(t)
+			backend := newClaimBackend()
+			backend.orders["t_x1"] = tc.bodies
+			s := newClaimToolServer(t, backend)
+
+			res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+				ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: tc.review,
+			})
+			if res.IsError {
+				t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+			}
+			var handoffs int
+			for _, line := range readArgv() {
+				if !strings.Contains(line, "request-review") {
+					continue
+				}
+				handoffs++
+				if !strings.Contains(line, "--reviewer="+tc.wantRev) {
+					t.Errorf("handoff = %q, want --reviewer=%s", line, tc.wantRev)
+				}
+			}
+			if handoffs != 1 {
+				t.Fatalf("handoffs = %d, want exactly 1", handoffs)
+			}
+			if out := decodeOut[TicketRequestReviewOut](t, res); out.Assignee != tc.wantRev {
+				t.Errorf("landed assignee = %q, want %q", out.Assignee, tc.wantRev)
+			}
+		})
+	}
+}
+
+// F2 (review, round 2): on a RUNNING card the stamp is `reassign
+// --reclaim`, so a failed handoff leaves the caller's claim released and
+// the card ready under the lane label. The stamp's own failure path says
+// so; the handoff's failure path must not disagree by staying silent.
+func TestTRR_HandoffFailureAfterReclaimTellsCaller(t *testing.T) {
+	noEnvReviewer(t)
+	label := withClaimWorker(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["task-reviewfail"] = []string{
+		`{"task":{"id":"task-reviewfail","title":"T","status":"running"}}`,
+		stampedRow("task-reviewfail", "ready", label),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "task-reviewfail", Board: testBoard, Summary: "s", Reviewer: "alice", Force: true,
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"re-review has no durable reviewer provenance", "may now be ready", "your claim is gone"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to contain %q", res.Content[0].Text, want)
+		}
+	}
+	argv := readArgv()
+	if len(argv) != 2 {
+		t.Fatalf("argv = %v, want the reclaiming stamp then the handoff", argv)
+	}
+	if !strings.Contains(argv[0], "reassign task-reviewfail "+label) || !strings.Contains(argv[0], "--reclaim") {
+		t.Errorf("argv[0] = %q, want reassign --reclaim on the running ticket", argv[0])
+	}
+}
+
+// reviewRoundReviewer is the provenance reader the omit path now depends
+// on: the NEWEST changes_requested event wins, a null reviewer is reported
+// as an empty (not missing) one, and an undecodable payload is its own
+// case so the refusal can say which it was.
+func TestReviewRoundReviewer(t *testing.T) {
+	ev := func(s string) json.RawMessage { return json.RawMessage(s) }
+	cases := []struct {
+		name    string
+		events  []json.RawMessage
+		want    string
+		found   bool
+		decoded bool
+	}{
+		{name: "no events", events: nil},
+		{
+			name:   "first review has no verdict yet",
+			events: []json.RawMessage{ev(`{"kind":"review_requested","payload":{"implementer":"lane","reviewer":"bob"}}`)},
+		},
+		{
+			name: "newest verdict wins",
+			events: []json.RawMessage{
+				ev(`{"kind":"changes_requested","payload":{"reviewer":"alice"}}`),
+				ev(`{"kind":"claimed","payload":{}}`),
+				ev(`{"kind":"changes_requested","payload":{"reviewer":"bob"}}`),
+			},
+			want: "bob", found: true, decoded: true,
+		},
+		{
+			name:    "null reviewer is present but empty",
+			events:  []json.RawMessage{ev(`{"kind":"changes_requested","payload":{"reviewer":null}}`)},
+			found:   true,
+			decoded: true,
+		},
+		{
+			name:    "undecodable payload",
+			events:  []json.RawMessage{ev(`{"kind":"changes_requested","payload":"not-an-object"}`)},
+			found:   true,
+			decoded: false,
+		},
+		{
+			name:    "unreadable event is skipped",
+			events:  []json.RawMessage{ev(`{`), ev(`{"kind":"changes_requested","payload":{"reviewer":"carol"}}`)},
+			want:    "carol",
+			found:   true,
+			decoded: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found, decoded := reviewRoundReviewer(tc.events)
+			if got != tc.want || found != tc.found || decoded != tc.decoded {
+				t.Errorf("reviewRoundReviewer = (%q, %v, %v), want (%q, %v, %v)", got, found, decoded, tc.want, tc.found, tc.decoded)
+			}
+		})
+	}
+}
+
+// The row that LANDS is what matters: the post-condition must verify what
+// landed, not what was asked for (a concurrent write or a kernel rule can
+// differ), because the dispatcher spawns on the assignee alone.
 func TestTRR_PostconditionNonSpawnableAssignee(t *testing.T) {
 	noEnvReviewer(t)
 	label := withClaimWorker(t)
@@ -600,8 +804,10 @@ func TestTRR_PostconditionNonSpawnableAssignee(t *testing.T) {
 	}
 }
 
-// The original guard, unchanged: an unassigned review row nobody will
-// ever pick up.
+// The original strand guard, now reached through reviewer resolution: an
+// unassigned, claimable card with no reviewer anywhere. The dispatcher
+// never spawns an unassigned review row (t_44d19d72 / t_371b7d27), so the
+// handoff must be refused before anything is written.
 func TestTRR_StrandGuard(t *testing.T) {
 	noEnvReviewer(t)
 	readArgv := argvLog(t)
@@ -615,7 +821,7 @@ func TestTRR_StrandGuard(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError for an unassigned review request, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"unassigned", "never spawns", "MCP_REVIEWER_PROFILE"} {
+	for _, want := range []string{"no reviewer resolved", "dispatcher", "MCP_REVIEWER_PROFILE"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
@@ -624,8 +830,10 @@ func TestTRR_StrandGuard(t *testing.T) {
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0 (must not flip the status)", n)
 	}
-	if n := backend.getCount("t_x1"); n != 1 {
-		t.Errorf("GET count = %d, want 1 (preflight only, no re-read after a refusal)", n)
+	// preflight, then the event-log read the provenance lookup needs. No
+	// re-read after the refusal, and no write of any kind.
+	if n := backend.getCount("t_x1"); n != 2 {
+		t.Errorf("GET count = %d, want 2 (preflight + event log, nothing after)", n)
 	}
 }
 
@@ -695,7 +903,7 @@ func TestTRR_ImplementerRecordedNullRefused(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError when the kernel recorded implementer=null, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"implementer=null", "request-changes", "block"} {
+	for _, want := range []string{"implementer=null", "request-changes", "block", "MCP_CLAIM_WORKER"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}

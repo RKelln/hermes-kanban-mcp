@@ -165,7 +165,7 @@ func TestRequestReviewInjection(t *testing.T) {
 		})
 	}
 
-	for _, reviewer := range []string{"a b", "alice;rm -rf /", "alice/x", "alice\n--force", strings.Repeat("r", 65)} {
+	for _, reviewer := range []string{"a b", "alice;rm -rf /", "alice/x", "alice\n--force", strings.Repeat("r", 65), "-h", "--force"} {
 		t.Run("reviewer "+strconvQuote(reviewer), func(t *testing.T) {
 			stdout, stderr, err := RequestReview(context.Background(), "task-ok", "default", "s", reviewer, false)
 			if err == nil || !strings.Contains(err.Error(), "invalid reviewer") {
@@ -196,6 +196,36 @@ func TestRequestReviewInjection(t *testing.T) {
 			t.Errorf("RequestReview() error = %v, want nil at exactly MaxReviewSummaryBytes", err)
 		}
 	})
+}
+
+// TestValidLaneToken pins the shape both lane values share (t_b917c3c6
+// review F4). The leading-dash case is the one that matters: `hermes
+// kanban assign <id> -h` prints help and exits 0, and any other `-x` is
+// swallowed as an option, so a dash-leading label turns a write into a
+// silent no-op that only the post-write re-read would notice.
+func TestValidLaneToken(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"opencode-remote", true},
+		{"default", true},
+		{"_lane.1", true},
+		{strings.Repeat("a", 64), true},
+		{strings.Repeat("a", 65), false},
+		{"", false},
+		{"-h", false},
+		{"--force", false},
+		{".-x", true}, // only the FIRST character is barred
+		{"a b", false},
+		{"a/b", false},
+		{"a\nb", false},
+	}
+	for _, tc := range cases {
+		if got := ValidLaneToken(tc.value); got != tc.want {
+			t.Errorf("ValidLaneToken(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
 }
 
 // TestAssignLabel covers the implementer stamp's argv: the ready form

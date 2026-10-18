@@ -10,6 +10,8 @@
 #   task-hang  -> spin in place until killed (timeout test)
 #   task-echo  -> echo the full argv back (argv-layout tests)
 #   task-big   -> write >4 KiB to stdout and stderr (cap test)
+#   task-reviewfail -> succeed on every verb EXCEPT request-review, which
+#                exits 1 (the handoff fails after a successful stamp)
 
 verb=""
 id=""
@@ -50,6 +52,13 @@ case "$id" in
     ;;
   task-echo)
     echo "argv: $*"
+    ;;
+  task-reviewfail)
+    if [ "$verb" = "request-review" ]; then
+      echo "error: re-review has no durable reviewer provenance" >&2
+      exit 1
+    fi
+    echo "assigned $id"
     ;;
   task-big)
     emit_big

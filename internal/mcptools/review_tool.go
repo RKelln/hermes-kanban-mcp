@@ -43,6 +43,26 @@ package mcptools
 // stamps a durable lane label on the card BEFORE the handoff, which is
 // the kernel's own designed fallback, and then verifies the value the
 // kernel actually recorded.
+//
+// ORDER MATTERS, and it is the one thing that can silently undo the above
+// (review F1 on t_b917c3c6). request_review takes its reviewer from an
+// explicit --reviewer; when the flag is absent it looks for the reviewer
+// recorded on the ticket's latest `changes_requested` run, and on a FIRST
+// review there is none — so `assignee_sql` is omitted from the UPDATE and
+// the row's EXISTING assignee is what the dispatcher will spawn on
+// (measured against the installed kernel: assignee 'default' is preserved,
+// and once the stamp has moved it to 'opencode-remote' the row lands
+// there). The implementer stamp has just MOVED that assignee to the lane
+// label, so an omitted --reviewer lands the review row on a non-spawnable
+// label: the card sits in 'review' every tick with no reviewer, and the
+// tool's post-check can only report it after the fact. An earlier revision
+// of this file read the same kernel code as "the assignee is preserved, so
+// verify it as the reviewer" — true before the stamp, false after it —
+// which is exactly the F1 defect. Hence: resolve and verify the reviewer
+// FIRST, from a source that does not depend on the assignee, then stamp
+// the label, then hand off with an explicit --reviewer. Every successful
+// handoff therefore carries --reviewer, and the review row's assignee is
+// always the value verified above — never the lane label.
 
 import (
 	"context"
@@ -105,10 +125,101 @@ type TicketRequestReviewOut struct {
 // arrives asynchronously, and "done" is what authorises the merge.
 const reviewNote = "a verdict of done authorises your merge, request-changes returns the ticket to you — do NOT merge before the verdict"
 
-// reviewProvenanceNote is used when no reviewer was supplied: the kernel
-// then resolves its own re-review provenance (the reviewer recorded by the
-// previous request-changes round) instead of this tool overriding it.
-const reviewProvenanceNote = " no reviewer supplied, so the kernel reused the reviewer from the previous review round"
+// reviewerKnob is the server knob every reviewer refusal names, so the
+// caller does not have to guess which setting the handoff needs.
+const reviewerKnob = "MCP_REVIEWER_PROFILE"
+
+// reviewProvenanceNotePrefix is used when neither the caller nor the
+// server supplied a reviewer, so this tool reused the one recorded on the
+// ticket's last changes-requested round.
+const reviewProvenanceNotePrefix = " no reviewer supplied, so this reused "
+
+const reviewProvenanceNoteSuffix = ", the reviewer recorded on the ticket's last changes-requested round (verified against the roster like any other reviewer)"
+
+// reviewRoundReviewer reads the reviewer recorded on the newest
+// changes_requested event of a task detail envelope's event log.
+//
+// This mirrors the kernel's own re-review provenance lookup
+// (kanban_db._prior_reviewer: latest changes_requested run, then that
+// run's event) closely enough to be the same answer: a changes_requested
+// event is written once per verdict, at the end of that run, so the
+// newest event is the newest verdict. found is false when the log holds
+// no such event (a first review); decoded is false when one exists but
+// its payload cannot be read. reviewer is "" when the payload carries no
+// usable reviewer, which is the malformed-provenance case the kernel also
+// refuses.
+func reviewRoundReviewer(events []json.RawMessage) (reviewer string, found, decoded bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		var e struct {
+			Kind    string          `json:"kind"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(events[i], &e); err != nil {
+			continue
+		}
+		if e.Kind != "changes_requested" {
+			continue
+		}
+		var p struct {
+			Reviewer *string `json:"reviewer"`
+		}
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			return "", true, false
+		}
+		if p.Reviewer == nil {
+			return "", true, true
+		}
+		return strings.TrimSpace(*p.Reviewer), true, true
+	}
+	return "", false, false
+}
+
+// resolveReviewer settles WHICH profile reviews this handoff, before
+// anything is written. Sources, in order: the explicit reviewer argument,
+// then MCP_REVIEWER_PROFILE, then the reviewer recorded on the ticket's
+// last changes-requested round (read off the event log). There is no
+// fourth source: in particular the ticket's assignee is never substituted,
+// because after a request-changes verdict the kernel sets assignee = the
+// implementer, so that substitution makes the next round a self-review —
+// and because the implementer stamp moves the assignee anyway, so its
+// value at this point says nothing about who reviewed the last round.
+//
+// When every source is empty the handoff is REFUSED here, before the
+// stamp. That ordering is the fix for review F1 on t_b917c3c6: with no
+// --reviewer the kernel keeps the row's existing assignee, and the stamp
+// below has just set that assignee to the lane label, so the review row
+// lands on a non-spawnable name. Settle the reviewer first and the row can
+// only receive a value verified here.
+//
+// The caller then verifies the returned value against the roster; this
+// function only decides where it came from.
+func (s *Server) resolveReviewer(ctx context.Context, board, id string, in TicketRequestReviewInput) (reviewer, source string, failure *ToolResult) {
+	if v := strings.TrimSpace(in.Reviewer); v != "" {
+		return v, "the reviewer argument", nil
+	}
+	if v := strings.TrimSpace(os.Getenv(reviewerKnob)); v != "" {
+		return v, reviewerKnob, nil
+	}
+
+	// Third source: the kernel's own re-review provenance, resolved here
+	// rather than handed to the kernel, so the value can be verified and
+	// the caller knows which reviewer the row will carry. One extra detail
+	// GET, only on this path (a review without an explicit reviewer).
+	_, events, err := s.getTaskDetail(ctx, board, id)
+	if err != nil {
+		return "", "", ErrorResult("invalid_input: no reviewer resolved (no reviewer argument, and %s is unset), and the ticket's event log could not be read to reuse the reviewer from its last changes-requested round: %s. Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob, RestErrorMessage(err), reviewerKnob)
+	}
+	prior, found, decoded := reviewRoundReviewer(events)
+	switch {
+	case !found:
+		return "", "", ErrorResult("invalid_input: no reviewer resolved: no reviewer argument was passed, %s is unset, and ticket %s has no changes-requested round to reuse a reviewer from (this is its first review). This is refused BEFORE the implementer stamp, because with --reviewer omitted the kernel keeps whatever assignee the card carries, and the stamp below sets that assignee to the lane label — the review row would land on a name the dispatcher never spawns. Passing the card's current assignee instead is no substitute: it is the lane label here, and after a verdict it is the implementer, so that value would make the re-review a self-review. Pass reviewer, or set %s (e.g. \"default\") on the server: a review row with no reviewer is skipped by the dispatcher every tick, so the card would strand there.", reviewerKnob, id, reviewerKnob)
+	case !decoded:
+		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event could not be decoded, so its reviewer cannot be reused. Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob)
+	case prior == "":
+		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event carries no reviewer (malformed provenance — the kernel refuses that shape too). Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob)
+	}
+	return prior, "the ticket's last changes-requested round", nil
+}
 
 // implementerKnob is the server knob every implementer refusal names, so
 // the operator does not have to guess which setting the handoff needs.
@@ -187,7 +298,7 @@ func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestRe
 		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"opencode-remote\").", implementerKnob, implementerKnob)
 	}
 	if !kanban.ValidLaneToken(label) {
-		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, "^[A-Za-z0-9._-]{1,64}$")
+		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, kanban.LaneTokenPattern)
 	}
 	if strings.EqualFold(label, reviewer) {
 		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"opencode-remote\"), or a different reviewer.", label, implementerKnob)
@@ -338,41 +449,37 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		return ErrorResult("cannot request review: ticket is %s, request-review requires ready or running (a blocked ticket cannot enter the review lane; unblock it first)", ts.Status)
 	}
 
-	// Reviewer resolution: explicit argument, then the server default.
-	// Deliberately NOT the ticket's assignee — after a request-changes
-	// verdict the kernel sets assignee = the implementer, so *substituting*
-	// it as the reviewer would make the next round a self-review.
+	// Reviewer resolution, BEFORE anything is written: explicit argument,
+	// then the server default, then the reviewer recorded on the ticket's
+	// last changes-requested round. Deliberately NOT the ticket's assignee
+	// — after a request-changes verdict the kernel sets assignee = the
+	// implementer, so *substituting* it as the reviewer would make the next
+	// round a self-review, and the implementer stamp below moves it anyway.
 	//
-	// Two values matter and they are NOT the same one:
-	//   flagReviewer  — what we pass to the CLI. Empty means "omit
-	//                   --reviewer" and let the kernel make its own choice
-	//                   (prior-reviewer provenance, else preserve the
-	//                   existing assignee). Passing the assignee here would
-	//                   substitute it and defeat that provenance.
-	//   verifyValue   — what will END UP on the review row, which is what
-	//                   the dispatcher spawns on. Verified in every tier:
-	//                   an unspawnable assignee is the strand no matter who
-	//                   chose it. Verifying a value is not substituting it.
-	flagReviewer := strings.TrimSpace(in.Reviewer)
-	if flagReviewer == "" {
-		flagReviewer = strings.TrimSpace(os.Getenv("MCP_REVIEWER_PROFILE"))
+	// The value resolved here is BOTH what we pass to the CLI and what ends
+	// up on the review row (request_review writes assignee = reviewer
+	// whenever it has one), which is why the handoff below always carries
+	// --reviewer. Omitting the flag would hand the decision to the kernel,
+	// which answers it with prior-reviewer provenance or a refusal — never
+	// with the assignee — so the tool could no longer verify what lands.
+	flagReviewer, reviewerSource, failure := s.resolveReviewer(ctx, board, in.ID, in)
+	if failure != nil {
+		return failure
 	}
-	useProvenance := flagReviewer == ""
-	verifyValue := flagReviewer
-	if useProvenance {
-		verifyValue = strings.TrimSpace(ts.Assignee)
-		if verifyValue == "" {
-			return ErrorResult("invalid_input: no reviewer resolved and ticket %s is unassigned. The dispatcher never spawns an unassigned review ticket — it would sit in 'review' silently and no reviewer would ever run. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID)
-		}
+	if !kanban.ValidLaneToken(flagReviewer) {
+		return ErrorResult("invalid_input: reviewer %q (from %s) is not a lane token (must match %s); it is written to the review row's assignee, so keep it to a plain profile name. Set %s to a valid profile.", flagReviewer, reviewerSource, kanban.LaneTokenPattern, reviewerKnob)
 	}
 	notes := []string{reviewNote}
-	ok, checked, names := s.profileSpawnable(ctx, verifyValue)
+	if reviewerSource != "the reviewer argument" && reviewerSource != reviewerKnob {
+		notes = append(notes, reviewProvenanceNotePrefix+flagReviewer+reviewProvenanceNoteSuffix)
+	}
+	ok, checked, names := s.profileSpawnable(ctx, flagReviewer)
 	switch {
 	case checked && !ok:
-		if useProvenance {
-			return ErrorResult("invalid_input: no reviewer was supplied and ticket %s carries assignee %q, which is not an installed profile. The kernel would preserve that assignee, so the card would sit in 'review' with no reviewer the dispatcher can ever spawn. Installed profiles: %s. Pass reviewer, or set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server.", in.ID, verifyValue, strings.Join(names, ", "))
+		if reviewerSource != "the reviewer argument" && reviewerSource != reviewerKnob {
+			return ErrorResult("invalid_input: no reviewer was supplied, so the reviewer recorded on ticket %s's last changes-requested round (%q) was reused — and it is not an installed profile any more, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. Pass reviewer, or set %s (e.g. \"default\") on the server.", in.ID, flagReviewer, strings.Join(names, ", "), reviewerKnob)
 		}
-		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", verifyValue, strings.Join(names, ", "))
+		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", flagReviewer, strings.Join(names, ", "))
 	case !checked:
 		// The roster is the oracle for both directions (spawnable
 		// reviewer, NOT-spawnable implementer), so an unreadable roster
@@ -380,18 +487,16 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		// an announced warning for the reviewer alone; the implementer
 		// half cannot be announced safely (a collision spawns a worker
 		// silently), so the handoff now fails closed in one sentence.
-		return ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so neither the reviewer %q nor the implementer label can be verified. The handoff is refused rather than risked: a non-profile reviewer strands the card, and an implementer label that collides with a profile makes the dispatcher spawn a worker when changes come back. Retry once the dashboard API answers.", verifyValue)
-	}
-	if useProvenance {
-		notes = append(notes, reviewProvenanceNote)
+		return ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so neither the reviewer %q nor the implementer label can be verified. The handoff is refused rather than risked: a non-profile reviewer strands the card, and an implementer label that collides with a profile makes the dispatcher spawn a worker when changes come back. Retry once the dashboard API answers.", flagReviewer)
 	}
 
 	// Implementer provenance. Resolved and verified BEFORE the stamp,
 	// because a refused label must leave the ticket untouched.
-	label, labelSource, failure := s.resolveImplementerLabel(ctx, in, verifyValue)
+	label, labelSource, failure := s.resolveImplementerLabel(ctx, in, flagReviewer)
 	if failure != nil {
 		return failure
 	}
+	reclaimingStamp := ts.Status == "running" && !strings.EqualFold(strings.TrimSpace(ts.Assignee), label)
 	stamped, failure := s.stampImplementer(ctx, board, in.ID, label, ts)
 	if failure != nil {
 		return failure
@@ -408,7 +513,15 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	note := strings.Join(notes, ";")
 
 	if _, stderr, err := kanban.RequestReview(ctx, in.ID, board, strings.TrimSpace(in.Summary), flagReviewer, cliForce); err != nil {
-		return ErrorResult("%s", cliFailureText(stderr, err))
+		msg := cliFailureText(stderr, err)
+		if reclaimingStamp {
+			// The stamp already released the caller's live claim, so the
+			// failure leaves real state behind and the caller must hear
+			// it here — the stamp's own failure path says this, and the
+			// two must not disagree.
+			return ErrorResult("%s. The handoff was NOT requested, but the implementer stamp ran first and it reclaims a RUNNING ticket's live claim: ticket %s may now be ready and assigned to %q, and your claim is gone. Re-read it (ticket_get) before retrying.", msg, in.ID, label)
+		}
+		return ErrorResult("%s", msg)
 	}
 
 	after, events, err := s.getTaskDetail(ctx, board, in.ID)
@@ -425,10 +538,10 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	if strings.TrimSpace(after.Assignee) == "" {
 		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. Set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server, or pass reviewer explicitly, then request again.", in.ID)
 	}
-	// The row's assignee can differ from what we asked for: with no reviewer
-	// supplied the kernel prefers its own prior-reviewer provenance over the
-	// existing assignee. Verify what actually LANDED, not what was requested
-	// — the dispatcher spawns on this value and nothing else.
+	// Verify what actually LANDED, not what was requested: the handoff now
+	// always passes a verified --reviewer, so a row carrying anything else
+	// means a concurrent write or a kernel rule we do not model, and the
+	// dispatcher spawns on this value and nothing else.
 	if aok, achecked, anames := s.profileSpawnable(ctx, after.Assignee); achecked && !aok {
 		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. Set MCP_REVIEWER_PROFILE (e.g. \"default\") or pass reviewer explicitly, then request again.", in.ID, after.Assignee, strings.Join(anames, ", "))
 	}
@@ -446,7 +559,7 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	case !decoded:
 		return ErrorResult("request-review moved ticket %s to 'review' and assigned %q, but its newest review_requested payload could not be decoded, so the recorded implementer cannot be verified. An APPROVE will still complete the card; a request-changes verdict may have nowhere to route.", in.ID, after.Assignee)
 	case recorded == "":
-		return ErrorResult("request-review moved ticket %s to 'review' but the kernel recorded implementer=null on the handoff, so a request-changes verdict cannot return it (request_changes refuses a handoff with no implementer provenance) and the reviewer would be left with a block. The stamp did not reach the row the kernel read: check that the ticket's assignee was %q when the transition ran. Assign the lane label on a ready ticket and request again.", in.ID, label)
+		return ErrorResult("request-review moved ticket %s to 'review' but the kernel recorded implementer=null on the handoff, so a request-changes verdict cannot return it (request_changes refuses a handoff with no implementer provenance) and the reviewer would be left with a block. The stamp did not reach the row the kernel read: check that the ticket's assignee was %q when the transition ran, and that %s names a lane label on the server (the handoff refuses when neither that knob nor a worker argument supplies one). Assign the lane label on a ready ticket and request again.", in.ID, label, implementerKnob)
 	case !strings.EqualFold(recorded, label):
 		return ErrorResult("request-review moved ticket %s to 'review' but the kernel recorded implementer=%q, not %q. A request-changes verdict would route to %q. Nothing was undone; re-read the ticket and decide whether that destination is the lane you meant to hand back to.", in.ID, recorded, label, recorded)
 	}

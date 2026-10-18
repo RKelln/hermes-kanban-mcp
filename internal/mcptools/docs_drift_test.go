@@ -55,6 +55,16 @@ var retiredPhrases = []string{
 	"it returns instantly with its",        // AGENTS.md wait bullet
 	"short-circuit once the ticket leaves", // events_tool.go GetTaskEvents doc
 
+	// The reviewer fallback that cannot be verified (t_b917c3c6, review
+	// F1): request_review does keep the row's existing assignee when no
+	// --reviewer is passed and there is no earlier verdict, but the
+	// implementer stamp has just moved that assignee to the lane label, so
+	// "verify the existing assignee as the reviewer" blessed a value the
+	// handoff itself destroyed. These are the phrasings that stated it.
+	"provenance, else the existing",       // helpDoc: the removed fallback
+	"that value is verified the same way", // helpDoc: the removed conclusion
+	"the kernel preserves the assignee",   // the belief review F1 disproved
+
 	// The triage lane offered as an agent destination (t_6053ef34,
 	// 2026-10-18). Two separate fossils: the create flag the bridge
 	// advertised, and the one-line claim refusal that named no exit and
@@ -246,4 +256,61 @@ func TestDocs_ServeTheImplementerRule(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestDocs_ServeTheReviewerPrecedence pins the F1 fix (t_b917c3c6 round 2):
+// the reviewer is settled from a source that does not depend on the
+// ticket's assignee, before the implementer stamp, and the handoff always
+// passes it. A rewrite that restores "the kernel keeps the existing
+// assignee" would re-create a review row assigned to the lane label, and
+// nothing else in the suite would notice.
+func TestDocs_ServeTheReviewerPrecedence(t *testing.T) {
+	t.Run("served help", func(t *testing.T) {
+		for _, want := range []string{
+			"reviewer recorded on the ticket's last changes-requested round",
+			"keeps\n    whatever assignee the card carries",
+			"REFUSED before the stamp",
+		} {
+			if !strings.Contains(helpDoc, want) {
+				t.Errorf("helpDoc no longer states the reviewer precedence (no %q)", want)
+			}
+		}
+	})
+
+	t.Run("served tool description", func(t *testing.T) {
+		b, err := os.ReadFile("register.go")
+		if err != nil {
+			t.Fatalf("read register.go: %v", err)
+		}
+		for _, want := range []string{
+			"last changes-requested round",
+			"always carries --reviewer",
+			"REFUSED before the stamp",
+		} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("register.go no longer serves the reviewer precedence (no %q)", want)
+			}
+		}
+	})
+
+	// The two operator/implementer prose surfaces, each in its own words.
+	surfaces := []struct {
+		name string
+		want []string
+	}{
+		{"deploy/AGENTS.kanban-mcp.template.md", []string{"last changes-requested round", "refused BEFORE anything is written"}},
+		{"deploy/install.md", []string{"settled BEFORE the implementer stamp", "keeps whatever assignee the card carries"}},
+		{"deploy/kanban-mcp.env.example", []string{"last changes-requested round", "keeps whatever assignee the card"}},
+	}
+	for _, s := range surfaces {
+		b, err := os.ReadFile(filepath.Join("..", "..", s.name))
+		if err != nil {
+			t.Fatalf("read %s: %v", s.name, err)
+		}
+		for _, want := range s.want {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s no longer states the reviewer precedence (no %q)", s.name, want)
+			}
+		}
+	}
 }

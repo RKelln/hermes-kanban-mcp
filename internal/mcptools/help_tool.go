@@ -55,13 +55,16 @@ MCP tools for a Hermes kanban board:
     spawns the sdlc-review reviewer; APPROVE completes the ticket to done,
     request-changes returns it to you. summary is REQUIRED — it is the
     reviewer's handoff (what changed, the refs to verify, what you proved).
-    reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE. Whichever
-    value will END UP on the review row is verified against the installed
-    profile roster and REFUSED if the dispatcher could never spawn it, because
-    a review row on a non-profile assignee parks in 'review' forever. When
-    neither source supplies a reviewer the flag is omitted and the kernel
-    keeps its own choice (prior-reviewer provenance, else the existing
-    assignee) — that value is verified the same way. worker is the IMPLEMENTER
+    reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE > the
+    reviewer recorded on the ticket's last changes-requested round. Whichever
+    value wins is verified against the installed profile roster and REFUSED if
+    the dispatcher could never spawn it, because a review row on a non-profile
+    assignee parks in 'review' forever; the handoff always passes it, so the
+    row lands on the value that was verified. With no source at all the
+    request is REFUSED before the stamp: with the flag omitted the kernel keeps
+    whatever assignee the card carries, which the stamp has just set to the lane
+    label, and passing that value would make a re-review a self-review.
+    worker is the IMPLEMENTER
     label stamped on the card before the handoff (explicit worker >
     MCP_CLAIM_WORKER; REFUSED when neither supplies one). The kernel records it
     as the handoff's implementer, which is what lets a request-changes verdict
@@ -153,7 +156,9 @@ Lifecycle facts:
   transition nobody will act on. The handoff needs BOTH values, and they pull
   opposite ways: a reviewer the dispatcher CAN spawn, and an implementer label
   it must NEVER spawn. The kernel writes the implementer once, at request
-  time, from the ticket's assignee — so the tool stamps the label first (on a
+  time, from the ticket's assignee — so the tool settles the REVIEWER first
+  (the stamp moves the assignee, so nothing may depend on it), stamps the
+  label (on a
   RUNNING card that is reassign --reclaim, which is what force authorises)
   and then reads the value back off the review_requested event; a handoff that
   recorded null is reported as a broken round trip, not a success. A ticket in
