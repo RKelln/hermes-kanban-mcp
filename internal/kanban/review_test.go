@@ -165,7 +165,7 @@ func TestRequestReviewInjection(t *testing.T) {
 		})
 	}
 
-	for _, reviewer := range []string{"a b", "alice;rm -rf /", "alice/x", "alice\n--force", strings.Repeat("r", 65)} {
+	for _, reviewer := range []string{"a b", "alice;rm -rf /", "alice/x", "alice\n--force", strings.Repeat("r", 65), "-h", "--force"} {
 		t.Run("reviewer "+strconvQuote(reviewer), func(t *testing.T) {
 			stdout, stderr, err := RequestReview(context.Background(), "task-ok", "default", "s", reviewer, false)
 			if err == nil || !strings.Contains(err.Error(), "invalid reviewer") {
@@ -194,6 +194,108 @@ func TestRequestReviewInjection(t *testing.T) {
 	t.Run("summary at the cap is accepted", func(t *testing.T) {
 		if _, _, err := RequestReview(context.Background(), "task-ok", "default", strings.Repeat("x", MaxReviewSummaryBytes), "alice", false); err != nil {
 			t.Errorf("RequestReview() error = %v, want nil at exactly MaxReviewSummaryBytes", err)
+		}
+	})
+}
+
+// TestValidLaneToken pins the shape both lane values share (t_b917c3c6
+// review F4). The leading-dash case is the one that matters: `hermes
+// kanban assign <id> -h` prints help and exits 0, and any other `-x` is
+// swallowed as an option, so a dash-leading label turns a write into a
+// silent no-op that only the post-write re-read would notice.
+func TestValidLaneToken(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+	}{
+		{"opencode-remote", true},
+		{"default", true},
+		{"_lane.1", true},
+		{strings.Repeat("a", 64), true},
+		{strings.Repeat("a", 65), false},
+		{"", false},
+		{"-h", false},
+		{"--force", false},
+		{".-x", true}, // only the FIRST character is barred
+		{"a b", false},
+		{"a/b", false},
+		{"a\nb", false},
+	}
+	for _, tc := range cases {
+		if got := ValidLaneToken(tc.value); got != tc.want {
+			t.Errorf("ValidLaneToken(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestAssignLabel covers the implementer stamp's argv: the ready form
+// (`assign <id> <label>`) and the running form (`reassign <id> <label>
+// --reclaim --reason=<why>`), plus the same injection rejections the other
+// lane-token verbs apply. The label is written to the ticket's assignee, so
+// it gets the reviewer's anchored-token rule.
+func TestAssignLabel(t *testing.T) {
+	installFake(t)
+
+	t.Run("ready form", func(t *testing.T) {
+		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "opencode-remote", "", false)
+		if err != nil {
+			t.Fatalf("AssignLabel() error = %v, want nil", err)
+		}
+		want := "argv: kanban --board default assign task-echo opencode-remote\n"
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+	})
+
+	t.Run("reclaim form", func(t *testing.T) {
+		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "opencode-remote",
+			"review handoff: record implementer opencode-remote", true)
+		if err != nil {
+			t.Fatalf("AssignLabel() error = %v, want nil", err)
+		}
+		want := "argv: kanban --board default reassign task-echo opencode-remote --reclaim --reason=review handoff: record implementer opencode-remote\n"
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+	})
+
+	t.Run("reclaim without a reason still releases the claim", func(t *testing.T) {
+		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "lane", "", true)
+		if err != nil {
+			t.Fatalf("AssignLabel() error = %v, want nil", err)
+		}
+		want := "argv: kanban --board default reassign task-echo lane --reclaim\n"
+		if stdout != want {
+			t.Errorf("stdout = %q, want %q", stdout, want)
+		}
+	})
+
+	t.Run("injection", func(t *testing.T) {
+		for _, label := range []string{"a b", "alice;true", "alice/x", "alice\n--force", "", strings.Repeat("r", 65)} {
+			stdout, stderr, err := AssignLabel(context.Background(), "task-ok", "default", label, "", false)
+			if err == nil || !strings.Contains(err.Error(), "invalid label") {
+				t.Errorf("label %q: err = %v, want invalid-label error", label, err)
+			}
+			if stdout != "" || stderr != "" {
+				t.Errorf("label %q: stdout/stderr = %q/%q, want empty (must not exec)", label, stdout, stderr)
+			}
+		}
+		for _, id := range []string{"a b", "a;true", "../x", ""} {
+			if _, _, err := AssignLabel(context.Background(), id, "default", "lane", "", false); err == nil {
+				t.Errorf("id %q: err = nil, want invalid-task-id error", id)
+			}
+		}
+		if _, _, err := AssignLabel(context.Background(), "task-ok", "BAD BOARD", "lane", "", false); err == nil {
+			t.Errorf("bad board: err = nil, want invalid-board error")
+		}
+	})
+
+	t.Run("binary missing", func(t *testing.T) {
+		breakBin(t)
+		_, _, err := AssignLabel(context.Background(), "task-ok", "default", "lane", "", false)
+		want := "assign unavailable: hermes CLI not found at /nonexistent/hermes-cli (set HERMES_BIN)"
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v, want exactly %q", err, want)
 		}
 	})
 }

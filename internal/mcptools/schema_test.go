@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -191,6 +192,24 @@ func TestCompleteSchemaProperties(t *testing.T) {
 	enum, _ := rt["enum"].([]string)
 	if !reflect.DeepEqual(enum, []string{"LOW", "MEDIUM", "HIGH"}) {
 		t.Errorf("review_tier enum = %v, want [LOW MEDIUM HIGH]", enum)
+	}
+}
+
+// TestRequestReviewSchemaProperties pins the implementer knob on the wire:
+// a client that cannot see `worker` cannot supply one, and the handoff is
+// refused without a label.
+func TestRequestReviewSchemaProperties(t *testing.T) {
+	props := objSchemaProps(requestReviewSchema())
+	if len(props) != 6 {
+		t.Errorf("requestReviewSchema has %d properties, want 6", len(props))
+	}
+	for _, key := range []string{"board", "id", "summary", "reviewer", "worker", "force"} {
+		if props[key] == nil {
+			t.Errorf("requestReviewSchema missing property %q", key)
+		}
+	}
+	if desc, _ := props["worker"].(map[string]any)["description"].(string); !strings.Contains(desc, "MCP_CLAIM_WORKER") {
+		t.Errorf("worker description = %q, want it to name the fallback knob", desc)
 	}
 }
 

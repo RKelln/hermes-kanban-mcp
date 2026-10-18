@@ -3,15 +3,15 @@
 #
 # The production code never uses a shell; this fixture is executed
 # directly via execve (the kernel honors the shebang). Behavior is
-# selected by the task id, which is the first BARE argument after the
-# verb: flags and their values (--ttl 14400, --kind needs_input) are
-# skipped, so the layout the code emits does not have to be re-learned
-# by this fixture every time a flag is added.
+# selected by the task id, which the real CLI always places directly
+# after the verb:
 #   task-ok    -> print "claimed <id>" to stdout, exit 0
 #   task-fail  -> print an error to stderr, exit 1
 #   task-hang  -> spin in place until killed (timeout test)
 #   task-echo  -> echo the full argv back (argv-layout tests)
 #   task-big   -> write >4 KiB to stdout and stderr (cap test)
+#   task-reviewfail -> succeed on every verb EXCEPT request-review, which
+#                exits 1 (the handoff fails after a successful stamp)
 
 verb=""
 id=""
@@ -22,7 +22,7 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
-    claim|block|request-review) verb="$arg" ;;
+    claim|block|request-review|assign|reassign) verb="$arg" ;;
     --ttl|--kind) skip_value=1 ;;
     -*) ;;
     *)
@@ -59,6 +59,13 @@ case "$id" in
     ;;
   task-echo)
     echo "argv: $*"
+    ;;
+  task-reviewfail)
+    if [ "$verb" = "request-review" ]; then
+      echo "error: re-review has no durable reviewer provenance" >&2
+      exit 1
+    fi
+    echo "assigned $id"
     ;;
   task-big)
     emit_big

@@ -130,7 +130,10 @@ the operator's entire home directory for no functional gain.
 `ticket_block` (typed kinds), and `ticket_request_review` (the native review
 lane, the recommended completion path). All three are the same shell-out class;
 a carve-out that covers one and not the others fails confusingly, because the
-tools that keep working are the ones that never needed the write.
+tools that keep working are the ones that never needed the write. The review
+path issues TWO writes: `assign`/`reassign` to stamp the implementer label on
+the card, then `request-review` to hand it over — a unit that permits
+`request-review` but not `assign` fails at the first step, before the handoff.
 
 The known trade-off is **not** silently relaxed: `hermes kanban claim`,
 `hermes kanban block --kind`, and `hermes kanban request-review` all shell out
@@ -296,8 +299,40 @@ journalctl -u kanban-mcp --since "-2 min" --no-pager | grep -o '"version":"[^"]*
 
 After the restart, confirm the redacted startup config names the reviewer profile
 you expect — `MCPReviewerProfile` appears in the log line printed at boot. Then
-make one real `ticket_request_review` call and check the ticket reaches `review`
-with a spawnable assignee (`hermes kanban --board <slug> show <id>`).
+check the two env values the review handoff needs, because it refuses without
+them:
+
+```sh
+sudo grep -E '^(MCP_REVIEWER_PROFILE|MCP_CLAIM_WORKER)=' /etc/kanban-mcp.env
+# MCP_REVIEWER_PROFILE=default     <- an installed profile the dispatcher can spawn
+# MCP_CLAIM_WORKER=opencode-remote <- the lane label it must NEVER spawn
+```
+
+`MCP_CLAIM_WORKER` is not optional on this path any more (t_b917c3c6): it is the
+implementer recorded on the review handoff, and a handoff with no implementer
+can only ever be BLOCKED by a request-changes verdict. If it is absent, append
+it — never re-run §3:
+
+```sh
+sudo grep -q '^MCP_CLAIM_WORKER=' /etc/kanban-mcp.env || \
+  printf '\nMCP_CLAIM_WORKER=opencode-remote\n' | sudo tee -a /etc/kanban-mcp.env
+sudo systemctl restart kanban-mcp.service
+```
+
+Then make one real `ticket_request_review` call and check the ticket reaches
+`review` with a spawnable assignee, and that the event records the IMPLEMENTER
+(`hermes kanban --board <slug> show <id>`). An `implementer: null` on that
+event means the call returned an error and you are looking at a handoff from an
+older build: the tool now refuses rather than recording null.
+
+The reviewer is settled BEFORE the implementer stamp, because that stamp moves
+the ticket's assignee: an explicit `reviewer`, else `MCP_REVIEWER_PROFILE`, else
+the reviewer recorded on the ticket's last changes-requested round. With no
+source at all the call is refused before anything is written: with the flag
+omitted the kernel keeps whatever assignee the card carries, and the stamp has
+just set that to the lane label. So the review row's assignee is always a value
+verified against the installed roster, and the handoff always passes it
+explicitly.
 
 ## Rollback
 
