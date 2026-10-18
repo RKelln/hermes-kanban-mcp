@@ -222,4 +222,28 @@ func TestDocs_ServeTheImplementerRule(t *testing.T) {
 			}
 		}
 	}
+
+	// register.go is the surface an agent actually reads first: it is what
+	// tools/list returns for ticket_request_review, in both the tool
+	// description and the `worker` property. The parent review
+	// (t_cb0d23c0, F2) flagged that this positive half skipped it, so a
+	// rewrite that dropped the rule from the served schema would have gone
+	// green.
+	t.Run("served tool description", func(t *testing.T) {
+		b, err := os.ReadFile("register.go")
+		if err != nil {
+			t.Fatalf("read register.go: %v", err)
+		}
+		text := string(b)
+		for _, want := range []string{
+			"IMPLEMENTER label",
+			"worker is the IMPLEMENTER label",
+			"explicit worker > MCP_CLAIM_WORKER, and refused when neither supplies one",
+			"must NOT be an installed profile",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("register.go no longer serves the implementer rule to agents (no %q)", want)
+			}
+		}
+	})
 }
