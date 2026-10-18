@@ -129,7 +129,7 @@ func Register(srv *mcp.Server, s *Server) {
 		getSchema(),
 		s.TicketGet)
 
-	addTool(srv, "ticket_claim", "Atomically claim a ready ticket (ready -> running) via the hermes CLI. (id and board required)",
+	addTool(srv, "ticket_claim", "Atomically claim a ready ticket (ready -> running) via the hermes CLI. A non-ready ticket is refused with the reason for THAT status (triage is Hermes' internal intake lane with no agent action; todo names the parent ids it waits on; scheduled waits on time; running/review are held) — there is no promote tool. (id and board required)",
 		claimSchema(),
 		s.TicketClaim)
 
@@ -157,7 +157,20 @@ func Register(srv *mcp.Server, s *Server) {
 		obj(map[string]any{}),
 		s.ReviewQueue)
 
-	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; board required; all other fields optional.",
+	// ticket_create does NOT advertise triage. Triage is the kernel's
+	// internal intake lane: its designed exit is `hermes kanban specify`,
+	// which calls the auxiliary LLM and REWRITES the card's title and body
+	// before flipping it to todo, and nothing on this box runs that verb
+	// (kanban.auto_decompose is false; the gateway's only triage sweeper
+	// decomposes instead). The bridge has one shared bearer token, so every
+	// tool in it is agent-accessible by definition, and triage is also where
+	// the block-loop breaker parks a card that a worker was looping on. An
+	// agent-accessible create-into-triage therefore offers a lane with no
+	// agent step in and no agent step out (t_a6e3ba60: an agent hit the
+	// refusal here and the one in ticket_claim, then spent its run hunting
+	// for a promote verb that does not exist). The schema hides the flag;
+	// the handler refuses it out loud for a caller who sends it anyway.
+	addTool(srv, "ticket_create", "Create a ticket on a board. Title required; board required; all other fields optional. The ticket lands ready (todo behind parents). triage is NOT accepted: it is Hermes' internal intake lane (a specifier rewrites the card), so create the ticket ready, or block it with kind=needs_input.",
 		objReq(map[string]any{
 			"board":           propStr(),
 			"title":           propStr(),
@@ -167,7 +180,6 @@ func Register(srv *mcp.Server, s *Server) {
 			"workspace_kind":  propStr(),
 			"parents":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"skills":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"triage":          propBool(),
 			"idempotency_key": propStr(),
 		}, "board"),
 		s.TicketCreate)

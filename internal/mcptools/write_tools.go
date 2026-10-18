@@ -13,10 +13,17 @@ import (
 	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
-// TicketCreateInput is the ticket_create tool input. Board is optional
+// TicketCreateInput is the ticket_create tool input. Board is required
 // (board required); title is required; every other
 // field is optional. Only the fields below are accepted — the tool
 // never forwards other POST fields to the backend.
+//
+// Triage stays on the struct even though the tool does not advertise it
+// (register.go omits it from the input schema) and refuses it in the
+// handler: a strict client that drops unknown properties is not the only
+// kind of caller, and an MCP call can still carry a field the schema does
+// not list. Silently ignoring it would file a ticket into triage that no
+// agent can spec or claim — the exact trap t_a6e3ba60 fell into.
 type TicketCreateInput struct {
 	Board          string   `json:"board"`
 	Title          string   `json:"title"`
@@ -43,7 +50,10 @@ type TicketCreateOut struct {
 // createTaskBody is the POST /tasks body. It carries only the allowed
 // fields, and every optional field is omitted from the wire when zero
 // or empty (omitempty) so the backend's defaults apply: priority 0,
-// workspace_kind "scratch", triage false, empty parents/skills.
+// workspace_kind "scratch", empty parents/skills. triage is on the wire
+// struct because the kernel's create accepts it, but this bridge never
+// sets it true: the handler refuses triage before any request is built,
+// so the field only ever marshals to nothing.
 type createTaskBody struct {
 	Title          string   `json:"title"`
 	Body           string   `json:"body,omitempty"`
@@ -70,6 +80,15 @@ func (s *Server) TicketCreate(ctx context.Context, in TicketCreateInput) *ToolRe
 	}
 	if strings.TrimSpace(in.Title) == "" {
 		return ErrorResult("invalid_input: title required")
+	}
+	// Triage is refused, not ignored. It is the kernel's intake lane for
+	// under-specified input: the designed exit (`hermes kanban specify`)
+	// calls the auxiliary LLM and rewrites the card, and nothing on this
+	// box runs it. A ticket the bridge filed there would wait for a
+	// specifier that never comes, and no agent-facing verb can leave it
+	// (ticket_claim refuses triage for the same reason).
+	if in.Triage {
+		return ErrorResult("invalid_input: triage is an internal intake lane (a specifier rewrites the card); the bridge cannot spec, so create the ticket ready or block it with kind=needs_input")
 	}
 	for _, p := range in.Parents {
 		if err := ValidateTicketID(p); err != nil {
@@ -529,9 +548,9 @@ func completeRefParts(repo, branch, sha string) []string {
 }
 
 // completeRefSuffix renders the structured repo/branch/sha suffix
-// appended to the review-required block_reason, or "" when all three
-// are empty. Rendered from completeRefParts (trimmed, newlines
-// collapsed to spaces, canonical order); never splits a rune.
+// appended to the review handoff summary, or "" when all three are
+// empty. Rendered from completeRefParts (trimmed, newlines collapsed to
+// spaces, canonical order); never splits a rune.
 func completeRefSuffix(repo, branch, sha string) string {
 	parts := completeRefParts(repo, branch, sha)
 	if len(parts) == 0 {

@@ -331,29 +331,95 @@ func TestTC_ClaimValidation(t *testing.T) {
 	}
 }
 
-func TestTC_ClaimPreflightRejects(t *testing.T) {
+// TestTC_ClaimRefusalPerStatus is the t_6053ef34 replacement for the old
+// blanket "cannot claim: ticket is X, claim requires ready". Every case here
+// asserts the FULL error text, so a future edit that collapses the reasons back
+// into one generic line fails loudly. Each case also asserts exactly one GET (the
+// preflight) and no PATCH: a refusal must never exec the CLI.
+func TestTC_ClaimRefusalPerStatus(t *testing.T) {
 	installFakeBin(t)
 	backend := newClaimBackend()
-	backend.orders["task-todo"] = []string{`{"task":{"id":"task-todo","title":"T","status":"todo"}}`}
-	backend.orders["task-blocked"] = []string{`{"task":{"id":"task-blocked","title":"T","status":"blocked"}}`}
+	backend.orders["task-triage"] = []string{
+		`{"task":{"id":"task-triage","title":"T","status":"triage"}}`}
+	backend.orders["task-todo-parents"] = []string{
+		`{"task":{"id":"task-todo-parents","title":"T","status":"todo"},"links":{"parents":["t_aaa111","t_bbb222"],"children":[]}}`}
+	// The same fact carried only on the task dict: the projection's links are
+	// preferred, but a backend that omits links must not turn the refusal back
+	// into "todo, no parents" (which would send the caller to a human for a
+	// card that is simply gated).
+	backend.orders["task-todo-dict"] = []string{
+		`{"task":{"id":"task-todo-dict","title":"T","status":"todo","parents":["t_ccc333"]}}`}
+	backend.orders["task-todo-orphan"] = []string{
+		`{"task":{"id":"task-todo-orphan","title":"T","status":"todo"}}`}
+	backend.orders["task-sched"] = []string{
+		`{"task":{"id":"task-sched","title":"T","status":"scheduled"}}`}
+	backend.orders["task-blocked"] = []string{
+		`{"task":{"id":"task-blocked","title":"T","status":"blocked"}}`}
+	// running with no live lock (expired): the dispatcher's, not the caller's.
+	backend.orders["task-running"] = []string{
+		`{"task":{"id":"task-running","title":"T","status":"running","claim_expires":1}}`}
+	backend.orders["task-review"] = []string{
+		`{"task":{"id":"task-review","title":"T","status":"review"}}`}
+	backend.orders["task-done"] = []string{
+		`{"task":{"id":"task-done","title":"T","status":"done"}}`}
 	s := newClaimToolServer(t, backend)
 
-	cases := map[string]string{
-		"task-todo":    "cannot claim: ticket is todo, claim requires ready",
-		"task-blocked": "cannot claim: ticket is blocked, claim requires ready",
+	cases := []struct{ id, want string }{
+		{"task-triage", "cannot claim: ticket is triage, an internal intake lane where a specifier rewrites the card; no agent action exists, so surface it to a human"},
+		{"task-todo-parents", "cannot claim: ticket is todo, waiting on parent dependencies: t_aaa111, t_bbb222 (the kernel promotes it to ready when they complete)"},
+		{"task-todo-dict", "cannot claim: ticket is todo, waiting on parent dependencies: t_ccc333 (the kernel promotes it to ready when they complete)"},
+		{"task-todo-orphan", "cannot claim: ticket is todo with no parent dependencies; the kernel should have promoted it to ready, so surface it to a human"},
+		{"task-sched", "cannot claim: ticket is scheduled, waiting on its scheduled time and not dispatchable now"},
+		{"task-blocked", "cannot claim: ticket is blocked and must be unblocked first; ticket_get shows the block_reason, and this bridge has no unblock tool"},
+		{"task-running", "cannot claim: ticket is running without a live claim lock; the dispatcher owns it, so wait for ticket_events or surface it to a human"},
+		{"task-review", "cannot claim: ticket is in review, the reviewer holds it; wait for the verdict with ticket_events"},
+		{"task-done", "cannot claim: ticket is done, there is nothing left to claim"},
 	}
-	for id, want := range cases {
-		t.Run(id, func(t *testing.T) {
-			res := s.TicketClaim(context.Background(), TicketClaimInput{ID: id, Board: testBoard})
-			if !res.IsError || res.Content[0].Text != want {
-				t.Errorf("error = %q, want %q", res.Content[0].Text, want)
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			res := s.TicketClaim(context.Background(), TicketClaimInput{ID: tc.id, Board: testBoard})
+			if !res.IsError {
+				t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 			}
-			// exactly one GET (preflight only): a leaked exec would
-			// add a second GET for the re-read.
-			if n := backend.getCount(id); n != 1 {
-				t.Errorf("GET count = %d, want 1 (no exec on preflight rejection)", n)
+			if res.Content[0].Text != tc.want {
+				t.Errorf("error = %q, want %q", res.Content[0].Text, tc.want)
+			}
+			if n := backend.getCount(tc.id); n != 1 {
+				t.Errorf("GET count = %d, want 1 (preflight only, no exec)", n)
 			}
 		})
+	}
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0 (a refusal must not write)", n)
+	}
+}
+
+// TestTC_ClaimTriageRefusalNamesNoVerb pins the specific failure the incident
+// hit: the triage refusal must not suggest a tool or a "next step" the caller
+// can take, because no agent-facing verb exists for that lane. Naming one is
+// what sent the reporting agent hunting (t_a6e3ba60, 2026-10-18).
+func TestTC_ClaimTriageRefusalNamesNoVerb(t *testing.T) {
+	installFakeBin(t)
+	backend := newClaimBackend()
+	backend.orders["task-triage"] = []string{
+		`{"task":{"id":"task-triage","title":"T","status":"triage"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-triage", Board: testBoard})
+	if !res.IsError {
+		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
+	}
+	msg := res.Content[0].Text
+	if strings.Contains(msg, "ticket_") {
+		t.Errorf("triage refusal names a tool (%q): no bridge tool exists for that lane, so naming one sends the caller hunting again", msg)
+	}
+	for _, want := range []string{"internal intake lane", "surface it to a human"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("triage refusal does not say %q: %q", want, msg)
+		}
+	}
+	if strings.ContainsAny(msg, "\r\n") {
+		t.Errorf("refusal is not one line: %q", msg)
 	}
 }
 

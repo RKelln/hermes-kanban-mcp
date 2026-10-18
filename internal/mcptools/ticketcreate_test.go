@@ -69,7 +69,7 @@ func bodyKeys(t *testing.T, raw string) []string {
 
 func TestTC_CreateSuccess(t *testing.T) {
 	srv, rec := newRecServer(t, http.StatusOK,
-		`{"task":{"id":"t_abc123","title":"Created title","status":"triage"}}`)
+		`{"task":{"id":"t_abc123","title":"Created title","status":"ready"}}`)
 	defer srv.Close()
 	s := newTestServer(srv)
 
@@ -82,7 +82,6 @@ func TestTC_CreateSuccess(t *testing.T) {
 		WorkspaceKind:  "worktree",
 		Parents:        []string{"t_parent01"},
 		Skills:         []string{"go"},
-		Triage:         true,
 		IdempotencyKey: "k123",
 	}
 	res := s.TicketCreate(context.Background(), in)
@@ -102,20 +101,73 @@ func TestTC_CreateSuccess(t *testing.T) {
 	if got.query != "board=hermes-agent" {
 		t.Errorf("query = %s, want board=hermes-agent", got.query)
 	}
-	wantKeys := []string{"assignee", "body", "idempotency_key", "parents", "priority", "skills", "title", "triage", "workspace_kind"}
+	wantKeys := []string{"assignee", "body", "idempotency_key", "parents", "priority", "skills", "title", "workspace_kind"}
 	if keys := bodyKeys(t, got.body); strings.Join(keys, ",") != strings.Join(wantKeys, ",") {
 		t.Errorf("body keys = %v, want %v (body=%s)", keys, wantKeys, got.body)
+	}
+	if strings.Contains(got.body, "triage") {
+		t.Errorf("POST body carries a triage field: %s (the bridge never sets it)", got.body)
 	}
 
 	var out map[string]any
 	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
 		t.Fatalf("output is not valid JSON: %v (%s)", err, res.Content[0].Text)
 	}
-	if out["id"] != "t_abc123" || out["status"] != "triage" || out["title"] != "Created title" || out["board"] != "hermes-agent" {
-		t.Errorf("output = %v, want {id:t_abc123 status:triage title:Created title board:hermes-agent}", out)
+	if out["id"] != "t_abc123" || out["status"] != "ready" || out["title"] != "Created title" || out["board"] != "hermes-agent" {
+		t.Errorf("output = %v, want {id:t_abc123 status:ready title:Created title board:hermes-agent}", out)
 	}
 	if rendered := renderedSize(t, res); rendered > MaxToolResultBytes {
 		t.Errorf("rendered result %d bytes > %d", rendered, MaxToolResultBytes)
+	}
+}
+
+// TestTC_CreateTriageRefused pins the defense-in-depth half of the triage
+// fix: the schema no longer advertises the flag (register.go), and a caller
+// that sends it anyway is TOLD why rather than silently filed into a lane no
+// agent can spec or claim. Silently dropping the flag would be the worse
+// failure of the two: the ticket would land in triage, the caller would
+// believe it landed ready, and the next refusal would arrive at claim time
+// with no history.
+func TestTC_CreateTriageRefused(t *testing.T) {
+	srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_abc123","title":"T","status":"triage"}}`)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T", Triage: true})
+	if !res.IsError {
+		t.Fatalf("expected IsError for triage: true, got success: %s", res.Content[0].Text)
+	}
+	want := "invalid_input: triage is an internal intake lane (a specifier rewrites the card); the bridge cannot spec, so create the ticket ready or block it with kind=needs_input"
+	if res.Content[0].Text != want {
+		t.Errorf("error = %q, want exactly %q", res.Content[0].Text, want)
+	}
+	if len(*rec) != 0 {
+		t.Errorf("triage: true must be refused BEFORE any backend call, got %d request(s): %+v", len(*rec), *rec)
+	}
+}
+
+// TestTC_CreateWithoutTriageLandsReady is the control the refusal test needs:
+// the flag being refused must not cost the ordinary path anything. A create
+// with no triage field lands in whatever lane the backend reports, and here
+// that is ready — the lane an agent can claim.
+func TestTC_CreateWithoutTriageLandsReady(t *testing.T) {
+	srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_abc123","title":"T","status":"ready"}}`)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	res := s.TicketCreate(context.Background(), TicketCreateInput{Board: testBoard, Title: "T"})
+	if res.IsError {
+		t.Fatalf("expected success, got: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketCreateOut](t, res)
+	if out.Status != "ready" {
+		t.Errorf("status = %q, want ready (the flag is not sent, so the kernel's default lane applies)", out.Status)
+	}
+	if len(*rec) != 1 {
+		t.Fatalf("expected 1 backend request, got %d", len(*rec))
+	}
+	if keys := bodyKeys(t, (*rec)[0].body); strings.Join(keys, ",") != "idempotency_key,title" {
+		t.Errorf("body keys = %v, want only idempotency_key,title (body=%s)", keys, (*rec)[0].body)
 	}
 }
 
