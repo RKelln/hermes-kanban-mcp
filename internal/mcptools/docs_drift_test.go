@@ -54,11 +54,20 @@ var retiredPhrases = []string{
 	"IMMEDIATELY with its",                 // helpDoc, same sentence
 	"it returns instantly with its",        // AGENTS.md wait bullet
 	"short-circuit once the ticket leaves", // events_tool.go GetTaskEvents doc
+
+	// The triage lane offered as an agent destination (t_6053ef34,
+	// 2026-10-18). Two separate fossils: the create flag the bridge
+	// advertised, and the one-line claim refusal that named no exit and
+	// sent an agent hunting for a promote verb.
+	"`triage: true` for triage", // repo AGENTS.md workflow line
+	"claim requires ready",      // claim_tool.go's removed generic refusal
 }
 
 // proseSurfaces are the files that describe behaviour without executing it. A
 // doc comment in a .go file is in this set on purpose: the events_tool.go fossil
-// WAS a doc comment, and it survived a review and two sweeps.
+// WAS a doc comment, and it survived a review and two sweeps. claim_tool.go and
+// write_tools.go joined for the same reason (t_6053ef34): the claim refusal and
+// the triage flag are both described in prose next to the code that changed.
 var proseSurfaces = []string{
 	"../../AGENTS.md",
 	"../../README.md",
@@ -66,6 +75,8 @@ var proseSurfaces = []string{
 	"../../deploy/install.md",
 	"../../internal/config/config.go",
 	"../../internal/mcptools/register.go",
+	"../../internal/mcptools/claim_tool.go",
+	"../../internal/mcptools/write_tools.go",
 	"../../internal/mcptools/events_tool.go",
 }
 
@@ -128,6 +139,51 @@ func TestDocs_ProseSurfacesNameTheStatusChange(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "status CHANGING") {
 			t.Errorf("%s no longer names the status-change return (%q): a reader would take the wait for an event-only tail and never learn that a verdict writing no event still ends it", rel, "status CHANGING")
+		}
+	}
+}
+
+// TestDocs_ServeTheTriageLaneText is the positive half for the lane the bridge
+// used to advertise and cannot use (t_6053ef34). A negative-only gate would pass
+// a help doc that simply dropped the triage flag from the schema list: the agent
+// that hits `ticket_claim` on a triaged card would still learn nothing about
+// what the lane is, and "why can't I create one" would cost another run. Every
+// surface an outside lane reads has to say BOTH what triage is and where a card
+// that is not yours to start belongs.
+func TestDocs_ServeTheTriageLaneText(t *testing.T) {
+	surfaces := []struct{ name, text string }{
+		{"helpDoc (served by kanban_help)", helpDoc},
+	}
+	for _, rel := range []string{
+		"../../AGENTS.md",
+		"../../deploy/AGENTS.kanban-mcp.template.md",
+		"../../README.md",
+	} {
+		b, err := os.ReadFile(filepath.Clean(rel))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", rel, err)
+			continue
+		}
+		surfaces = append(surfaces, struct{ name, text string }{rel, string(b)})
+	}
+	for _, s := range surfaces {
+		for _, want := range []string{"internal intake lane", "needs_input"} {
+			if !strings.Contains(s.text, want) {
+				t.Errorf("%s does not state the triage lane contract (no %q): a reader would take triage for a lane it can use, and the refusal in ticket_claim would read as a missing step", s.name, want)
+			}
+		}
+	}
+}
+
+// TestDocs_ServeTheClaimRefusalRule is the positive half for the refusal
+// itself. The 2026-10-18 incident was not a missing sentence in the help: it was
+// an agent reading "cannot claim" and concluding there must be a companion verb.
+// So the served help has to deny the tool that does not exist, and has to say
+// what a `todo` refusal actually names.
+func TestDocs_ServeTheClaimRefusalRule(t *testing.T) {
+	for _, want := range []string{"no promote tool", "parent dependencies"} {
+		if !strings.Contains(helpDoc, want) {
+			t.Errorf("helpDoc no longer states the claim-refusal rule (no %q): an agent refused on a non-ready ticket would go looking for a verb instead of reading the reason", want)
 		}
 	}
 }

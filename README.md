@@ -15,12 +15,12 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode ag
   | `ticket_get` | Full ticket detail with truncation + size budgets; `detail: full` returns complete comment/body text |
   | `ticket_events` | Long-poll a ticket's events; the wait ends on events newer than `since_event_id`, on the ticket's status CHANGING from the status at call time, or on the timeout — `ticket_status` is reported on every return |
   | `review_queue` | Single-call scan for review-required tickets across **all boards** (one call replaces per-board scans) |
-  | `ticket_claim` | Atomically claim a ready ticket (`ready → running`) |
+  | `ticket_claim` | Atomically claim a ready ticket (`ready → running`); a non-ready ticket is refused with the reason for its own status, not a generic one |
   | `ticket_comment` | Append a comment |
   | `ticket_complete` | Complete a ticket — **review-gated by default**, with a `review_tier` knob (`LOW` completes direct) |
   | `ticket_request_review` | Request a final review: `ready`/`running` → `review` (the native review lane — a dispatched `sdlc-review` reviewer, not a block). `summary` required; refuses when no reviewer can be resolved |
   | `ticket_block` | Block a ticket; typed kinds via CLI with REST fallback |
-  | `ticket_create` | Create a ticket (title required; parents supported) |
+  | `ticket_create` | Create a ticket (title required; parents supported; no `triage` — refused, it is Hermes' internal intake lane) |
   | `kanban_help` | Full MCP-native usage + lifecycle contract |
 
 - All board-taking tools (`ticket_events`/`claim`/`comment`/`get`/`complete`/`block`/`list`/`create`) reject an omitted `board` — it is never silently defaulted, so multi-board setups can't land tickets in the wrong queue. The per-ticket tools also declare `id` and `board` **required** in their JSON Schema, so strict MCP clients fail fast on omission.
@@ -39,6 +39,8 @@ The kanban REST API has **no claim endpoint** (PATCH `status=running` is rejecte
 3. **Re-reads the ticket** and returns the authoritative post-claim state — never the CLI's stdout.
 
 The binary resolves the CLI via `HERMES_BIN` (default `hermes`). Claim TTL is ~15 minutes; when it expires the dispatcher re-queues the ticket to `ready` and `ticket_claim` works again.
+
+**The preflight refusal is written per status, and there is no promote tool.** A blanket "not claimable: requires another state" refusal tells a caller nothing about which lane it is in and reads like a missing step — an agent spent a run (2026-10-18) hunting for a promote verb that this bridge has never had. So the refusal names the reason for the status it found: `triage` is Hermes' internal intake lane for under-specified input (a specifier rewrites the card's title and body, so no agent action exists and the card goes to a human); a `todo` ticket names the parent dependencies it waits on, because the kernel promotes it when they complete; `scheduled` is waiting on time; `blocked` must be unblocked by someone else; `running` and `review` are held by a claim or a reviewer. `ticket_create` refuses `triage: true` for the same reason, and the right move for a card that is not yours to start is to comment why or block it with `needs_input`.
 
 **Related knobs** (env):
 - `MCP_ALLOW_SKIP_CLAIM=true` — `ticket_complete` skips its claim guard (it refuses to complete an unclaimed ticket otherwise).

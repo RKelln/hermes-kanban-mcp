@@ -45,7 +45,10 @@ MCP tools for a Hermes kanban board:
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required marker via block_reason or latest_summary);
     replaces per-board scans
-- ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired)
+- ticket_claim    ready->running BEFORE editing (TTL ~15m; re-claim if expired).
+    A non-ready ticket is refused with the reason for THAT status, never a
+    generic one — see the claim-refusal facts below before hunting for another
+    verb: there is none.
 - ticket_comment  log context/decisions as you work
 - ticket_request_review  request the FINAL REVIEW of finished work: ready/running ->
     'review' (not a block). The dispatcher claims the row as a REVIEW run and
@@ -79,7 +82,12 @@ MCP tools for a Hermes kanban board:
     the completion is REFUSED when it resolves to nothing spawnable, because
     a review row on a non-profile assignee parks in 'review' forever.
 - ticket_block    blockers; typed kinds: dependency|needs_input|capability|transient
-- ticket_create   new ticket; title required; parents supported
+- ticket_create   new ticket; title required; parents supported. There is NO
+    triage flag: triage is the kernel's internal intake lane for
+    under-specified input (a specifier REWRITES the card's title and body
+    before it becomes todo), the bridge never writes there and refuses
+    triage: true, and there is no agent "later" lane either — if a card is
+    not yours to start, comment why, or block it with kind=needs_input.
 - kanban_help     this doc
 
 The per-ticket tools (ticket_events/claim/comment/get/complete/block)
@@ -99,6 +107,15 @@ Lifecycle facts:
 - Claims are kernel-enforced: a ticket with an open parent stays 'todo';
   gate tickets are wired as parents and complete when the human completes
   them (children promote immediately).
+- Claim refusals are status-truthful, and there is no promote tool here: a
+  card moves only by claim, block, request-review and complete. triage: an
+  internal intake lane — a specifier rewrites the card, no agent action
+  exists, surface it to a human. todo: waiting on parent dependencies: <ids>
+  — the kernel promotes it to ready when they complete; todo with NO parents
+  is a kernel fault, surface it. scheduled: waiting on time, not
+  dispatchable. blocked: someone must unblock it (ticket_get shows
+  block_reason). running/review: a claim or a reviewer holds it — wait on
+  ticket_events, do not re-claim.
 - ticket_complete refuses an unclaimed ticket (must be 'running') unless
   MCP_ALLOW_SKIP_CLAIM=true; MCP_COMPLETE_MODE=done completes to 'done'
   instead of the review path. review_tier=LOW completes direct to done;
