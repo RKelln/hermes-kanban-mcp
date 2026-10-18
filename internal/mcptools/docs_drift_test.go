@@ -61,6 +61,14 @@ var retiredPhrases = []string{
 	// sent an agent hunting for a promote verb.
 	"`triage: true` for triage", // repo AGENTS.md workflow line
 	"claim requires ready",      // claim_tool.go's removed generic refusal
+
+	// The 15-minute claim TTL (t_cb0d23c0, 2026-10-18). Every one of these
+	// was a true statement about the CLI's built-in default and a false
+	// statement about what the bridge asked for: the whole defect was that
+	// the docs described the default as the contract.
+	"TTL ~15m",                  // helpDoc tool list
+	"Claims TTL ~15 min",        // repo AGENTS.md
+	"Claim TTL is ~15 minutes",  // README claim mechanism
 }
 
 // proseSurfaces are the files that describe behaviour without executing it. A
@@ -184,6 +192,54 @@ func TestDocs_ServeTheClaimRefusalRule(t *testing.T) {
 	for _, want := range []string{"no promote tool", "parent dependencies"} {
 		if !strings.Contains(helpDoc, want) {
 			t.Errorf("helpDoc no longer states the claim-refusal rule (no %q): an agent refused on a non-ready ticket would go looking for a verb instead of reading the reason", want)
+		}
+	}
+}
+
+// TestDocs_ServeTheClaimTTLKnob is the positive half for the claim TTL
+// (t_cb0d23c0). The knob had been "fixed" twice on the deployment side without
+// ever reaching argv, and the docs were why nobody noticed: every surface
+// described the CLI's 900-second default as the contract, so a 15-minute expiry
+// read as correct behaviour. The fix is only complete if an operator can learn
+// the knob's name from the surfaces they read, and an agent can learn where the
+// number in its claim response came from. Two surfaces carry the default value
+// itself (the served help and the env example), because those are the two an
+// operator reads before changing it.
+func TestDocs_ServeTheClaimTTLKnob(t *testing.T) {
+	type surface struct {
+		name        string
+		text        string
+		pinsDefault bool
+	}
+	read := func(rel string, pinsDefault bool) (surface, bool) {
+		b, err := os.ReadFile(filepath.Clean(rel))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", rel, err)
+			return surface{}, false
+		}
+		return surface{name: rel, text: string(b), pinsDefault: pinsDefault}, true
+	}
+
+	surfaces := []surface{{name: "helpDoc (served by kanban_help)", text: helpDoc, pinsDefault: true}}
+	for _, rel := range []string{
+		"../../AGENTS.md",
+		"../../README.md",
+		"../../deploy/AGENTS.kanban-mcp.template.md",
+	} {
+		if s, ok := read(rel, false); ok {
+			surfaces = append(surfaces, s)
+		}
+	}
+	if s, ok := read("../../deploy/kanban-mcp.env.example", true); ok {
+		surfaces = append(surfaces, s)
+	}
+
+	for _, s := range surfaces {
+		if !strings.Contains(s.text, "MCP_CLAIM_TTL_SECONDS") {
+			t.Errorf("%s does not name the claim-TTL knob MCP_CLAIM_TTL_SECONDS: a reader would take whatever TTL the CLI defaults to as the contract, which is how a 15-minute claim survived two deployment-side fixes", s.name)
+		}
+		if s.pinsDefault && !strings.Contains(s.text, "14400") {
+			t.Errorf("%s no longer states the default claim TTL (14400): an operator cannot tell what unset means", s.name)
 		}
 	}
 }
