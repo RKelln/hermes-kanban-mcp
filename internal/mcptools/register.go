@@ -129,7 +129,7 @@ func Register(srv *mcp.Server, s *Server) {
 		getSchema(),
 		s.TicketGet)
 
-	addTool(srv, "ticket_claim", "Atomically claim a ready ticket (ready -> running) via the hermes CLI. A non-ready ticket is refused with the reason for THAT status (triage is Hermes' internal intake lane with no agent action; todo names the parent ids it waits on; scheduled waits on time; running/review are held) — there is no promote tool. (id and board required)",
+	addTool(srv, "ticket_claim", "Atomically claim a ready ticket (ready -> running) via the hermes CLI. A non-ready ticket is refused with the reason for THAT status (triage is Hermes' internal intake lane with no agent action; todo names the parent ids it waits on; scheduled waits on time; running/review are held) — there is no promote tool. The claim TTL is the server's MCP_CLAIM_TTL_SECONDS (default 14400s = 4h), passed as an explicit --ttl: this lane has no heartbeat verb, so the TTL is the whole margin a run gets. The result reports claim_ttl_seconds, claim_ttl_source (MCP_CLAIM_TTL_SECONDS | default) and warns when the kernel's expiry disagrees with what was asked. If a claim does expire, re-claim with this tool — the dispatcher's reclaim books a failed attempt against the ticket. (id and board required)",
 		claimSchema(),
 		s.TicketClaim)
 

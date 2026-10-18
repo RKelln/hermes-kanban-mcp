@@ -3,8 +3,10 @@
 #
 # The production code never uses a shell; this fixture is executed
 # directly via execve (the kernel honors the shebang). Behavior is
-# selected by the task id, which the real CLI always places directly
-# after the verb:
+# selected by the task id, which is the first BARE argument after the
+# verb: flags and their values (--ttl 14400, --kind needs_input) are
+# skipped, so the layout the code emits does not have to be re-learned
+# by this fixture every time a flag is added.
 #   task-ok    -> print "claimed <id>" to stdout, exit 0
 #   task-fail  -> print an error to stderr, exit 1
 #   task-hang  -> spin in place until killed (timeout test)
@@ -13,9 +15,16 @@
 
 verb=""
 id=""
+skip_value=0
 for arg in "$@"; do
+  if [ "$skip_value" = "1" ]; then
+    skip_value=0
+    continue
+  fi
   case "$arg" in
     claim|block|request-review) verb="$arg" ;;
+    --ttl|--kind) skip_value=1 ;;
+    -*) ;;
     *)
       if [ -n "$verb" ] && [ -z "$id" ]; then
         id="$arg"
