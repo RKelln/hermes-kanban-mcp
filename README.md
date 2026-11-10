@@ -2,7 +2,7 @@
 
 > **⚠️ EARLY — IMPLEMENTED, NOT YET STABLE.** This repository started as a 2026-08 design-phase experiment and is now a working implementation: all 12 MCP tools implemented, tested (`go vet` + `go test -race` green), and smoke-verified against a live Hermes kanban board. It is still young — expect API adjustments and breaking changes while it hardens. Use at your own risk; no support implied.
 
-Go MCP server exposing a Hermes kanban board as MCP tools for remote opencode agents (or any MCP client) over streamable HTTP.
+Go MCP server exposing a Hermes kanban board as MCP tools for remote coding agents (opencode, codex, Claude Code, or any MCP client) over streamable HTTP.
 
 ## Features
 
@@ -66,7 +66,8 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 
 - `deploy/kanban-mcp.service` — systemd unit (install binary to `/usr/local/bin/kanban-mcp`)
 - `deploy/kanban-mcp.env.example` — all configuration variables with defaults
-- `deploy/install.md` — install steps + opencode remote-MCP configuration snippet
+- `deploy/install.md` — install steps + MCP client configuration (opencode, codex, Claude Code, raw HTTP) in §7
+- `deploy/client-config.sh` — prints a ready-to-paste client config with the token already in it (`opencode`, `codex`, `claude`, `curl`)
 - `scripts/smoke.sh` — end-to-end smoke + secret-hygiene checks
 - `cmd/kanban-mcp/probe` — read-only live probe CLI
 - `sweeper/` — the review-sweeper cron job (Python) that reviews `review-required` tickets end-to-end; see `sweeper/README.md` + `deploy/review-sweeper.md`

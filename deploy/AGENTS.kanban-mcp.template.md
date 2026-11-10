@@ -1,7 +1,8 @@
 # AGENTS.md — kanban workflow drop-in (copy to any project repo using the hermes-kanban MCP)
 
 > This project's work items live on a **Hermes kanban board**. Use the `hermes-kanban` MCP server
-> (remote MCP, URL `http://100.126.212.105:9130/mcp`, bearer token in your opencode config).
+> (remote MCP, URL `http://100.126.212.105:9130/mcp`, bearer token in your MCP client config —
+> opencode, codex and Claude Code snippets are in the bridge repo's `deploy/install.md` §7).
 > Board slug for this project: `<BOARD_SLUG>` (default: `hermes-kanban-mcp`).
 
 ## Workflow (extremely succinct)

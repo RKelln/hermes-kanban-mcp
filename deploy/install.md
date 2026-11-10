@@ -199,26 +199,114 @@ per-request access logs (`method`, `path`, `status`, `duration_ms`), and
 `outcome=auth_failed` on bad tokens. Secrets are never logged — a successful
 install shows the token value nowhere in the journal.
 
-## 7. Configure the MCP client (opencode)
+## 7. Configure MCP clients
 
-On the machine running opencode, add the server to
-`~/.config/opencode/opencode.json`:
+Every client speaks the same streamable-HTTP endpoint with one static bearer
+token. There is no OAuth and no `/.well-known/*` discovery, so a client that
+insists on an OAuth flow cannot connect — it must accept a literal
+`Authorization: Bearer <token>` header.
 
-```json
-{ "mcp": { "kanban": { "type": "remote", "url": "http://<tailscale-ip>:9130/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer <MCP_BEARER_TOKEN>" } } } }
+```
+http://<host>:9130/mcp
 ```
 
-- `oauth: false` means the client uses the **static bearer token** in `headers`
-  as-is — it does not attempt dynamic OAuth registration with the server
-  (kanban-mcp does not implement OAuth or `/.well-known/*` endpoints).
-- The client config file contains the token, so restrict it:
+- on the bridge host: `http://127.0.0.1:9130/mcp`
+- from another machine: `http://<tailscale-ip>:9130/mcp` (`tailscale ip -4` on the host)
+
+`deploy/client-config.sh` prints the block below for a given client with the real
+token already substituted, so nobody hand-edits a 64-char secret:
+
+```sh
+deploy/client-config.sh opencode                  # also: codex, claude, curl
+deploy/client-config.sh codex --host 100.x.y.z    # snippet for a remote machine
+```
+
+The token itself (never paste it into a ticket, a prompt, or a repo — it is
+SSH-key-grade: whoever holds it can create tickets that the dispatcher will
+spawn as real workers on this host):
+
+```sh
+sudo grep '^MCP_BEARER_TOKEN=' /etc/kanban-mcp.env
+```
+
+### opencode
+
+`~/.config/opencode/opencode.json` — merge into the existing `mcp` object, do not
+replace the file (it holds other servers):
+
+```json
+{ "mcp": { "kanban": { "type": "remote", "url": "http://<host>:9130/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer <MCP_BEARER_TOKEN>" } } } }
+```
+
+- `oauth: false` makes the client use the token in `headers` as-is instead of
+  attempting dynamic registration.
+- The file now holds the token, so restrict it:
 
 ```sh
 chmod 0600 ~/.config/opencode/opencode.json
 ```
 
-After editing, restart opencode and confirm the 12 `hermes-kanban-*` tools are listed
-in a session.
+Restart opencode. A session should list 12 kanban tools: `board_list`,
+`kanban_help`, `review_queue`, `ticket_block`, `ticket_claim`, `ticket_comment`,
+`ticket_complete`, `ticket_create`, `ticket_events`, `ticket_get`, `ticket_list`,
+`ticket_request_review`.
+
+### codex
+
+Either register it by CLI — the token stays out of the config file, but
+`MCP_BEARER_TOKEN` must be in codex's environment when it starts:
+
+```sh
+codex mcp add kanban --url http://<host>:9130/mcp --bearer-token-env-var MCP_BEARER_TOKEN
+```
+
+or put the token inline in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.kanban]
+url = "http://<host>:9130/mcp"
+http_headers = { Authorization = "Bearer <MCP_BEARER_TOKEN>" }
+```
+
+```sh
+chmod 0600 ~/.codex/config.toml
+```
+
+Check with `codex mcp get kanban` — expect `transport: streamable_http`,
+`url:` as above, and `http_headers: Authorization=*****` (a bare `-` there means
+the header never landed). `codex mcp list` should report
+`Auth: Bearer token`.
+
+### Claude Code
+
+```sh
+claude mcp add --transport http kanban http://<host>:9130/mcp \
+  --header "Authorization: Bearer <MCP_BEARER_TOKEN>"
+```
+
+This writes the server (token included) into Claude Code's own config, so
+restrict that file to `0600` too.
+
+### Any other client
+
+Set `Authorization: Bearer <token>` and
+`Accept: application/json, text/event-stream`. Streamable HTTP needs a real
+session before any tool call: `initialize` → keep the `Mcp-Session-Id` response
+header → `notifications/initialized` → `tools/call` with that header. Responses
+are SSE frames; parse every `data:` line and keep the frame whose `id` matches
+the request. Skipping the handshake returns a bare HTTP 400 that reads like an
+auth or payload bug.
+
+### If a client will not connect
+
+| symptom | cause |
+| --- | --- |
+| **401** `invalid_token` | token missing or wrong — this is our middleware, on both surfaces |
+| **403** `Forbidden: invalid Host header` | not auth. The Go SDK's DNS-rebinding guard fires when the connection lands on a loopback socket but the URL carries a name (an SSH tunnel, or a hosts alias). Use the tailnet address, or `127.0.0.1` at the tunnel end |
+| **429** | per-IP token bucket (`MCP_RATE_LIMIT`, default 120/min, burst 20). Every local client shares one bucket, so a burst in one starves the others |
+| tools listed but every result is `{}` or empty | a pre-envelope-fix build. Check the running version: the startup journal line (`journalctl -u kanban-mcp | grep version`) or `kanban-mcp -version` |
+
+`/healthz` returns a bare `ok`; it is a liveness check, not a version check.
 
 ## Upgrading an existing install
 
