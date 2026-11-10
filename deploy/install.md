@@ -231,20 +231,23 @@ sudo grep '^MCP_BEARER_TOKEN=' /etc/kanban-mcp.env
 
 ### opencode
 
-`~/.config/opencode/opencode.json` — merge into the existing `mcp` object, do not
-replace the file (it holds other servers):
-
-```json
-{ "mcp": { "kanban": { "type": "remote", "url": "http://<host>:9130/mcp", "enabled": true, "oauth": false, "headers": { "Authorization": "Bearer <MCP_BEARER_TOKEN>" } } } }
-```
-
-- `oauth: false` makes the client use the token in `headers` as-is instead of
-  attempting dynamic registration.
-- The file now holds the token, so restrict it:
+One command, and it writes the shape opencode 2.x actually uses
+(`mcp.servers.<name>`):
 
 ```sh
+opencode mcp add kanban --url http://<host>:9130/mcp \
+  --header "Authorization=Bearer <MCP_BEARER_TOKEN>" --global
 chmod 0600 ~/.config/opencode/opencode.json
 ```
+
+- The file holds the token once this is written, hence the `chmod`.
+- The flat `"mcp": { "kanban": { … } }` layout is the deprecated V1 form. It
+  still loads — an existing V1 entry gets hoisted into `servers` — but
+  `opencode mcp add` writes the nested form, so write that one.
+- **Do not verify with `opencode mcp list`.** Measured on v2.2.5: it prints
+  "No MCP servers configured" while the server demonstrably works, which sends
+  you hunting a config bug that does not exist. `opencode debug config` shows
+  the resolved `mcp.servers` tree; the honest check is a tool call.
 
 Restart opencode. A session should list 12 kanban tools: `board_list`,
 `kanban_help`, `review_queue`, `ticket_block`, `ticket_claim`, `ticket_comment`,
@@ -253,29 +256,37 @@ Restart opencode. A session should list 12 kanban tools: `board_list`,
 
 ### codex
 
-Either register it by CLI — the token stays out of the config file, but
-`MCP_BEARER_TOKEN` must be in codex's environment when it starts:
-
-```sh
-codex mcp add kanban --url http://<host>:9130/mcp --bearer-token-env-var MCP_BEARER_TOKEN
-```
-
-or put the token inline in `~/.codex/config.toml`:
+`~/.codex/config.toml` — the token comes from the environment, never from the
+file:
 
 ```toml
 [mcp_servers.kanban]
 url = "http://<host>:9130/mcp"
-http_headers = { Authorization = "Bearer <MCP_BEARER_TOKEN>" }
+bearer_token_env_var = "MCP_BEARER_TOKEN"
+default_tools_approval_mode = "approve"
 ```
 
 ```sh
 chmod 0600 ~/.codex/config.toml
 ```
 
-Check with `codex mcp get kanban` — expect `transport: streamable_http`,
-`url:` as above, and `http_headers: Authorization=*****` (a bare `-` there means
-the header never landed). `codex mcp list` should report
-`Auth: Bearer token`.
+- **`bearer_token_env_var`, NOT an inline header.** codex-cli 0.166.0 accepts
+  `http_headers = { Authorization = "Bearer …" }` — `codex mcp get kanban`
+  prints it straight back — and then fails to authenticate: the rmcp transport
+  quits with `Transport channel closed, when AuthRequired(…)` carrying this
+  bridge's `invalid_token` 401. The env-var route authenticates; measured end
+  to end with a real `board_list`.
+- **`default_tools_approval_mode = "approve"` is required for headless use.**
+  `codex exec` cannot answer an approval prompt, so without it every call dies
+  with `MCP tool call requires approval, but approval policy is never`. If a
+  client should be read-only, prefer `enabled_tools` over a blanket approve.
+- Something must put `MCP_BEARER_TOKEN` in codex's environment **at launch**.
+  `deploy/codex-kanban.sh` reads the service env file and `exec`s codex with it
+  (symlink it as `codex-kanban`). Exporting the token in a shell profile instead
+  hands the credential to every child process on the box.
+- Verify: `codex mcp get kanban` → `transport: streamable_http`,
+  `bearer_token_env_var: MCP_BEARER_TOKEN`; then a `codex-kanban exec …` asking
+  for `board_list` should report `mcp: kanban/board_list (completed)`.
 
 ### Claude Code
 
@@ -296,6 +307,34 @@ header → `notifications/initialized` → `tools/call` with that header. Respon
 are SSE frames; parse every `data:` line and keep the frame whose `id` matches
 the request. Skipping the handshake returns a bare HTTP 400 that reads like an
 auth or payload bug.
+
+### Rotating the token
+
+Rotation is one file, one process restart, then every client that materialised
+the token. Do it after any suspicion of exposure — a token pasted into a chat, a
+ticket, a commit, or a prompt is burned.
+
+1. Write a fresh `MCP_BEARER_TOKEN` (`openssl rand -hex 32`) into
+   `/etc/kanban-mcp.env`, leaving every other key alone and the mode at `0600`.
+   Back the old file up first; the CLI has no rotate verb.
+2. Reload the process. systemd reads `EnvironmentFile` at start, so
+   `sudo systemctl restart kanban-mcp`. Without root, and when you own the
+   service account, `kill -9 "$(systemctl show -p MainPID --value kanban-mcp)"`
+   works: `Restart=on-failure` brings it straight back with the new environment
+   (measured — `NRestarts` increments and the listener returns).
+3. Re-emit the clients that store the token **inside a config file**: opencode
+   (`opencode mcp add …` again, or edit `mcp.servers.kanban.headers`), and Claude
+   Code if it was added with `--header`. Clients using `bearer_token_env_var`
+   (codex) need nothing — they read the file at launch.
+4. Verify in both directions: the OLD token must now return
+   `401 {"error":"invalid_token"}`, and the new one `200` with an
+   `Mcp-Session-Id`. A rotation that only shows the new token working has not
+   proved the old one is dead.
+
+**Rotation breaks every client you forget.** The bridge validates one static
+token for all of them, so a lane on another machine starts returning 401 the
+moment the service restarts. Announce it before restarting, and re-emit that
+machine's config in the same pass.
 
 ### If a client will not connect
 

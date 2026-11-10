@@ -68,6 +68,7 @@ export KANBAN_USERNAME=... KANBAN_PASSWORD=... MCP_BEARER_TOKEN=$(openssl rand -
 - `deploy/kanban-mcp.env.example` — all configuration variables with defaults
 - `deploy/install.md` — install steps + MCP client configuration (opencode, codex, Claude Code, raw HTTP) in §7
 - `deploy/client-config.sh` — prints a ready-to-paste client config with the token already in it (`opencode`, `codex`, `claude`, `curl`)
+- `deploy/codex-kanban.sh` — launches codex with `MCP_BEARER_TOKEN` set from the service env file, so codex's `bearer_token_env_var` resolves without exporting a secret everywhere
 - `scripts/smoke.sh` — end-to-end smoke + secret-hygiene checks
 - `cmd/kanban-mcp/probe` — read-only live probe CLI
 - `sweeper/` — the review-sweeper cron job (Python) that reviews `review-required` tickets end-to-end; see `sweeper/README.md` + `deploy/review-sweeper.md`

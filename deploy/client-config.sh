@@ -68,32 +68,48 @@ EOF
 
 emit_opencode() {
   cat <<EOF
-// ~/.config/opencode/opencode.json — merge into the existing "mcp" object
-// (it holds other servers), then: chmod 0600 ~/.config/opencode/opencode.json
-"kanban": {
-  "type": "remote",
-  "url": "$URL",
-  "enabled": true,
-  "oauth": false,
-  "headers": { "Authorization": "Bearer $TOKEN" }
-}
+# one command; writes mcp.servers.kanban into ~/.config/opencode/opencode.json
+opencode mcp add kanban --url $URL --header "Authorization=Bearer $TOKEN" --global
+chmod 0600 ~/.config/opencode/opencode.json
+
+# the shape it writes (opencode v2):
+#   "mcp": { "servers": { "kanban": { "type": "remote", "url": "$URL",
+#            "headers": { "Authorization": "Bearer ..." } } } }
+# The flat "mcp": {"kanban": {...}} layout is deprecated V1 - it still loads,
+# but "opencode mcp add" writes the nested form, so write that one.
+#
+# Do NOT verify with "opencode mcp list" - on v2.2.5 it prints "No MCP servers
+# configured" while the server works. Use "opencode debug config", or ask the
+# agent to call board_list.
 EOF
 }
 
 emit_codex() {
   if [ "$MODE" = "cli" ]; then
     cat <<EOF
-# keeps the token out of config.toml, but MCP_BEARER_TOKEN must be in codex's
-# environment when it starts:
+# registers the server; the token comes from the environment at launch, so
+# MCP_BEARER_TOKEN must be set when codex starts (deploy/codex-kanban.sh does
+# that from $ENV_FILE):
 codex mcp add kanban --url $URL --bearer-token-env-var MCP_BEARER_TOKEN
 EOF
     return
   fi
   cat <<EOF
-# ~/.codex/config.toml — then: chmod 0600 ~/.codex/config.toml
+# ~/.codex/config.toml - then: chmod 0600 ~/.codex/config.toml
 [mcp_servers.kanban]
 url = "$URL"
-http_headers = { Authorization = "Bearer $TOKEN" }
+bearer_token_env_var = "MCP_BEARER_TOKEN"
+default_tools_approval_mode = "approve"
+
+# bearer_token_env_var, NOT an inline Authorization header: codex-cli 0.166.0
+# accepts http_headers in this file ("codex mcp get" shows it) but does not
+# authenticate with it - the rmcp transport fails with our 401.
+# default_tools_approval_mode = "approve" is what lets headless "codex exec"
+# call tools at all; narrow with enabled_tools if the client is read-only.
+#
+# Launch with the token in the environment - deploy/codex-kanban.sh reads
+# $ENV_FILE and execs codex:
+#   codex-kanban exec --skip-git-repo-check "..."
 EOF
 }
 
