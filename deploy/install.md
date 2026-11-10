@@ -194,10 +194,19 @@ URL=http://<tailscale-ip>:9130 MCP_BEARER_TOKEN=<token> scripts/smoke.sh
 journalctl -u kanban-mcp -f
 ```
 
-Structured JSON log lines to journald: startup (with the redacted config),
-per-request access logs (`method`, `path`, `status`, `duration_ms`), and
-`outcome=auth_failed` on bad tokens. Secrets are never logged — a successful
-install shows the token value nowhere in the journal.
+Structured JSON log lines to journald: `startup complete` (with the redacted
+config), `listening` per bind address, and shutdown/errors. **That is all.** The
+server writes no per-request access log and no `auth_failed` line at any log
+level, so:
+
+- an empty journal is not evidence that a request never arrived, and
+- a client that is being rejected with 401 leaves **no trace on this host**.
+
+Diagnose auth from the client side (its error is this bridge's JSON
+`{"error":"invalid_token"}` 401) or from the connection table
+(`ss -tn '( sport = :9130 )'`), never from the absence of journal lines. Secrets
+are never logged — a successful install shows the token value nowhere in the
+journal.
 
 ## 7. Configure MCP clients
 
