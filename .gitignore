@@ -18,6 +18,13 @@
 __pycache__/
 *.pyc
 
+# kanban claim worktrees: `hermes kanban claim --workspace worktree:<repo>` materializes
+# the tree at <repo>/.worktrees/<ticket-id>. Untracked-but-present made `git status`
+# read dirty and deploy/upgrade.py refuse the tree (t_082e7f19). The durable fix is the
+# claim path calling worktree_ops._ensure_worktrees_gitignored; this line is the repo-side
+# half that does not need a Hermes patch.
+/.worktrees/
+
 # editor/OS
 .DS_Store
 .idea/

@@ -396,6 +396,13 @@ func TestDocs_ServeTheWakeFilter(t *testing.T) {
 			WakeOnVerdicts,
 			WakeOnAny,
 			"suppressed counts the events the filter swallowed",
+			// The count's SEMANTICS, not just its existence: the review of
+			// t_0e55e8dc measured that a client reusing its cursor sees the
+			// same bookkeeping counted again, and "distinct" alone reads as
+			// "new since your last call". Pin the qualifier so a later
+			// shortening cannot quietly change what the number means to the
+			// client that reads this description.
+			"cumulative since since_event_id",
 		} {
 			if !strings.Contains(text, want) {
 				t.Errorf("register.go no longer serves the wake filter (no %q)", want)
