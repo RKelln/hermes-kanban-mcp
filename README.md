@@ -18,7 +18,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote coding agen
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`); a non-ready ticket is refused with the reason for its own status, not a generic one |
   | `ticket_comment` | Append a comment |
   | `ticket_complete` | Complete a ticket — **review-gated by default**, with a `review_tier` knob (`LOW` completes direct) |
-  | `ticket_request_review` | Request a final review: `ready`/`running` → `review` (the native review lane — a dispatched `sdlc-review` reviewer, not a block). `summary` required; refuses when no reviewer can be resolved |
+  | `ticket_request_review` | Request a final review: `ready`/`running` → `review` (the native review lane — a review run on the reviewer profile, which force-loads the `sdlc-review` skill; not a block). `summary` required; refuses when no reviewer can be resolved, and refuses any reviewer that is not an installed profile |
   | `ticket_block` | Block a ticket; typed kinds via CLI with REST fallback |
   | `ticket_create` | Create a ticket (title required; parents supported; no `triage` — refused, it is Hermes' internal intake lane) |
   | `kanban_help` | Full MCP-native usage + lifecycle contract |

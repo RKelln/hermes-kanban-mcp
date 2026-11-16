@@ -71,6 +71,18 @@ var retiredPhrases = []string{
 	// sent an agent hunting for a promote verb.
 	"`triage: true` for triage", // repo AGENTS.md workflow line
 	"claim requires ready",      // claim_tool.go's removed generic refusal
+
+	// The sdlc-review SKILL named as if it were the reviewer's name
+	// (2026-11-16, the togather handoff). `reviewer` is written to the review
+	// row's assignee, so it must be a PROFILE; the skill is what a review run
+	// force-loads. codex-orchestrator read "spawns the sdlc-review reviewer"
+	// out of the served tool description, passed reviewer:"sdlc-review", and
+	// lost its entire handoff summary to the roster refusal — a correct
+	// refusal, from a sentence that taught the wrong name.
+	"spawns the sdlc-review reviewer",     // helpDoc, register.go, write_tools.go
+	"spawns the `sdlc-review` reviewer",   // the backticked form
+	"sdlc-review`\n    reviewer",          // repo AGENTS.md: wrapped mid-name
+	"a dispatched `sdlc-review` reviewer", // README tool table
 }
 
 // proseSurfaces are the files that describe behaviour without executing it. A
@@ -310,6 +322,50 @@ func TestDocs_ServeTheReviewerPrecedence(t *testing.T) {
 		for _, want := range s.want {
 			if !strings.Contains(string(b), want) {
 				t.Errorf("%s no longer states the reviewer precedence (no %q)", s.name, want)
+			}
+		}
+	}
+}
+
+// TestDocs_ServeTheReviewerIsAProfile pins the one distinction the roster
+// refusal enforces and no surface used to state: `reviewer` is a PROFILE name,
+// and `sdlc-review` is the SKILL a review run force-loads. (2026-11-16: a
+// remote lane read "spawns the sdlc-review reviewer" out of the served tool
+// description, passed reviewer:"sdlc-review" on board togather, and the bridge
+// refused the handoff — correctly, the card would have sat in 'review'
+// unclaimed — but only after the description had taught it the wrong name, and
+// the refusal cost the agent its entire summary. The negative half above
+// catches the old sentence; this half catches a rewrite that drops the
+// distinction while saying nothing false.)
+func TestDocs_ServeTheReviewerIsAProfile(t *testing.T) {
+	surfaces := []struct{ name, text string }{
+		{"helpDoc (served by kanban_help)", helpDoc},
+	}
+	for _, rel := range []string{
+		"../../AGENTS.md",
+		"../../README.md",
+		"../../deploy/AGENTS.kanban-mcp.template.md",
+	} {
+		b, err := os.ReadFile(filepath.Clean(rel))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", rel, err)
+			continue
+		}
+		surfaces = append(surfaces, struct{ name, text string }{rel, string(b)})
+	}
+	// register.go is what tools/list serves: the agent never reads the Go
+	// constant, only the string it carries.
+	if b, err := os.ReadFile("register.go"); err != nil {
+		t.Errorf("cannot read register.go: %v", err)
+	} else {
+		surfaces = append(surfaces, struct{ name, text string }{"register.go (served tool description)", string(b)})
+	}
+
+	for _, s := range surfaces {
+		low := strings.ToLower(s.text)
+		for _, want := range []string{"reviewer profile", "sdlc-review", "skill"} {
+			if !strings.Contains(low, want) {
+				t.Errorf("%s does not say the reviewer is a profile and that the sdlc-review skill is what a review run loads (no %q): an agent will pass the skill name, and the roster refusal will cost it the whole handoff", s.name, want)
 			}
 		}
 	}

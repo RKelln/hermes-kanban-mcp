@@ -45,13 +45,16 @@ tools (`hermes-kanban-*`).
   commit SHA in a ticket comment → **request review**. Two completion paths exist and both
   are live:
   - `ticket_request_review` — the native review lane. The ticket moves to `review` (not
-    `blocked`), the dispatcher claims it as a review run and spawns the `sdlc-review`
-    reviewer, and the verdict comes back to you. `summary` is required — it IS the
-    reviewer's handoff (what changed, the refs to verify, what you already proved); do not
-    make the reviewer re-derive it. `reviewer` is optional: it resolves to
-    `MCP_REVIEWER_PROFILE` when the caller passes none, is verified against the installed
-    profile roster, and is REFUSED when it is not a profile the dispatcher can spawn (an
-    unspawnable reviewer parks the card in `review` forever). **Moving a `running` ticket
+    `blocked`), the dispatcher claims it as a review run and spawns it on the row's
+    reviewer profile (that run force-loads the `sdlc-review` skill), and the verdict comes
+    back to you. `reviewer` is a **profile** name, never the skill name — `sdlc-review` is
+    what the run loads, not who it runs as, and passing it is refused. `summary` is
+    required — it IS the reviewer's handoff (what changed, the refs to verify, what you
+    already proved); do not make the reviewer re-derive it. `reviewer` is optional: it
+    resolves to `MCP_REVIEWER_PROFILE` when the caller passes none, is verified against
+    the installed profile roster, and is REFUSED when it is not a profile the dispatcher
+    can spawn (an unspawnable reviewer parks the card in `review` forever). **Moving a
+    `running` ticket
     requires `force: true`** — the bridge cannot verify claim ownership (one shared bearer
     token), so releasing a live claim is your explicit call; pass it only for work you
     claimed yourself, never for a ticket someone else holds mid-implementation.
