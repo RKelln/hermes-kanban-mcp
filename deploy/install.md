@@ -186,7 +186,9 @@ own bookkeeping (heartbeat/claimed/spawned/owner_admitted/worker_bound/
 assigned/reclaimed/created) and does not wake when the card moves into
 `running` or `review` — that is the reviewer's own claim landing — while `any`
 returns on every event (the pre-filter behaviour). Suppressed events are
-reported as a count in `suppressed`; nothing is dropped silently. A bridge older
+reported as a count in `suppressed` — cumulative since `since_event_id` and
+distinct within one call, so reusing a cursor reports the same bookkeeping
+again; nothing is dropped silently. A bridge older
 than this option ignores the field, so a post-upgrade probe should pass
 `wake_on: "any"` and confirm a heartbeat still wakes it.
 

@@ -13,7 +13,7 @@ Go MCP server exposing a Hermes kanban board as MCP tools for remote coding agen
   | `board_list` | List boards (slug, name, per-status counts) |
   | `ticket_list` | List tickets with status/assignee filters; summary-only, never full bodies |
   | `ticket_get` | Full ticket detail with truncation + size budgets; `detail: full` returns complete comment/body text |
-  | `ticket_events` | Long-poll a ticket's events; the wait ends on a **matching** event newer than `since_event_id`, on the ticket's status CHANGING to a status you can act on, or on the timeout — `ticket_status` is reported on every return. `wake_on` picks the matcher: `verdicts` (default) ignores kernel bookkeeping (heartbeat/claimed/spawned/…) and the reviewer's own `review → running` claim; `any` returns on everything. `suppressed` counts what the filter swallowed |
+  | `ticket_events` | Long-poll a ticket's events; the wait ends on a **matching** event newer than `since_event_id`, on the ticket's status CHANGING to a status you can act on, or on the timeout — `ticket_status` is reported on every return. `wake_on` picks the matcher: `verdicts` (default) ignores kernel bookkeeping (heartbeat/claimed/spawned/…) and the reviewer's own `review → running` claim; `any` returns on everything. `suppressed` counts what the filter swallowed (cumulative since `since_event_id`, distinct within one call — reusing a cursor reports the same bookkeeping again) |
   | `review_queue` | Single-call scan for review-required tickets across **all boards** (one call replaces per-board scans) |
   | `ticket_claim` | Atomically claim a ready ticket (`ready → running`); a non-ready ticket is refused with the reason for its own status, not a generic one |
   | `ticket_comment` | Append a comment |
