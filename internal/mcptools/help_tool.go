@@ -50,8 +50,10 @@ MCP tools for a Hermes kanban board:
     worker_bound, assigned, reclaimed, created — and does NOT wake when the
     card moves into running or review, because that is the reviewer's own
     claim landing; "any" wakes on everything, the pre-filter behaviour.
-    suppressed counts the events the filter swallowed, so "nothing happened"
-    and "40 heartbeats happened" stay distinguishable. ticket_status is
+    suppressed counts the events the filter swallowed — cumulative since
+    since_event_id, distinct within one call, so reusing a cursor reports the
+    same bookkeeping again — which keeps "nothing happened" and "40 heartbeats
+    happened" distinguishable. ticket_status is
     reported on every return, so "no events + a different ticket_status" is
     the "something happened" signal. A ticket that already finished, polled
     with your cursor caught up, waits out the timeout: pass the last seen

@@ -133,8 +133,12 @@ func TestTE_ReturnsEventsAfterCursor(t *testing.T) {
 		t.Errorf("event 2 note = %q, want review-required", out.Events[2].Note)
 	}
 
-	// since_event_id=2 should return only event 3
-	input2 := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 2, TimeoutSeconds: 2}
+	// since_event_id=2 should return only event 3. WakeOn any is REQUIRED
+	// here: event 2 is the only one whose id EQUALS the cursor, and it is a
+	// churn kind, so the default filter would drop it before the assertion
+	// and the equality boundary (id > since, not >=) would go untested —
+	// exactly the discrimination the review flagged (t_0e55e8dc C1).
+	input2 := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 2, TimeoutSeconds: 2, WakeOn: WakeOnAny}
 	res2 := s.TicketEvents(context.Background(), input2)
 	if res2 == nil || res2.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res2)
@@ -1060,5 +1064,88 @@ func TestTE_InvalidWakeOnRefused(t *testing.T) {
 	}
 	if n := b.tickCount.Load(); n != 0 {
 		t.Errorf("backend tick count = %d, want 0 (validation must reject before HTTP)", n)
+	}
+}
+
+// --- the wake POLICY, pinned as a table (t_22b5cd68) --------------------
+//
+// The review of t_0e55e8dc found the filter right and the pins too thin:
+// deleting `created` alone, `reclaimed`+`assigned`, or
+// `owner_admitted`+`worker_bound` from churnEventKinds left the whole suite
+// green, because only claimed/spawned/heartbeat were exercised. The map IS
+// the contract, so an entry dropped (or a key typo'd) later would silently
+// re-create the wake-storm this filter exists to stop.
+//
+// churnContractKinds is therefore the policy written out in the test. It is
+// deliberately NOT derived from churnEventKinds: a map-driven loop shrinks
+// silently when an entry is removed, which is the exact failure mode. Adding
+// a churn kind means editing BOTH — and the parity case below says so.
+
+var churnContractKinds = []string{
+	"created",
+	"claimed",
+	"reclaimed",
+	"assigned",
+	"spawned",
+	"owner_admitted",
+	"worker_bound",
+	"heartbeat",
+}
+
+// TestTE_ChurnDenylistParity is the cheap half: the list and the map must
+// describe the same set, in both directions.
+func TestTE_ChurnDenylistParity(t *testing.T) {
+	contract := make(map[string]bool, len(churnContractKinds))
+	for _, k := range churnContractKinds {
+		if contract[k] {
+			t.Errorf("churnContractKinds lists %q twice", k)
+		}
+		contract[k] = true
+	}
+	for k := range churnEventKinds {
+		if !contract[k] {
+			t.Errorf("churnEventKinds silences %q, which the contract list does not name: add it to churnContractKinds deliberately (and say in the commit why it is bookkeeping, not signal)", k)
+		}
+	}
+	for k := range contract {
+		if !churnEventKinds[k] {
+			t.Errorf("churnEventKinds no longer silences %q: every verdicts-mode wait now wakes on it, which is the wake-storm this filter exists to stop", k)
+		}
+	}
+}
+
+// TestTE_ChurnKindsAreSuppressed is the behavioural half: each kind on its
+// own must leave a verdicts-mode wait asleep, counted as suppressed.
+func TestTE_ChurnKindsAreSuppressed(t *testing.T) {
+	for _, kind := range churnContractKinds {
+		t.Run(kind, func(t *testing.T) {
+			defer restorePollInterval(t)
+			eventsPollInterval = 50 * time.Millisecond
+
+			b := newEventsBackend()
+			defer b.close()
+			s := NewServer(b.server.URL, "hermes-agent")
+			SetBoardLister(s)
+
+			b.setEvents([]json.RawMessage{mkEvent(5, kind, 1000, "")})
+			b.setStatus("review")
+
+			// Timeout 1s: the point is that the wait does NOT return early.
+			out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+				ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 1,
+			}))
+			if !out.TimedOut {
+				t.Fatalf("%q ended a verdicts-mode wait: churnEventKinds is supposed to silence it", kind)
+			}
+			if len(out.Events) != 0 {
+				t.Errorf("returned %d events for a churn kind, want 0", len(out.Events))
+			}
+			if out.Suppressed != 1 {
+				t.Errorf("Suppressed = %d, want 1 (the event was seen and deliberately not returned)", out.Suppressed)
+			}
+			if out.TicketStatus != "review" {
+				t.Errorf("TicketStatus = %q, want review", out.TicketStatus)
+			}
+		})
 	}
 }

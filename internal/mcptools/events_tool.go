@@ -106,7 +106,11 @@ type EventOut struct {
 // bookkeeping, in verdicts mode): they are NOT returned and NOT buffered,
 // and the count is the honest accounting a silent drop would deny —
 // "nothing to do, but 40 heartbeats went by" is a different fact from
-// "nothing happened". TicketStatus is the ticket's status as
+// "nothing happened". It is cumulative since since_event_id and distinct
+// within one call: invoking again with the same cursor reports the same
+// bookkeeping again, because the question it answers is "how much sits
+// between my cursor and now", not "what arrived since my last call".
+// TicketStatus is the ticket's status as
 // of the last fetch that reported one; a wait that ends because the status
 // CHANGED reports the new value here with no events, which is how a caller
 // learns a review verdict landed. A degraded fetch that reports no status
@@ -376,9 +380,16 @@ func (s *Server) GetTaskEvents(ctx context.Context, board, id string) ([]json.Ra
 // long-poll. It is STATEFUL for one reason: every poll re-reads the same
 // window from the backend, so a stateless suppressed count would count the
 // same heartbeat once per tick (40 heartbeats becoming 400). suppressedSeen
-// is the high-water mark of ids already counted as suppressed; the count
-// reported to the caller is therefore the number of DISTINCT events the
-// filter swallowed.
+// is the high-water mark of ids already counted as suppressed, so the count
+// reported for ONE call is the number of distinct events that call
+// swallowed.
+//
+// Across CALLS the count is cumulative since since_event_id, not a delta:
+// a caller that reuses its cursor after a timeout sees the same events
+// counted again on the next call (measured, t_0e55e8dc review N1). That is
+// intended — the number answers "how much bookkeeping sits between my
+// cursor and now", which is what a caller deciding whether to widen its
+// cursor needs — but it is not "events since your last call", so say which.
 type eventFilter struct {
 	since          int64
 	wakeOn         string
