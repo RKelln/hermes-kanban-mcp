@@ -409,8 +409,9 @@ func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *To
 // wrote them"), so a bridge-driven completion landed on a card nothing
 // would ever claim: t_ac950fce sat that way with no verdict and no
 // reviewer, and no queue entry anywhere held it. The native lane needs no
-// consumer: the dispatcher claims a review row itself and spawns the
-// sdlc-review reviewer.
+// consumer: the dispatcher claims a review row itself and spawns it on the
+// reviewer profile written on the row (which force-loads the sdlc-review
+// skill).
 //
 // Order matters. The comment lands first, because it is the reviewer's
 // record of what was claimed and a handoff with no comment is a reviewer

@@ -74,11 +74,14 @@ MCP tools for a Hermes kanban board:
 - ticket_comment  log context/decisions as you work
 - ticket_request_review  request the FINAL REVIEW of finished work: ready/running ->
     'review' (not a block). The dispatcher claims the row as a REVIEW run and
-    spawns the sdlc-review reviewer; APPROVE completes the ticket to done,
+    spawns it on the reviewer PROFILE named on the row (that run force-loads
+    the sdlc-review skill); APPROVE completes the ticket to done,
     request-changes returns it to you. summary is REQUIRED — it is the
     reviewer's handoff (what changed, the refs to verify, what you proved).
     reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE > the
-    reviewer recorded on the ticket's last changes-requested round. Whichever
+    reviewer recorded on the ticket's last changes-requested round. reviewer
+    is a Hermes PROFILE name (default here), never the sdlc-review SKILL name:
+    the skill is what a review run loads, not who it runs as. Whichever
     value wins is verified against the installed profile roster and REFUSED if
     the dispatcher could never spawn it, because a review row on a non-profile
     assignee parks in 'review' forever; the handoff always passes it, so the
