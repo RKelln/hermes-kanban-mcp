@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/RKelln/hermes-kanban-mcp/internal/config"
 )
 
 // NOTE on file naming: the canonical write-tools test suite lives in
@@ -517,4 +519,113 @@ func renderedSize(t *testing.T, res *ToolResult) int {
 func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
+}
+
+// The default-assignee guard (t_5498c280). This bridge is the EXTERNAL lane,
+// so a caller asking for the LOCAL `default` profile is routing the card to a
+// worker on the kanban host — on a typical install the only profile there is,
+// and a host that cannot push to the project repo. Measured 2026-11-16 on
+// board togather (t_79c4d2fb): created with assignee "default", claimed 16s
+// later, blocked on a push 403. The refusal must fire BEFORE the backend sees
+// anything, or the ticket exists and the dispatcher acts on it.
+func TestTC_RefusesDefaultAssignee(t *testing.T) {
+	srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_x","title":"T","status":"ready"}}`)
+	defer srv.Close()
+	s := newTestServer(srv)
+
+	for _, name := range []string{"default", "Default", "  DEFAULT  "} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(config.EnvAllowDefaultAssignee, "false")
+			res := s.TicketCreate(context.Background(), TicketCreateInput{
+				Board: testBoard, Title: "T", Assignee: name,
+			})
+			if !res.IsError {
+				t.Fatalf("assignee %q was accepted, want a refusal: %s", name, res.Content[0].Text)
+			}
+			text := res.Content[0].Text
+			for _, want := range []string{"EXTERNAL lane", "codex-orchestrator", config.EnvAllowDefaultAssignee} {
+				if !strings.Contains(text, want) {
+					t.Errorf("refusal for %q does not mention %q: %s", name, want, text)
+				}
+			}
+		})
+	}
+	if n := len(*rec); n != 0 {
+		t.Fatalf("a refused create still issued %d backend request(s)", n)
+	}
+}
+
+// The knob is the deliberate opt-out (a single-profile install that wants
+// MCP-created cards to run locally), and it fails CLOSED: an unparseable value
+// keeps the guard rather than losing it.
+func TestTC_DefaultAssigneeKnob(t *testing.T) {
+	cases := []struct {
+		env         string
+		wantRefused bool
+	}{
+		{"false", true},
+		{"", true},
+		{"nonsense", true},
+		{"true", false},
+		{"1", false},
+	}
+	for _, c := range cases {
+		t.Run(c.env, func(t *testing.T) {
+			srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_x","title":"T","status":"ready"}}`)
+			defer srv.Close()
+			s := newTestServer(srv)
+			t.Setenv(config.EnvAllowDefaultAssignee, c.env)
+
+			res := s.TicketCreate(context.Background(), TicketCreateInput{
+				Board: testBoard, Title: "T", Assignee: "default",
+			})
+			if got := res.IsError; got != c.wantRefused {
+				t.Fatalf("%s=%q: IsError=%v, want %v (%s)", config.EnvAllowDefaultAssignee, c.env, got, c.wantRefused, res.Content[0].Text)
+			}
+			if c.wantRefused {
+				if n := len(*rec); n != 0 {
+					t.Errorf("%s=%q: refused call issued %d backend request(s)", config.EnvAllowDefaultAssignee, c.env, n)
+				}
+				return
+			}
+			if n := len(*rec); n != 1 {
+				t.Fatalf("%s=%q: backend requests = %d, want 1", config.EnvAllowDefaultAssignee, c.env, n)
+			}
+			if !strings.Contains((*rec)[0].body, `"assignee":"default"`) {
+				t.Errorf("opt-out did not forward assignee=default: %s", (*rec)[0].body)
+			}
+		})
+	}
+}
+
+// Everything that is not the `default` profile is untouched: the lane's own
+// label, the human lane, an omitted assignee (lands unassigned, which the
+// dispatcher skips), and a near-miss string.
+func TestTC_OtherAssigneesPassTheGuard(t *testing.T) {
+	for _, name := range []string{"", "codex-orchestrator", "ryan", "default-ish"} {
+		t.Run(name, func(t *testing.T) {
+			srv, rec := newRecServer(t, http.StatusOK, `{"task":{"id":"t_x","title":"T","status":"ready"}}`)
+			defer srv.Close()
+			s := newTestServer(srv)
+			t.Setenv(config.EnvAllowDefaultAssignee, "false")
+
+			res := s.TicketCreate(context.Background(), TicketCreateInput{
+				Board: testBoard, Title: "T", Assignee: name,
+			})
+			if res.IsError {
+				t.Fatalf("assignee %q was refused: %s", name, res.Content[0].Text)
+			}
+			if n := len(*rec); n != 1 {
+				t.Fatalf("backend requests = %d, want 1", n)
+			}
+			body := (*rec)[0].body
+			if name == "" {
+				if strings.Contains(body, "assignee") {
+					t.Errorf("an omitted assignee must not be sent: %s", body)
+				}
+			} else if !strings.Contains(body, `"assignee":"`+name+`"`) {
+				t.Errorf("assignee %q was not forwarded verbatim: %s", name, body)
+			}
+		})
+	}
 }

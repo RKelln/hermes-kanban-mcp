@@ -37,6 +37,20 @@ type Config struct {
 	MCPCompleteMode string
 	// MCPAllowSkipClaim permits operating on tickets without claiming them. Env: MCP_ALLOW_SKIP_CLAIM.
 	MCPAllowSkipClaim bool
+	// MCPAllowDefaultAssignee permits ticket_create to assign a new ticket
+	// to the LOCAL `default` profile. Default false, and deliberately so:
+	// this bridge serves the EXTERNAL lane, whose repo lives on another
+	// host, while `default` is the profile THIS host's dispatcher spawns —
+	// so the card starts a local worker that normally cannot push to the
+	// project repo (2026-11-16: a remote follow-up card assigned `default`
+	// was claimed in 16s and then blocked on a push 403). Env:
+	// MCP_ALLOW_DEFAULT_ASSIGNEE.
+	//
+	// This field is the STARTUP view: Load validates the variable and
+	// Config.String() prints it. The guard itself calls
+	// AllowDefaultAssignee() per request (the Server carries no Config), so
+	// the environment — immutable after start — remains the one source.
+	MCPAllowDefaultAssignee bool
 	// MCPClaimWorker is the worker name stamped when claiming tickets. Env: MCP_CLAIM_WORKER.
 	MCPClaimWorker string
 	// MCPCommentAuthor is the author name stamped on tool-generated comments. Env: MCP_COMMENT_AUTHOR.
@@ -61,8 +75,8 @@ const (
 	defaultKanbanBoard   = "hermes-agent"
 	defaultHermesBin     = "hermes"
 	defaultCompleteMode  = "review"
-	defaultClaimWorker   = "opencode-remote"
-	defaultCommentAuthor = "opencode-remote"
+	defaultClaimWorker   = "remote-mcp"
+	defaultCommentAuthor = "remote-mcp"
 	// defaultReviewerProfile is deliberately EMPTY: there is no safe
 	// universal reviewer. Hardcoding one would silently choose who reviews
 	// on every deployment, and the tool already refuses (with the installed
@@ -73,6 +87,32 @@ const (
 
 	minBearerTokenLen = 16
 )
+
+// EnvAllowDefaultAssignee names the opt-out for the default-assignee guard
+// (see AllowDefaultAssignee). Exported so the ticket_create refusal and the
+// startup banner name the same variable as Load.
+const EnvAllowDefaultAssignee = "MCP_ALLOW_DEFAULT_ASSIGNEE"
+
+// AllowDefaultAssignee reports whether ticket_create may assign a new ticket
+// to the LOCAL `default` profile.
+//
+// It is read at CALL time, not from a loaded Config: the tool is constructed
+// with only a base URL, and this is a per-request safety rule. It fails
+// CLOSED — unset, empty, or unparseable is false — so a half-configured
+// deployment keeps the guard. Load validates the same variable with
+// ParseBool, so in a running server this can only ever see a real boolean or
+// an unset variable.
+func AllowDefaultAssignee() bool {
+	v, ok := os.LookupEnv(EnvAllowDefaultAssignee)
+	if !ok {
+		return false
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return false
+	}
+	return b
+}
 
 // Load reads configuration from the environment, applying defaults for
 // unset optional variables and validating required ones.
@@ -118,6 +158,14 @@ func Load() (*Config, error) {
 		cfg.MCPAllowSkipClaim = b
 	}
 
+	if v, ok := os.LookupEnv(EnvAllowDefaultAssignee); ok && v != "" {
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return nil, fmt.Errorf("environment variable %s must be a boolean: %w", EnvAllowDefaultAssignee, err)
+		}
+		cfg.MCPAllowDefaultAssignee = b
+	}
+
 	if v, ok := os.LookupEnv("MCP_RATE_LIMIT"); ok && v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
@@ -159,6 +207,7 @@ func (c *Config) String() string {
 	fmt.Fprintf(&b, "HermesBin=%s\n", c.HermesBin)
 	fmt.Fprintf(&b, "MCPCompleteMode=%s\n", c.MCPCompleteMode)
 	fmt.Fprintf(&b, "MCPAllowSkipClaim=%t\n", c.MCPAllowSkipClaim)
+	fmt.Fprintf(&b, "MCPAllowDefaultAssignee=%t\n", c.MCPAllowDefaultAssignee)
 	fmt.Fprintf(&b, "MCPClaimWorker=%s\n", c.MCPClaimWorker)
 	fmt.Fprintf(&b, "MCPCommentAuthor=%s\n", c.MCPCommentAuthor)
 	fmt.Fprintf(&b, "MCPReviewerProfile=%s\n", c.MCPReviewerProfile)

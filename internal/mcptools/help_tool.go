@@ -80,8 +80,13 @@ MCP tools for a Hermes kanban board:
     reviewer's handoff (what changed, the refs to verify, what you proved).
     reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE > the
     reviewer recorded on the ticket's last changes-requested round. reviewer
-    is a Hermes PROFILE name (default here), never the sdlc-review SKILL name:
-    the skill is what a review run loads, not who it runs as. Whichever
+    is a Hermes PROFILE, never the sdlc-review SKILL name:
+    the skill is what a review run loads, not who it runs as. OMIT reviewer
+    when you can: the server resolves the reviewer, and a lane never needs to
+    know a host profile name — passing it is an operator override. When the
+    reviewer cannot be RESOLVED (MCP_REVIEWER_PROFILE unset, or a recorded
+    reviewer that is no longer installed), that is server configuration you
+    cannot supply: report it to the operator instead of retrying. Whichever
     value wins is verified against the installed profile roster and REFUSED if
     the dispatcher could never spawn it, because a review row on a non-profile
     assignee parks in 'review' forever; the handoff always passes it, so the
@@ -125,6 +130,11 @@ MCP tools for a Hermes kanban board:
     before it becomes todo), the bridge never writes there and refuses
     triage: true, and there is no agent "later" lane either — if a card is
     not yours to start, comment why, or block it with kind=needs_input.
+    An assignee of 'default' is REFUSED: that is the kanban host's own worker
+    profile, and this bridge is the external lane, so the card would be
+    dispatched to a local worker there within a minute
+    (MCP_ALLOW_DEFAULT_ASSIGNEE=true opts out). Pass your lane's implementer
+    label, or omit assignee — an unassigned ticket is never dispatched.
 - kanban_help     this doc
 
 The per-ticket tools (ticket_events/claim/comment/get/complete/block)

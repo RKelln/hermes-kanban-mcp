@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/RKelln/hermes-kanban-mcp/internal/config"
 	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
@@ -90,6 +91,19 @@ func (s *Server) TicketCreate(ctx context.Context, in TicketCreateInput) *ToolRe
 	if in.Triage {
 		return ErrorResult("invalid_input: triage is an internal intake lane (a specifier rewrites the card); the bridge cannot spec, so create the ticket ready or block it with kind=needs_input")
 	}
+	// The default-assignee guard. This bridge serves the EXTERNAL lane: the
+	// code it tickets lives on another host, while `default` is the profile
+	// THIS host's dispatcher spawns — the only one on a typical install. A
+	// card assigned to it starts a local worker within a tick, on a box that
+	// normally has no push rights to the repo the card is about (togather
+	// t_79c4d2fb, 2026-11-16: created with assignee "default", claimed 16s
+	// later, blocked on a push 403). Refused rather than rewritten: silently
+	// re-pointing the assignee would hide the same routing mistake from
+	// every later caller. MCP_ALLOW_DEFAULT_ASSIGNEE=true is the deliberate
+	// opt-out for a single-profile install that really wants that.
+	if !config.AllowDefaultAssignee() && isDefaultAssignee(in.Assignee) {
+		return ErrorResult("invalid_input: assignee %q is refused: this bridge is the EXTERNAL lane, and `default` is the kanban host's own worker profile — the card would be dispatched to a local worker on that host within about a minute. Pass the implementer label your lane uses (e.g. codex-orchestrator), or omit assignee to leave the ticket unassigned (the dispatcher skips those). %s=true opts out, for a single-profile install that intends MCP-created cards to run locally.", strings.TrimSpace(in.Assignee), config.EnvAllowDefaultAssignee)
+	}
 	for _, p := range in.Parents {
 		if err := ValidateTicketID(p); err != nil {
 			return ErrorResult("invalid_input: invalid parent id %q", p)
@@ -124,6 +138,14 @@ func (s *Server) TicketCreate(ctx context.Context, in TicketCreateInput) *ToolRe
 		Title:  env.Task.Title,
 		Board:  board,
 	})
+}
+
+// isDefaultAssignee reports whether name asks for the LOCAL `default`
+// profile. Trimmed and case-insensitive on purpose: the kernel's
+// profile_exists normalises, so an exact-string check leaves a real
+// collision window open ("Default", " default ").
+func isDefaultAssignee(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "default")
 }
 
 // synthesizedIdempotencyKey derives a retry-safe key from the request

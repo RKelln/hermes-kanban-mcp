@@ -489,3 +489,74 @@ func TestDocs_ServeTheWakeFilter(t *testing.T) {
 		}
 	}
 }
+
+// TestDocs_ServeTheDefaultAssigneeGuard pins the guard's served contract
+// (t_5498c280). An external lane must be told, where it reads, that `default`
+// is the kanban HOST's profile and that the bridge refuses it — otherwise the
+// refusal is a surprise discovered by a failed create, and the lane reaches for
+// the profile that just cost it a handoff's worth of work. Operators need the
+// knob on the surfaces they read, or the opt-out is undiscoverable.
+func TestDocs_ServeTheDefaultAssigneeGuard(t *testing.T) {
+	// Surfaces an AGENT reads before it calls ticket_create.
+	surfaces := []struct{ name, text string }{
+		{"helpDoc (served by kanban_help)", helpDoc},
+	}
+	if b, err := os.ReadFile("register.go"); err != nil {
+		t.Errorf("cannot read register.go: %v", err)
+	} else {
+		surfaces = append(surfaces, struct{ name, text string }{"register.go (served tool description)", string(b)})
+	}
+	for _, s := range surfaces {
+		// Case-insensitive on the lane phrase: the served help flows as prose
+		// ("this bridge is the external lane"), the tool description shouts it.
+		if !strings.Contains(strings.ToLower(s.text), "external lane") {
+			t.Errorf("%s does not say this bridge is the external lane: the refusal has no reason attached", s.name)
+		}
+		for _, want := range []string{"MCP_ALLOW_DEFAULT_ASSIGNEE"} {
+			if !strings.Contains(s.text, want) {
+				t.Errorf("%s does not state the default-assignee guard (no %q): a lane will assign the host's own profile and learn only from the refusal", s.name, want)
+			}
+		}
+	}
+
+	// Surfaces an OPERATOR reads before changing the setting.
+	for _, rel := range []string{
+		"../../README.md",
+		"../../deploy/kanban-mcp.env.example",
+		"../../deploy/AGENTS.kanban-mcp.template.md",
+		"../../deploy/install.md",
+	} {
+		b, err := os.ReadFile(filepath.Clean(rel))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", rel, err)
+			continue
+		}
+		if !strings.Contains(string(b), "MCP_ALLOW_DEFAULT_ASSIGNEE") {
+			t.Errorf("%s does not name MCP_ALLOW_DEFAULT_ASSIGNEE: neither the operator nor the lane can find the refusal's opt-out", rel)
+		}
+	}
+}
+
+// TestDocs_TellTheLaneToOmitTheReviewer is the counterpart rule (2026-11-16,
+// Ryan): the reviewer is a DEPLOYMENT property, not a lane argument. A lane
+// that is told it must name a profile ends up naming the host's own — which is
+// exactly the "why is default in my handoff" that reading the roster taught.
+// Both served surfaces must say OMIT before they say what a profile is.
+func TestDocs_TellTheLaneToOmitTheReviewer(t *testing.T) {
+	surfaces := []struct{ name, text string }{
+		{"helpDoc (served by kanban_help)", helpDoc},
+	}
+	if b, err := os.ReadFile("register.go"); err != nil {
+		t.Errorf("cannot read register.go: %v", err)
+	} else {
+		surfaces = append(surfaces, struct{ name, text string }{"register.go (served tool description)", string(b)})
+	}
+	for _, s := range surfaces {
+		if !strings.Contains(s.text, "OMIT") {
+			t.Errorf("%s never tells the lane to OMIT reviewer: a lane reading it concludes the profile name is its business", s.name)
+		}
+		if !strings.Contains(s.text, "operator override") {
+			t.Errorf("%s does not call an explicit reviewer an operator override, so omitting it reads as incomplete", s.name)
+		}
+	}
+}

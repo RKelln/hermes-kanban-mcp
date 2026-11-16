@@ -451,8 +451,15 @@ them:
 ```sh
 sudo grep -E '^(MCP_REVIEWER_PROFILE|MCP_CLAIM_WORKER)=' /etc/kanban-mcp.env
 # MCP_REVIEWER_PROFILE=default     <- an installed profile the dispatcher can spawn
-# MCP_CLAIM_WORKER=opencode-remote <- the lane label it must NEVER spawn
+# MCP_CLAIM_WORKER=remote-mcp <- the lane label it must NEVER spawn
 ```
+
+One more value to confirm on an external-lane install: `MCP_ALLOW_DEFAULT_ASSIGNEE`
+must be absent or `false`. `ticket_create` REFUSES an `assignee` of `default` by
+default, because that names THIS host's worker profile — an external lane's card
+would be dispatched here within a tick, on a box that usually cannot push to the
+project repo the ticket is about. Setting it `true` is only for a single-profile
+install that deliberately wants MCP-created cards to run locally.
 
 `MCP_CLAIM_WORKER` is not optional on this path any more (t_b917c3c6): it is the
 implementer recorded on the review handoff, and a handoff with no implementer
@@ -461,7 +468,7 @@ it — never re-run §3:
 
 ```sh
 sudo grep -q '^MCP_CLAIM_WORKER=' /etc/kanban-mcp.env || \
-  printf '\nMCP_CLAIM_WORKER=opencode-remote\n' | sudo tee -a /etc/kanban-mcp.env
+  printf '\nMCP_CLAIM_WORKER=remote-mcp\n' | sudo tee -a /etc/kanban-mcp.env
 sudo systemctl restart kanban-mcp.service
 ```
 
