@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -489,5 +490,29 @@ func TestNewContract(t *testing.T) {
 	}
 	if c.httpClient.Jar == nil {
 		t.Fatal("cookie jar must be configured")
+	}
+}
+
+// TestDoOnce_OversizedResponseRefused pins the shared session core's own
+// read cap. It clipped responses with io.LimitReader, so a body past the
+// cap came back as a short byte slice and failed later as "unexpected end
+// of JSON input" at whatever decoded it — a size limit reported as a
+// malformed backend. The cap must refuse by name instead.
+func TestDoOnce_OversizedResponseRefused(t *testing.T) {
+	var sent int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.WriteString(w, strings.Repeat("y", maxBodyRead+64))
+		sent = n
+	}))
+	defer ts.Close()
+
+	c := New("u", "p")
+	c.baseURL = ts.URL + "/" // doOnce itself does no session work
+	_, body, err := c.doOnce(context.Background(), http.MethodGet, "boards", nil)
+	if err == nil {
+		t.Fatalf("a %d-byte response must be refused, got %d bytes back", sent, len(body))
+	}
+	if !strings.Contains(err.Error(), "read cap") || !strings.Contains(err.Error(), strconv.Itoa(maxBodyRead)) {
+		t.Fatalf("refusal %q must name the read cap and its limit", err.Error())
 	}
 }

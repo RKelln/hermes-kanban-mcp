@@ -20,9 +20,23 @@ const (
 	// a Server built by NewServer. Callers needing a different budget
 	// pass their own *http.Client via NewServerWithClient.
 	defaultRequestTimeout = 15 * time.Second
-	// maxRestBodyBytes caps how much of a backend response is read,
-	// mirroring the 1 MiB request-body cap the server applies.
-	maxRestBodyBytes = 1 << 20
+	// maxRestBodyBytes is the read cap on every backend response. It is
+	// not a size budget for what the tools RETURN — those project down
+	// (ticket_list returns at most MaxTicketListLimit rows) — it is the
+	// hard stop past which a response is refused instead of decoded.
+	//
+	// It must clear a whole board view: GET /board carries every card's
+	// full body, so the payload grows with a board's history and never
+	// shrinks. Measured 2026-11-16: the togather board's view is
+	// 1,143,909 bytes across 295 cards. The 1 MiB value this replaced
+	// cut that response mid-JSON, and the read helper reported the cut
+	// as "decode kanban backend response: unexpected end of JSON input"
+	// — a size problem wearing a malformed-JSON costume, which is why it
+	// read as a backend fault rather than a bridge limit. The togather
+	// board became unlistable that way on 2026-11-09, the day its
+	// payload crossed 1 MiB. An over-cap response now fails by name; see
+	// doJSON and errResponseTooLarge.
+	maxRestBodyBytes = 16 << 20
 )
 
 // Server is the shared write-tool backend handle: the kanban REST base
@@ -33,6 +47,10 @@ type Server struct {
 	baseURL      string
 	defaultBoard string
 	client       *http.Client
+	// maxBodyBytes is the per-response read cap; both constructors set
+	// it to maxRestBodyBytes. It is a field so tests can shrink it
+	// instead of allocating a 16 MiB fixture to prove the refusal.
+	maxBodyBytes int
 }
 
 // NewServer builds a Server with a default 15s-timeout client. baseURL
@@ -45,6 +63,7 @@ func NewServer(baseURL, defaultBoard string) *Server {
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		defaultBoard: defaultBoard,
 		client:       &http.Client{Timeout: defaultRequestTimeout},
+		maxBodyBytes: maxRestBodyBytes,
 	}
 }
 
@@ -58,6 +77,7 @@ func NewServerWithClient(client *http.Client, baseURL, defaultBoard string) *Ser
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		defaultBoard: defaultBoard,
 		client:       client,
+		maxBodyBytes: maxRestBodyBytes,
 	}
 }
 
@@ -98,8 +118,11 @@ func (s *Server) doJSON(ctx context.Context, method, path string, query url.Valu
 		rdr = bytes.NewReader(b)
 	}
 	u := s.baseURL + path
+	label := path
 	if len(query) > 0 {
-		u += "?" + query.Encode()
+		q := "?" + query.Encode()
+		u += q
+		label += q
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
@@ -113,9 +136,9 @@ func (s *Server) doJSON(ctx context.Context, method, path string, query url.Valu
 		return err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxRestBodyBytes))
+	raw, err := readCapped(resp.Body, s.maxBodyBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s %s: %w", method, label, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &RestError{Status: resp.StatusCode, Body: raw}
@@ -149,6 +172,38 @@ func (s *Server) GetTask(ctx context.Context, board, id string) (*kanban.TaskSum
 		return nil, err
 	}
 	return &env.Task, nil
+}
+
+// errResponseTooLarge is returned when a backend response exceeds the
+// read cap. It exists so an oversized payload is reported as what it is
+// — bigger than this bridge will read — instead of as a JSON decode
+// error. The two looked identical from the caller's side while the cap
+// cut bodies silently: "unexpected end of JSON input" is what a
+// truncated document decodes to, and it names neither the size nor the
+// limit, so the failure pointed at the backend.
+type errResponseTooLarge struct {
+	cap  int
+	read int
+}
+
+func (e *errResponseTooLarge) Error() string {
+	return fmt.Sprintf("response exceeds the %d-byte read cap (at least %d bytes)", e.cap, e.read)
+}
+
+// readCapped reads r up to limit bytes and refuses anything longer. It
+// reads limit+1 so a response that exactly fills the cap still decodes
+// while a byte more is detected as overflow rather than discovered later
+// as broken JSON. Overflow is refused for any status: a body we could
+// not read whole cannot be decoded OR trusted as an error detail.
+func readCapped(r io.Reader, limit int) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > limit {
+		return nil, &errResponseTooLarge{cap: limit, read: len(raw)}
+	}
+	return raw, nil
 }
 
 // RestErrorMessage maps a doJSON error to the one-line tool-error
