@@ -207,7 +207,8 @@ func (c *Client) loginURL() string {
 // retries; that orchestration lives in do and loginLocked. Content-Type:
 // application/json is set when body is present (non-empty). The response
 // body is read eagerly (bounded by maxBodyRead) so the caller never owns
-// a connection.
+// a connection. A body longer than the cap is an error, not a short
+// read: see the overflow branch in doOnce.
 //
 // path is normally relative to baseURL; an absolute URL (scheme-prefixed,
 // as produced by loginURL) is used as-is.
@@ -232,9 +233,15 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body []byte) (
 		return 0, nil, fmt.Errorf("kanban: %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyRead))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyRead+1))
 	if err != nil {
 		return 0, nil, fmt.Errorf("kanban: read %s %s response: %w", method, path, err)
+	}
+	if len(respBody) > maxBodyRead {
+		// Refuse rather than return a clipped body: a truncated response
+		// would decode to "unexpected end of JSON input" at the caller and
+		// blame the backend for what is this cap.
+		return 0, nil, fmt.Errorf("kanban: %s %s response exceeds the %d-byte read cap", method, path, maxBodyRead)
 	}
 	return resp.StatusCode, respBody, nil
 }
