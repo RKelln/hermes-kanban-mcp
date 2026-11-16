@@ -108,6 +108,12 @@ func eventsSchema() map[string]any {
 		"board":           propStr(),
 		"since_event_id":  map[string]any{"type": "integer", "minimum": 0, "default": 0},
 		"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": maxEventsTimeoutSeconds, "default": defaultEventsTimeoutSeconds},
+		"wake_on": map[string]any{
+			"type":        "string",
+			"enum":        []any{WakeOnVerdicts, WakeOnAny},
+			"default":     WakeOnVerdicts,
+			"description": "What ends the wait. \"verdicts\" (default) ignores the kernel's own bookkeeping (heartbeat/claimed/spawned/owner_admitted/worker_bound/assigned/reclaimed/created) and only wakes on a status a waiter can act on (done/blocked/ready/triage/archived/scheduled) — a move into running or review does not wake, so the reviewer's own claim no longer ends the wait. \"any\" wakes on every event and every status change (the pre-filter behaviour). Suppressed events are counted in `suppressed`, never silently dropped.",
+		},
 	}, "id", "board")
 }
 
@@ -153,7 +159,7 @@ func Register(srv *mcp.Server, s *Server) {
 		blockSchema(),
 		s.TicketBlock)
 
-	addTool(srv, "ticket_events", "Tail a ticket's events (created/claimed/blocked/unblocked/completed...). The long-poll ends as soon as there are events newer than since_event_id, OR the ticket's STATUS CHANGES from the status it had when you called, OR timeout_seconds elapse (default 120, max 900). ticket_status is always the ticket's status on the last fetch, so a wait that returns with no events and a different ticket_status means the ticket moved — that is how a caller sees a review verdict land. id and board are required.",
+	addTool(srv, "ticket_events", "Tail a ticket's events and wait for a verdict. The long-poll ends on a MATCHING event newer than since_event_id, on the ticket's STATUS CHANGING to a status you can act on, or on timeout_seconds (default 120, max 900). wake_on picks what matches: \"verdicts\" (default) ignores the kernel's own bookkeeping — heartbeat, claimed, spawned, owner_admitted, worker_bound, assigned, reclaimed, created — and does not wake on a move into running or review (the reviewer's own claim used to end every wait); \"any\" wakes on everything, the pre-filter behaviour. suppressed counts the events the filter swallowed, so silence and noise stay distinguishable. ticket_status is always the ticket's status on the last fetch, so a return with no events and a different ticket_status means the ticket moved — that is how a caller sees a review verdict land. id and board are required.",
 		eventsSchema(),
 		s.TicketEvents)
 

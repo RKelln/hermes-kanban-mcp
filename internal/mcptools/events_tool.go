@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"time"
 )
@@ -28,6 +29,50 @@ const (
 // latencies without changing the public behavior.
 var eventsPollInterval = 1 * time.Second
 
+// WakeOnVerdicts and WakeOnAny are the accepted wake_on values. The
+// default is WakeOnVerdicts because the tool's documented purpose is
+// waiting for a verdict: a review cycle writes its own bookkeeping
+// (claimed/spawned/heartbeat) every ~30s, and an MCP client pays a model
+// turn for every return. WakeOnAny is the full tail, byte-for-byte the
+// behaviour every caller got before the filter existed.
+const (
+	WakeOnVerdicts = "verdicts"
+	WakeOnAny      = "any"
+)
+
+// churnEventKinds are the kernel's bookkeeping events: they describe the
+// machinery moving, never new information for a waiter. They never end a
+// verdicts-mode wait. This is a DENYLIST on purpose — an unknown or newly
+// added kind WAKES, because a missed verdict is silent and unrecoverable
+// (a waiter sleeps through the thing it was waiting for), while a missed
+// noise-suppression is merely visible in the suppressed count.
+var churnEventKinds = map[string]bool{
+	"created":        true,
+	"claimed":        true,
+	"reclaimed":      true,
+	"assigned":       true,
+	"spawned":        true,
+	"owner_admitted": true,
+	"worker_bound":   true,
+	"heartbeat":      true,
+}
+
+// settledStatuses are the statuses a waiter can act on. In verdicts mode a
+// status CHANGE only ends the wait when the ticket lands on one of them.
+// `running` and `review` are deliberately absent: a card sitting in review
+// moves to running when the review run's own claim lands, and waking on
+// that reports "something happened" when the something is the reviewer
+// starting work. The status is still reported on every return, timeout
+// included, so a caller always learns where the ticket stands.
+var settledStatuses = map[string]bool{
+	"done":      true,
+	"blocked":   true,
+	"ready":     true,
+	"triage":    true,
+	"archived":  true,
+	"scheduled": true,
+}
+
 // TicketEventsInput is the ticket_events tool input. id and board are
 // required; since_event_id defaults to 0 (only events with id >
 // since_event_id are returned); timeout_seconds defaults to 120 and is
@@ -38,6 +83,11 @@ type TicketEventsInput struct {
 	Board          string `json:"board"`
 	SinceEventID   int64  `json:"since_event_id"`
 	TimeoutSeconds int    `json:"timeout_seconds"`
+	// WakeOn selects which events end the wait. "" and "verdicts" end it
+	// on anything that is not kernel bookkeeping (and on a status change
+	// to a status a waiter can act on); "any" ends it on every event and
+	// every status change, which is the original behaviour.
+	WakeOn string `json:"wake_on"`
 }
 
 // EventOut is the compact event projection surfaced by ticket_events.
@@ -51,7 +101,12 @@ type EventOut struct {
 // TicketEventsOut is the ticket_events success result. Truncated is set
 // when events were dropped to fit the size budget or the maxReturnedEvents
 // cap, so callers know to fall back to ticket_get rather than trusting a
-// cursor that skipped unseen events. TicketStatus is the ticket's status as
+// cursor that skipped unseen events. Suppressed counts events that were
+// past the cursor but did not match the caller's wake filter (kernel
+// bookkeeping, in verdicts mode): they are NOT returned and NOT buffered,
+// and the count is the honest accounting a silent drop would deny —
+// "nothing to do, but 40 heartbeats went by" is a different fact from
+// "nothing happened". TicketStatus is the ticket's status as
 // of the last fetch that reported one; a wait that ends because the status
 // CHANGED reports the new value here with no events, which is how a caller
 // learns a review verdict landed. A degraded fetch that reports no status
@@ -60,6 +115,7 @@ type TicketEventsOut struct {
 	Events       []EventOut `json:"events,omitempty"`
 	TimedOut     bool       `json:"timed_out"`
 	Truncated    bool       `json:"truncated,omitempty"`
+	Suppressed   int        `json:"suppressed,omitempty"`
 	TicketStatus string     `json:"ticket_status,omitempty"`
 }
 
@@ -75,10 +131,33 @@ type rawEvent struct {
 // TicketEvents implements the ticket_events MCP tool: long-poll a
 // ticket's event log. The wait ends as soon as either
 //
-//   - events exist with id > since_event_id (returned in Events), or
+//   - a matching event exists with id > since_event_id (returned in Events), or
 //   - the ticket's status has changed from the status observed on the
-//     first fetch (returned as TicketStatus, with no events), or
+//     first fetch, in a way the caller must act on (returned as
+//     TicketStatus, with no events), or
 //   - timeout_seconds elapse (TimedOut).
+//
+// WHAT COUNTS AS A MATCH is the caller's choice (`wake_on`), and the
+// default is the verdicts filter:
+//
+//   - "verdicts" (default): every kind except the kernel's own bookkeeping
+//     (created/claimed/reclaimed/assigned/spawned/owner_admitted/
+//     worker_bound/heartbeat) ends the wait, and so does a status change
+//     landing on a status a waiter can act on (done/blocked/ready/triage/
+//     archived/scheduled). A move into running or review does NOT end it.
+//     An unknown kind always ends it: a missed verdict is silent, missed
+//     noise-suppression is visible in `suppressed`.
+//   - "any": every event after the cursor and every status change ends the
+//     wait — the behaviour every caller got before the filter existed.
+//
+// The filter is not cosmetic. A review cycle writes its own bookkeeping
+// every ~30s, so an unfiltered waiter returns dozens of times per review
+// and, for an MCP client, every return is a model turn. The status-change
+// rule had the same defect from the other side: a card sitting in `review`
+// flips to `running` when the review run's own claim lands, which used to
+// read as "the ticket moved" and ended the wait on the reviewer starting.
+// `suppressed` counts what the filter swallowed, so "nothing happened" and
+// "40 heartbeats happened" stay distinguishable.
 //
 // The status-change path is what makes this usable for the native review
 // lane. A review runs ready -> review -> running -> done|ready, and the
@@ -123,6 +202,10 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	if err := ValidateTicketID(in.ID); err != nil {
 		return ErrorResult("invalid_input: %v", err)
 	}
+	wakeOn, err := normalizeWakeOn(in.WakeOn)
+	if err != nil {
+		return ErrorResult("invalid_input: %v", err)
+	}
 	if err := ensureKnownBoard(ctx, board); err != nil {
 		return ErrorResult("invalid_input: %v", err)
 	}
@@ -165,9 +248,10 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 	// the last fetch: reporting nothing is strictly worse than reporting a
 	// status that was true a few seconds ago.
 	lastStatus := status
-	collected, truncated := collectEvents(events, in.SinceEventID)
+	filter := newEventFilter(in.SinceEventID, wakeOn)
+	collected, truncated, suppressed := filter.collect(events)
 	if len(collected) > 0 {
-		return renderEvents(collected, truncated, false, lastStatus)
+		return renderEvents(collected, truncated, suppressed, false, lastStatus)
 	}
 
 	var pollErrs int
@@ -177,7 +261,7 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			return ErrorResult("%s", ctx.Err())
 		case <-ticker.C:
 			if time.Now().After(deadline) {
-				return renderEvents(nil, truncated, true, lastStatus)
+				return renderEvents(nil, truncated, suppressed, true, lastStatus)
 			}
 			polledEvents, current, err := s.GetTaskEvents(ctx, board, in.ID)
 			if err != nil {
@@ -199,15 +283,60 @@ func (s *Server) TicketEvents(ctx context.Context, in TicketEventsInput) *ToolRe
 			if current != "" {
 				lastStatus = current
 			}
-			collected, truncated = collectEvents(polledEvents, in.SinceEventID)
+			var pollTruncated bool
+			var pollSuppressed int
+			collected, pollTruncated, pollSuppressed = filter.collect(polledEvents)
+			truncated = truncated || pollTruncated
+			suppressed += pollSuppressed
 			if len(collected) > 0 {
-				return renderEvents(collected, truncated, false, lastStatus)
+				return renderEvents(collected, truncated, suppressed, false, lastStatus)
 			}
-			if statusChanged(baseline, lastStatus) {
-				return renderEvents(nil, false, false, lastStatus)
+			if waitSettled(baseline, lastStatus, wakeOn) {
+				return renderEvents(nil, false, suppressed, false, lastStatus)
 			}
 		}
 	}
+}
+
+// normalizeWakeOn validates wake_on and resolves the default. An unknown
+// value is REFUSED rather than silently treated as the default: a caller
+// that meant "any" and typed it wrong would otherwise wait out every
+// timeout and conclude the tool was broken.
+func normalizeWakeOn(v string) (string, error) {
+	switch v {
+	case "":
+		return WakeOnVerdicts, nil
+	case WakeOnVerdicts, WakeOnAny:
+		return v, nil
+	default:
+		return "", fmt.Errorf("wake_on must be %q or %q, got %q", WakeOnVerdicts, WakeOnAny, v)
+	}
+}
+
+// matchesWake reports whether an event past the cursor should END the
+// caller's wait. Any mode takes everything (the pre-filter behaviour);
+// verdicts mode takes everything except the kernel's own bookkeeping,
+// including kinds this build has never heard of.
+func matchesWake(e rawEvent, wakeOn string) bool {
+	if wakeOn == WakeOnAny {
+		return true
+	}
+	return !churnEventKinds[e.Kind]
+}
+
+// waitSettled reports whether the ticket's status moved in a way the
+// caller must act on. In any mode it is the original rule — any change
+// from the baseline. In verdicts mode the new status must also be one a
+// waiter can act on, so the review lane's own claim (review -> running)
+// does not end the wait; the timeout still reports where the card stood.
+func waitSettled(baseline, current, wakeOn string) bool {
+	if !statusChanged(baseline, current) {
+		return false
+	}
+	if wakeOn == WakeOnAny {
+		return true
+	}
+	return settledStatuses[current]
 }
 
 // statusChanged reports whether the ticket moved out of the state the caller
@@ -243,23 +372,49 @@ func (s *Server) GetTaskEvents(ctx context.Context, board, id string) ([]json.Ra
 	return env.Events, env.Task.Status, nil
 }
 
-// collectEvents decodes raw JSON events, filters to those with id >
-// sinceID, extracts the optional payload note, and caps the returned
-// slice at maxReturnedEvents (keeping the newest). The second return
-// value reports whether events were dropped to the cap, so the caller
-// can surface a truncated signal instead of silently breaking the cursor
-// contract.
-func collectEvents(raw []json.RawMessage, sinceID int64) ([]EventOut, bool) {
+// eventFilter applies the caller's cursor and wake filter across the whole
+// long-poll. It is STATEFUL for one reason: every poll re-reads the same
+// window from the backend, so a stateless suppressed count would count the
+// same heartbeat once per tick (40 heartbeats becoming 400). suppressedSeen
+// is the high-water mark of ids already counted as suppressed; the count
+// reported to the caller is therefore the number of DISTINCT events the
+// filter swallowed.
+type eventFilter struct {
+	since          int64
+	wakeOn         string
+	suppressedSeen int64
+}
+
+func newEventFilter(since int64, wakeOn string) *eventFilter {
+	return &eventFilter{since: since, wakeOn: wakeOn, suppressedSeen: since}
+}
+
+// collect decodes raw JSON events, filters to those with id > since,
+// applies the wake filter, extracts the optional payload note, and caps the
+// returned slice at maxReturnedEvents (keeping the newest). It reports
+// whether MATCHING events were dropped to the cap, so the caller can
+// surface a truncated signal instead of silently breaking the cursor
+// contract, and how many NEW events it suppressed, which is the only trace
+// of the bookkeeping a verdicts-mode wait slept through.
+func (f *eventFilter) collect(raw []json.RawMessage) ([]EventOut, bool, int) {
 	if len(raw) == 0 {
-		return nil, false
+		return nil, false, 0
 	}
 	out := make([]EventOut, 0, len(raw))
+	suppressed := 0
 	for _, r := range raw {
 		var e rawEvent
 		if err := json.Unmarshal(r, &e); err != nil {
 			continue
 		}
-		if e.ID <= sinceID {
+		if e.ID <= f.since {
+			continue
+		}
+		if !matchesWake(e, f.wakeOn) {
+			if e.ID > f.suppressedSeen {
+				f.suppressedSeen = e.ID
+				suppressed++
+			}
 			continue
 		}
 		ev := EventOut{
@@ -282,7 +437,7 @@ func collectEvents(raw []json.RawMessage, sinceID int64) ([]EventOut, bool) {
 		out = out[len(out)-maxReturnedEvents:]
 		truncated = true
 	}
-	return out, truncated
+	return out, truncated, suppressed
 }
 
 // renderEvents renders a ticket_events result within
@@ -291,9 +446,11 @@ func collectEvents(raw []json.RawMessage, sinceID int64) ([]EventOut, bool) {
 // which would cut the JSON text mid-string) and, if the payload overflows
 // (max-legal notes on many events), shortens notes and then drops the
 // oldest events, with Truncated set, re-marshalling each pass until it
-// fits.
-func renderEvents(events []EventOut, truncated, timedOut bool, status string) *ToolResult {
-	out := TicketEventsOut{Events: events, TimedOut: timedOut, Truncated: truncated, TicketStatus: status}
+// fits. Suppressed is carried through every pass unchanged: it is a count
+// of events the caller chose not to be woken by, so size pressure must not
+// turn an honest report of them into a silent one.
+func renderEvents(events []EventOut, truncated bool, suppressed int, timedOut bool, status string) *ToolResult {
+	out := TicketEventsOut{Events: events, TimedOut: timedOut, Truncated: truncated, Suppressed: suppressed, TicketStatus: status}
 	if tr := eventResult(out); tr != nil {
 		return tr
 	}
@@ -310,7 +467,7 @@ func renderEvents(events []EventOut, truncated, timedOut bool, status string) *T
 			}
 		}
 		if changed {
-			if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, TicketStatus: status}); tr != nil {
+			if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, Suppressed: suppressed, TicketStatus: status}); tr != nil {
 				return tr
 			}
 			continue
@@ -320,12 +477,12 @@ func renderEvents(events []EventOut, truncated, timedOut bool, status string) *T
 			break
 		}
 		work = work[len(work)/2:]
-		if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, TicketStatus: status}); tr != nil {
+		if tr := eventResult(TicketEventsOut{Events: work, TimedOut: timedOut, Truncated: true, Suppressed: suppressed, TicketStatus: status}); tr != nil {
 			return tr
 		}
 	}
 	// Pathological: nothing fit. Emit the smallest valid result.
-	return eventResult(TicketEventsOut{TimedOut: timedOut, Truncated: true, TicketStatus: status})
+	return eventResult(TicketEventsOut{TimedOut: timedOut, Truncated: true, Suppressed: suppressed, TicketStatus: status})
 }
 
 // eventResult renders out as a non-error ToolResult whose marshalled
