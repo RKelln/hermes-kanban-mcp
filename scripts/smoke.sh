@@ -223,15 +223,24 @@ echo "  ok: no leaked credentials in the journal"
 echo "secret hygiene: git grep for committed secret values"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || fail "secret hygiene cannot run — not inside a git repository (git grep needs a work tree)"
-# The value test is a literal CHARACTER class, not "anything but a space".
-# `[A-Za-z0-9]` says "a literal value starts with a literal character", which
-# is true of every real secret and false of the three shapes below that are
-# REFERENCES rather than values — a shell expansion (the next character is a
-# dollar sign), an awk or grep pattern (a slash or a quote), and the doc
-# placeholders already filtered on the next line. Before this, four such
-# references in deploy/ failed every deploy of main at the secret check,
-# after the binary had already installed and restarted (t_d81aa372).
-if git grep -nE '(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[A-Za-z0-9]' -- ':!*.example' \
+# The value test is a literal CHARACTER class, not "anything but a space":
+# an optional quote, then one literal character. A quote is a value
+# DELIMITER, not a reference marker — `NAME="$TOKEN"` and `NAME="literal"`
+# agree on the character after the quote and differ only inside it — so the
+# class has to accept the quote and test the character behind it.
+# After that optional quote, a real secret starts with a literal character.
+# The three REFERENCE shapes start with punctuation instead: a dollar sign
+# (shell expansion), a slash (an awk or grep program over the env key), and
+# the doc placeholders filtered on the next line (angle bracket, three dots).
+# The pattern is double-quoted so it can carry both quote characters; it
+# contains no `$`, so nothing in it is subject to shell expansion.
+# Before this, four such references in deploy/ failed every deploy of main at
+# the secret check, after the binary had already installed and restarted
+# (t_d81aa372).
+# This is a tripwire, not a complete detector: it only understands NAME=value,
+# and it misses a base64 value opening with `+` or `/`, and `NAME=""`. Say so
+# here rather than implying the gate is exhaustive.
+if git grep -nE "(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=['\"]?[A-Za-z0-9]" -- ':!*.example' \
     | grep -vE '=<[^>]+>|=[.]{3}' | grep -q .; then
     fail "secret hygiene git grep found a committed secret value (a secret variable name followed by an equals sign and a value)"
 fi

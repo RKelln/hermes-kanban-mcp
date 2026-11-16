@@ -41,12 +41,46 @@ def load():
 up = load()
 
 
-# --- the repo-wide secret-hygiene scan (scripts/smoke.sh:207-208) -------------
-# Composed from the module's key constants rather than written as a literal:
-# a literal NAME=[value] here would itself be a line the scan reports, which is
-# exactly the defect these tests exist to pin.
-HYGIENE_PATTERN = "(%s|%s)=[^ ]" % (up.TOKEN_KEY, up.PASSWORD_KEY)
+# --- the repo-wide secret-hygiene scan (scripts/smoke.sh) ---------------------
+# One rule, two copies: scripts/smoke.sh runs the shell copy, and the helpers
+# below recompute the same hits so `make test-deploy` can be the tripwire for
+# it. Composed from the module's key constants rather than written as a
+# literal: a literal NAME=[value] here would itself be a line the scan reports,
+# which is exactly the defect these tests exist to pin.
+#
+# The two copies drifted silently: the shell scan was fixed to test the VALUE
+# (a literal character, optionally behind a quote) while this mirror kept the
+# old "anything but a space" class, so `make test-deploy` sat red and blamed
+# scripts/smoke.sh for four lines smoke.sh no longer reported (t_d81aa372).
+# The value test is therefore a named token, and
+# test_the_scan_is_the_one_smoke_sh_runs lifts the shell copy's own ERE out of
+# the script and compares — a change to either copy alone goes red here,
+# instead of at deploy time or not at all.
+HYGIENE_VALUE_TEST = r"""=['"]?[A-Za-z0-9]"""
 HYGIENE_EXCLUDE = r"=<[^>]+>|=[.]{3}"
+HYGIENE_PATTERN = "(%s|%s)%s" % (up.TOKEN_KEY, up.PASSWORD_KEY, HYGIENE_VALUE_TEST)
+
+
+def smoke_scan_pattern(smoke_text: str) -> str:
+    """The ERE scripts/smoke.sh hands to `git grep -nE`, as grep receives it.
+
+    The shell copy carries both quote characters inside a double-quoted string,
+    so the file text holds a backslash-escaped double quote where grep sees a
+    plain one. Undo exactly what the shell would undo and nothing more.
+    """
+    for raw in smoke_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("if git grep -nE "):
+            continue
+        first, last = line.find('"'), line.rfind('"')
+        if first < 0 or last <= first:
+            raise AssertionError(
+                "scripts/smoke.sh's scan line must pass its pattern in double "
+                "quotes, so this test can read the same ERE grep is given: %r"
+                % line)
+        return line[first + 1:last].replace('\\"', '"').replace("\\\\", "\\")
+    raise AssertionError(
+        "scripts/smoke.sh has no `if git grep -nE \"...\"` scan line to compare")
 
 
 def hygiene_hits(cwd: str) -> list[str]:
@@ -388,6 +422,10 @@ class TestSecretHygieneScan(unittest.TestCase):
         with open(os.path.join(REPO_ROOT, "scripts", "smoke.sh"), encoding="utf-8") as fh:
             smoke = fh.read()
         self.assertIn("git grep -nE", smoke)
+        self.assertEqual(smoke_scan_pattern(smoke), HYGIENE_PATTERN,
+                         "scripts/smoke.sh and this mirror must run the SAME ERE "
+                         "— otherwise this test green-lights a rule the deploy "
+                         "does not use. Update both copies together.")
         self.assertIn(HYGIENE_EXCLUDE, smoke,
                       "the exclude pattern must stay in step with scripts/smoke.sh")
 
@@ -402,6 +440,55 @@ class TestSecretHygieneScan(unittest.TestCase):
                              "the pipeline must catch a planted value, or this "
                              "test proves nothing")
 
+    def test_a_quoted_literal_is_still_caught(self):
+        """A quote is a value DELIMITER, not a reference.
+
+        `NAME="$TOKEN"` and `NAME="<a literal>"` are identical up to the
+        character after the quote, so a value test that rejects the quote
+        outright loses every quoted literal. This is the form the old
+        "anything but a space" class caught and a bare literal-character class
+        silently dropped; the repo is public, so a missed token is
+        unrecoverable once pushed.
+        """
+        cases = ["%s=%s" % (up.TOKEN_KEY, "deadbeef01234567"),
+                 "%s=%s" % (up.PASSWORD_KEY, "pw"),
+                 '%s="%s"' % (up.TOKEN_KEY, "deadbeef01234567"),
+                 "%s='%s'" % (up.PASSWORD_KEY, "pw")]
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
+            with open(os.path.join(tmp, "leak.sh"), "w", encoding="utf-8") as fh:
+                fh.write("".join(line + "\n" for line in cases))
+            subprocess.run(["git", "add", "leak.sh"], cwd=tmp, capture_output=True)
+            self.assertEqual(len(hygiene_hits(tmp)), len(cases),
+                             "every literal value must be caught, quoted or not")
+
+    def test_reference_forms_are_not_values(self):
+        """The four `deploy/` lines that failed the 72c005d deploy are references.
+
+        Each names the key and is followed by an equals sign, and none of them
+        carries a secret: an awk program, a shell expansion of a variable, and
+        a grep pattern over the env file. They reached a live deploy because
+        the old class said "anything but a space" is a value.
+        """
+        key, pw_key = up.TOKEN_KEY, up.PASSWORD_KEY
+        lines = [
+            # deploy/client-config.sh:56, deploy/codex-kanban.sh:24
+            'TOKEN="$(awk -F= \'/^%s=/{sub(/^[^=]*=/,""); print; exit}\' "$ENV_FILE")"' % key,
+            # deploy/codex-kanban.sh:27
+            '%s="$TOKEN" exec codex "$@"' % key,
+            # deploy/install.md:238
+            "sudo grep '^%s=' /etc/kanban-mcp.env" % key,
+            # the password key in the same awk-program shape
+            'TOKEN="$(awk -F= \'/^%s=/{print $0; exit}\' "$ENV_FILE")"' % pw_key,
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
+            with open(os.path.join(tmp, "references.sh"), "w", encoding="utf-8") as fh:
+                fh.write("".join(line + "\n" for line in lines))
+            subprocess.run(["git", "add", "references.sh"], cwd=tmp, capture_output=True)
+            self.assertEqual(hygiene_hits(tmp), [],
+                             "a reference to the key is not a committed secret")
+
     def test_placeholder_forms_are_still_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
             subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
@@ -409,6 +496,9 @@ class TestSecretHygieneScan(unittest.TestCase):
             with open(doc, "w", encoding="utf-8") as fh:
                 fh.write("%s=%s\n" % (up.TOKEN_KEY, "<token>"))
                 fh.write("%s=%s\n" % (up.PASSWORD_KEY, "..."))
+                # A command substitution is a placeholder too: the gate stays
+                # quiet on the documented way to generate a value.
+                fh.write("%s=%s\n" % (up.TOKEN_KEY, "$(openssl rand -hex 32)"))
             subprocess.run(["git", "add", "README.md"], cwd=tmp, capture_output=True)
             self.assertEqual(hygiene_hits(tmp), [])
 
