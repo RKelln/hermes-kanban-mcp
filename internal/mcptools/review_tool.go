@@ -51,7 +51,7 @@ package mcptools
 // review there is none — so `assignee_sql` is omitted from the UPDATE and
 // the row's EXISTING assignee is what the dispatcher will spawn on
 // (measured against the installed kernel: assignee 'default' is preserved,
-// and once the stamp has moved it to 'opencode-remote' the row lands
+// and once the stamp has moved it to 'remote-mcp' the row lands
 // there). The implementer stamp has just MOVED that assignee to the lane
 // label, so an omitted --reviewer lands the review row on a non-spawnable
 // label: the card sits in 'review' every tick with no reviewer, and the
@@ -79,7 +79,10 @@ import (
 //
 // ID and board are required; summary is required (a reviewer with no
 // handoff re-derives everything the implementer already knew); reviewer
-// is optional and falls back to MCP_REVIEWER_PROFILE.
+// is an OPERATOR OVERRIDE and should normally be OMITTED: the server
+// resolves the reviewer from MCP_REVIEWER_PROFILE, and an external lane
+// has no business knowing the host's profile names. When supplied it must
+// name an installed profile the dispatcher can spawn.
 //
 // worker is the implementer label stamped on the card before the handoff
 // (the same name ticket_claim accepts). It falls back to
@@ -207,16 +210,16 @@ func (s *Server) resolveReviewer(ctx context.Context, board, id string, in Ticke
 	// GET, only on this path (a review without an explicit reviewer).
 	_, events, err := s.getTaskDetail(ctx, board, id)
 	if err != nil {
-		return "", "", ErrorResult("invalid_input: no reviewer resolved (no reviewer argument, and %s is unset), and the ticket's event log could not be read to reuse the reviewer from its last changes-requested round: %s. Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob, RestErrorMessage(err), reviewerKnob)
+		return "", "", ErrorResult("invalid_input: no reviewer resolved (no reviewer argument, and %s is unset), and the ticket's event log could not be read to reuse the reviewer from its last changes-requested round: %s. The read may succeed on a retry; if it does, that history is the only remaining reviewer source here. No reviewer argument was supplied and %s is unset, which is server configuration, not a lane argument: report it to the operator.", reviewerKnob, RestErrorMessage(err), reviewerKnob)
 	}
 	prior, found, decoded := reviewRoundReviewer(events)
 	switch {
 	case !found:
-		return "", "", ErrorResult("invalid_input: no reviewer resolved: no reviewer argument was passed, %s is unset, and ticket %s has no changes-requested round to reuse a reviewer from (this is its first review). This is refused BEFORE the implementer stamp, because with --reviewer omitted the kernel keeps whatever assignee the card carries, and the stamp below sets that assignee to the lane label — the review row would land on a name the dispatcher never spawns. Passing the card's current assignee instead is no substitute: it is the lane label here, and after a verdict it is the implementer, so that value would make the re-review a self-review. Pass reviewer, or set %s (e.g. \"default\") on the server: a review row with no reviewer is skipped by the dispatcher every tick, so the card would strand there.", reviewerKnob, id, reviewerKnob)
+		return "", "", ErrorResult("invalid_input: no reviewer resolved: no reviewer argument was passed, %s is unset, and ticket %s has no changes-requested round to reuse a reviewer from (this is its first review). This is refused BEFORE the implementer stamp, because with --reviewer omitted the kernel keeps whatever assignee the card carries, and the stamp below sets that assignee to the lane label — the review row would land on a name the dispatcher never spawns. Passing the card's current assignee instead is no substitute: it is the lane label here, and after a verdict it is the implementer, so that value would make the re-review a self-review. The reviewer is server configuration, not a lane argument: report the unset %s to the operator — a review row with no reviewer is skipped by the dispatcher every tick, so the card would strand there.", reviewerKnob, id, reviewerKnob)
 	case !decoded:
-		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event could not be decoded, so its reviewer cannot be reused. Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob)
+		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event could not be decoded, so its reviewer cannot be reused. Report the unset %s to the operator — the reviewer is server configuration, not a lane argument.", reviewerKnob)
 	case prior == "":
-		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event carries no reviewer (malformed provenance — the kernel refuses that shape too). Pass reviewer, or set %s (e.g. \"default\") on the server.", reviewerKnob)
+		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event carries no reviewer (malformed provenance — the kernel refuses that shape too). Report the unset %s to the operator — the reviewer is server configuration, not a lane argument.", reviewerKnob)
 	}
 	return prior, "the ticket's last changes-requested round", nil
 }
@@ -295,20 +298,20 @@ func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestRe
 		source = implementerKnob
 	}
 	if label == "" {
-		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"opencode-remote\").", implementerKnob, implementerKnob)
+		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"remote-mcp\").", implementerKnob, implementerKnob)
 	}
 	if !kanban.ValidLaneToken(label) {
 		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, kanban.LaneTokenPattern)
 	}
 	if strings.EqualFold(label, reviewer) {
-		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"opencode-remote\"), or a different reviewer.", label, implementerKnob)
+		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"remote-mcp\"), or a different reviewer.", label, implementerKnob)
 	}
 	ok, checked, names := s.profileSpawnable(ctx, label)
 	switch {
 	case !checked:
-		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so implementer label %q could NOT be checked. The handoff is refused rather than risked: if that label matches a profile, the dispatcher spawns a worker on the card when a request-changes verdict returns it. Retry once the dashboard API answers, or set %s to a label you know is not a profile (e.g. \"opencode-remote\").", label, implementerKnob)
+		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so implementer label %q could NOT be checked. The handoff is refused rather than risked: if that label matches a profile, the dispatcher spawns a worker on the card when a request-changes verdict returns it. Retry once the dashboard API answers, or set %s to a label you know is not a profile (e.g. \"remote-mcp\").", label, implementerKnob)
 	case ok:
-		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"opencode-remote\"), not a profile.", label, strings.Join(names, ", "), implementerKnob)
+		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"remote-mcp\"), not a profile.", label, strings.Join(names, ", "), implementerKnob)
 	}
 	return label, source, nil
 }
@@ -477,9 +480,9 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	switch {
 	case checked && !ok:
 		if reviewerSource != "the reviewer argument" && reviewerSource != reviewerKnob {
-			return ErrorResult("invalid_input: no reviewer was supplied, so the reviewer recorded on ticket %s's last changes-requested round (%q) was reused — and it is not an installed profile any more, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. Pass reviewer, or set %s (e.g. \"default\") on the server.", in.ID, flagReviewer, strings.Join(names, ", "), reviewerKnob)
+			return ErrorResult("invalid_input: no reviewer was supplied, so the reviewer recorded on ticket %s's last changes-requested round (%q) was reused — and it is not an installed profile any more, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. This value came from the ticket's history, not from you: report the stale reviewer to the operator (it is the server's MCP_REVIEWER_PROFILE setting or that round's recorded reviewer).", in.ID, flagReviewer, strings.Join(names, ", "))
 		}
-		return ErrorResult("invalid_input: reviewer %q is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s.", flagReviewer, strings.Join(names, ", "))
+		return ErrorResult("invalid_input: reviewer %q (from %s) is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. If you passed reviewer yourself, omit it and let the server choose; if it came from %s, that server setting is the thing to correct.", flagReviewer, reviewerSource, strings.Join(names, ", "), reviewerKnob)
 	case !checked:
 		// The roster is the oracle for both directions (spawnable
 		// reviewer, NOT-spawnable implementer), so an unreadable roster
@@ -536,14 +539,14 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 		return ErrorResult("request-review did not take effect: ticket %s is still %s (expected review). Nothing was dispatched; re-check the ticket before retrying.", in.ID, after.Status)
 	}
 	if strings.TrimSpace(after.Assignee) == "" {
-		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. Set MCP_REVIEWER_PROFILE (e.g. \"default\") on the server, or pass reviewer explicitly, then request again.", in.ID)
+		return ErrorResult("request-review left ticket %s in 'review' with NO assignee, so the dispatcher will never spawn a reviewer. That is server configuration (MCP_REVIEWER_PROFILE), not a lane argument: report it to the operator, who can also pass reviewer explicitly from a trusted surface.", in.ID)
 	}
 	// Verify what actually LANDED, not what was requested: the handoff now
 	// always passes a verified --reviewer, so a row carrying anything else
 	// means a concurrent write or a kernel rule we do not model, and the
 	// dispatcher spawns on this value and nothing else.
 	if aok, achecked, anames := s.profileSpawnable(ctx, after.Assignee); achecked && !aok {
-		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. Set MCP_REVIEWER_PROFILE (e.g. \"default\") or pass reviewer explicitly, then request again.", in.ID, after.Assignee, strings.Join(anames, ", "))
+		return ErrorResult("request-review left ticket %s in 'review' assigned to %q, which is not an installed profile, so the dispatcher will never spawn a reviewer. Installed profiles: %s. That value came from server configuration (MCP_REVIEWER_PROFILE) or the ticket's history, not from a lane argument: report it to the operator.", in.ID, after.Assignee, strings.Join(anames, ", "))
 	}
 
 	// The implementer is the OTHER half of the round trip, and the kernel

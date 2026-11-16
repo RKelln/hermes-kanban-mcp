@@ -159,7 +159,7 @@ check("p1-summary-repo-wins", rs.extract_repo(reason2) or rs.extract_repo(blob2)
 mapped_conf = {"hermes-agent": ("https://github.com/RKelln/hermes-kanban-mcp.git", "main")}
 check("wl-mapped-default", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "default"}) != "", True)
 check("wl-mapped-default-case", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "DEFAULT"}) != "", True)
-check("wl-mapped-other-assignee", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "opencode-remote"}), "")
+check("wl-mapped-other-assignee", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {"assignee": "remote-mcp"}), "")
 check("wl-unmapped-board", rs.wrong_lane_warning("unmapped", "t_x", mapped_conf, {"assignee": "default"}), "")
 check("wl-no-assignee", rs.wrong_lane_warning("hermes-agent", "t_x", mapped_conf, {}), "")
 

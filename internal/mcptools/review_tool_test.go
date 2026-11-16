@@ -83,8 +83,8 @@ func noEnvReviewer(t *testing.T) {
 // value) and returns it.
 func withClaimWorker(t *testing.T) string {
 	t.Helper()
-	t.Setenv("MCP_CLAIM_WORKER", "opencode-remote")
-	return "opencode-remote"
+	t.Setenv("MCP_CLAIM_WORKER", "remote-mcp")
+	return "remote-mcp"
 }
 
 // reviewRow renders the post-transition GET body: the landed review row
@@ -499,9 +499,9 @@ func TestTRR_NoReviewerReusesPriorRoundReviewer(t *testing.T) {
 	label := withClaimWorker(t)
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
-	priorRound := `{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
-		`"events":[{"id":4,"kind":"review_requested","payload":{"implementer":"opencode-remote","reviewer":"bob"}},` +
-		`{"id":5,"kind":"changes_requested","payload":{"reason":"fix it","implementer":"opencode-remote","reviewer":"bob","status":"ready"}}]}`
+	priorRound := `{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"},` +
+		`"events":[{"id":4,"kind":"review_requested","payload":{"implementer":"remote-mcp","reviewer":"bob"}},` +
+		`{"id":5,"kind":"changes_requested","payload":{"reason":"fix it","implementer":"remote-mcp","reviewer":"bob","status":"ready"}}]}`
 	backend.orders["t_x1"] = []string{
 		priorRound, // preflight
 		priorRound, // event log for the provenance lookup
@@ -581,8 +581,8 @@ func TestTRR_NoReviewerProvenanceNotSpawnableRefused(t *testing.T) {
 	readArgv := argvLog(t)
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
-		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
-			`"events":[{"id":5,"kind":"changes_requested","payload":{"reason":"r","implementer":"opencode-remote","reviewer":"ryan","status":"ready"}}]}`,
+		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"},` +
+			`"events":[{"id":5,"kind":"changes_requested","payload":{"reason":"r","implementer":"remote-mcp","reviewer":"ryan","status":"ready"}}]}`,
 	}
 	s := newClaimToolServer(t, backend)
 
@@ -620,8 +620,8 @@ func TestTRR_EverySuccessPathPassesReviewer(t *testing.T) {
 			name:   "from the argument",
 			review: "alice",
 			bodies: []string{
-				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"}}`,
-				reviewRow("t_x1", "alice", `"opencode-remote"`),
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"}}`,
+				reviewRow("t_x1", "alice", `"remote-mcp"`),
 			},
 			wantRev: "alice",
 		},
@@ -629,19 +629,19 @@ func TestTRR_EverySuccessPathPassesReviewer(t *testing.T) {
 			name: "from MCP_REVIEWER_PROFILE",
 			env:  "bob",
 			bodies: []string{
-				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"}}`,
-				reviewRow("t_x1", "bob", `"opencode-remote"`),
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"}}`,
+				reviewRow("t_x1", "bob", `"remote-mcp"`),
 			},
 			wantRev: "bob",
 		},
 		{
 			name: "from the prior changes-requested round",
 			bodies: []string{
-				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
-					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"opencode-remote"}}]}`,
-				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"opencode-remote"},` +
-					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"opencode-remote"}}]}`,
-				reviewRow("t_x1", "carol", `"opencode-remote"`),
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"},` +
+					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"remote-mcp"}}]}`,
+				`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"},` +
+					`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"carol","implementer":"remote-mcp"}}]}`,
+				reviewRow("t_x1", "carol", `"remote-mcp"`),
 			},
 			wantRev: "carol",
 		},
@@ -892,7 +892,7 @@ func TestTRR_ImplementerRecordedNullRefused(t *testing.T) {
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"default"}}`,
-		stampedRow("t_x1", "ready", "opencode-remote"),
+		stampedRow("t_x1", "ready", "remote-mcp"),
 		reviewRow("t_x1", "alice", `null`),
 	}
 	s := newClaimToolServer(t, backend)
@@ -919,7 +919,7 @@ func TestTRR_ImplementerRecordedDifferentRefused(t *testing.T) {
 	backend := newClaimBackend()
 	backend.orders["t_x1"] = []string{
 		`{"task":{"id":"t_x1","title":"T","status":"ready"}}`,
-		stampedRow("t_x1", "ready", "opencode-remote"),
+		stampedRow("t_x1", "ready", "remote-mcp"),
 		reviewRow("t_x1", "alice", `"someone-else"`),
 	}
 	s := newClaimToolServer(t, backend)
@@ -930,7 +930,7 @@ func TestTRR_ImplementerRecordedDifferentRefused(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError when the recorded implementer differs, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"someone-else", "opencode-remote"} {
+	for _, want := range []string{"someone-else", "remote-mcp"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}

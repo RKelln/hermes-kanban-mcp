@@ -208,7 +208,7 @@ func TestValidLaneToken(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{"opencode-remote", true},
+		{"remote-mcp", true},
 		{"default", true},
 		{"_lane.1", true},
 		{strings.Repeat("a", 64), true},
@@ -237,23 +237,23 @@ func TestAssignLabel(t *testing.T) {
 	installFake(t)
 
 	t.Run("ready form", func(t *testing.T) {
-		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "opencode-remote", "", false)
+		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "remote-mcp", "", false)
 		if err != nil {
 			t.Fatalf("AssignLabel() error = %v, want nil", err)
 		}
-		want := "argv: kanban --board default assign task-echo opencode-remote\n"
+		want := "argv: kanban --board default assign task-echo remote-mcp\n"
 		if stdout != want {
 			t.Errorf("stdout = %q, want %q", stdout, want)
 		}
 	})
 
 	t.Run("reclaim form", func(t *testing.T) {
-		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "opencode-remote",
-			"review handoff: record implementer opencode-remote", true)
+		stdout, _, err := AssignLabel(context.Background(), "task-echo", "default", "remote-mcp",
+			"review handoff: record implementer remote-mcp", true)
 		if err != nil {
 			t.Fatalf("AssignLabel() error = %v, want nil", err)
 		}
-		want := "argv: kanban --board default reassign task-echo opencode-remote --reclaim --reason=review handoff: record implementer opencode-remote\n"
+		want := "argv: kanban --board default reassign task-echo remote-mcp --reclaim --reason=review handoff: record implementer remote-mcp\n"
 		if stdout != want {
 			t.Errorf("stdout = %q, want %q", stdout, want)
 		}

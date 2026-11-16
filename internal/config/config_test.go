@@ -45,6 +45,7 @@ var optionalVars = []string{
 	"HERMES_BIN",
 	"MCP_COMPLETE_MODE",
 	"MCP_ALLOW_SKIP_CLAIM",
+	"MCP_ALLOW_DEFAULT_ASSIGNEE",
 	"MCP_CLAIM_WORKER",
 	"MCP_COMMENT_AUTHOR",
 	"MCP_RATE_LIMIT",
@@ -71,8 +72,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		{"HermesBin", cfg.HermesBin, "hermes"},
 		{"MCPCompleteMode", cfg.MCPCompleteMode, "review"},
 		{"MCPAllowSkipClaim", cfg.MCPAllowSkipClaim, false},
-		{"MCPClaimWorker", cfg.MCPClaimWorker, "opencode-remote"},
-		{"MCPCommentAuthor", cfg.MCPCommentAuthor, "opencode-remote"},
+		{"MCPAllowDefaultAssignee", cfg.MCPAllowDefaultAssignee, false},
+		{"MCPClaimWorker", cfg.MCPClaimWorker, "remote-mcp"},
+		{"MCPCommentAuthor", cfg.MCPCommentAuthor, "remote-mcp"},
 		{"MCPRateLimit", cfg.MCPRateLimit, 60},
 		{"LogLevel", cfg.LogLevel, "info"},
 	}
@@ -94,6 +96,7 @@ func TestLoadAppliesExplicitOverrides(t *testing.T) {
 	t.Setenv("HERMES_BIN", "/usr/local/bin/hermes")
 	t.Setenv("MCP_COMPLETE_MODE", "done")
 	t.Setenv("MCP_ALLOW_SKIP_CLAIM", "1")
+	t.Setenv("MCP_ALLOW_DEFAULT_ASSIGNEE", "1")
 	t.Setenv("MCP_CLAIM_WORKER", "worker-x")
 	t.Setenv("MCP_COMMENT_AUTHOR", "author-x")
 	t.Setenv("MCP_RATE_LIMIT", "150")
@@ -130,6 +133,9 @@ func TestLoadAppliesExplicitOverrides(t *testing.T) {
 	}
 	if !cfg.MCPAllowSkipClaim {
 		t.Error("MCPAllowSkipClaim = false, want true")
+	}
+	if !cfg.MCPAllowDefaultAssignee {
+		t.Error("MCPAllowDefaultAssignee = false, want true")
 	}
 	if cfg.MCPClaimWorker != "worker-x" {
 		t.Errorf("MCPClaimWorker = %q, want override", cfg.MCPClaimWorker)
@@ -220,6 +226,48 @@ func TestLoadInvalidBool(t *testing.T) {
 	}
 }
 
+// The default-assignee guard's knob is validated like every other boolean
+// (a bad value stops the server at startup) and fails CLOSED at call time:
+// config.AllowDefaultAssignee returns false for unset, empty or unparseable,
+// so a half-configured deployment keeps the guard rather than losing it.
+func TestLoadInvalidDefaultAssigneeBool(t *testing.T) {
+	setRequired(t)
+	t.Setenv(EnvAllowDefaultAssignee, "banana")
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatalf("Load() with non-bool %s: expected error, got %v", EnvAllowDefaultAssignee, cfg)
+	}
+	if !strings.Contains(err.Error(), EnvAllowDefaultAssignee) {
+		t.Errorf("error %q does not name %s", err, EnvAllowDefaultAssignee)
+	}
+}
+
+func TestAllowDefaultAssignee(t *testing.T) {
+	for _, v := range []string{"", "banana", "false", "0"} {
+		t.Run("closed/"+v, func(t *testing.T) {
+			t.Setenv(EnvAllowDefaultAssignee, v)
+			if AllowDefaultAssignee() {
+				t.Errorf("AllowDefaultAssignee() = true for %q, want false (fail closed)", v)
+			}
+		})
+	}
+	for _, v := range []string{"true", "1", " TRUE "} {
+		t.Run("open/"+v, func(t *testing.T) {
+			t.Setenv(EnvAllowDefaultAssignee, v)
+			if !AllowDefaultAssignee() {
+				t.Errorf("AllowDefaultAssignee() = false for %q, want true", v)
+			}
+		})
+	}
+	t.Run("unset", func(t *testing.T) {
+		unsetEnv(t, EnvAllowDefaultAssignee)
+		if AllowDefaultAssignee() {
+			t.Error("AllowDefaultAssignee() = true with the variable unset, want false")
+		}
+	})
+}
+
 func TestLoadInvalidInt(t *testing.T) {
 	setRequired(t)
 	t.Setenv("MCP_RATE_LIMIT", "many")
@@ -278,7 +326,7 @@ func TestStringRedactsSecrets(t *testing.T) {
 	for _, want := range []string{
 		"BindAddrs=", "KanbanBaseURL=", "KanbanUsername=test-user",
 		"KanbanDefaultBoard=", "HermesBin=", "MCPCompleteMode=",
-		"MCPAllowSkipClaim=", "MCPClaimWorker=", "MCPCommentAuthor=",
+		"MCPAllowSkipClaim=", "MCPAllowDefaultAssignee=", "MCPClaimWorker=", "MCPCommentAuthor=",
 		"MCPRateLimit=", "LogLevel=",
 	} {
 		if !strings.Contains(s, want) {

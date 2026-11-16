@@ -189,7 +189,7 @@ func TestTCRL_ReviewHandoffSurfacesRefusal(t *testing.T) {
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "opencode-remote")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "remote-mcp")
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
@@ -216,7 +216,7 @@ func TestTCRL_OverLongSummaryRefusesBeforeWriting(t *testing.T) {
 	readArgv := argvLog(t)
 
 	backend := newClaimBackend()
-	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "opencode-remote")
+	backend.orders["t_x1"] = runningThenReview("t_x1", "default", "remote-mcp")
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketComplete(context.Background(), TicketCompleteInput{
