@@ -75,10 +75,14 @@ tools (`hermes-kanban-*`).
   diff — a reviewer that goes looking for a deleted branch burns its run.
 - **Wait for the review — on either path.** Both leave the ticket in `review`. Poll `ticket_events`
   (default long-poll is 120s, max 15m — one call covers a full review cycle) or `ticket_get` until it
-  leaves that state. The wait ends on new events, on the ticket's status CHANGING from the status at
-  call time, or on `timeout_seconds`, and `ticket_status` comes back either way — so pass the last seen
-  event id: a verdict writes an event, and that is what returns immediately. A ticket that already left
-  the state, polled with a caught-up cursor, waits out `timeout_seconds` and reports the status then.
+  leaves that state. The wait ends on a **matching** event, on the ticket's status CHANGING to a status
+  you can act on, or on `timeout_seconds`, and `ticket_status` comes back either way — so pass the last
+  seen event id: a verdict writes an event, and that is what returns immediately. `wake_on` defaults to
+  `verdicts`, which suppresses the kernel's own bookkeeping (heartbeat/claimed/spawned/assigned/…) and
+  does NOT wake when the card moves into `running` or `review` — that is the reviewer's own claim
+  landing, not news. `suppressed` on the result counts what was swallowed; pass `wake_on: "any"` only
+  when you genuinely want the full tail. A ticket that already left the state, polled with a caught-up
+  cursor, waits out `timeout_seconds` and reports the status then.
   - `done` → the review passed → merge your branch to main (the reviewer never merges);
   - `ready` → REQUEST CHANGES → re-claim, fix, push, request review again;
   - still `blocked` with an ESCALATE comment → surface to the human; do not re-loop;

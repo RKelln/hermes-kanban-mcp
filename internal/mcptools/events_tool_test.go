@@ -107,7 +107,11 @@ func TestTE_ReturnsEventsAfterCursor(t *testing.T) {
 	}
 	b.setEvents(base)
 
-	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+	// WakeOn any: this test pins the CURSOR contract (id > since), so it must
+	// see churn kinds too — the default verdicts filter correctly drops
+	// created/claimed, which is covered by the wake_on tests at the end of
+	// this file.
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2, WakeOn: WakeOnAny}
 	res := s.TicketEvents(context.Background(), input)
 	if res == nil || res.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res)
@@ -287,7 +291,10 @@ func TestTE_Budget(t *testing.T) {
 	}
 	b.setEvents(events)
 
-	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2}
+	// WakeOn any: the budget/cap contract applies to whatever matched, and
+	// this fixture is built from churn kinds. Any mode keeps the cap
+	// exercised independently of the wake filter.
+	input := TicketEventsInput{ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2, WakeOn: WakeOnAny}
 	res := s.TicketEvents(context.Background(), input)
 	if res == nil || res.IsError {
 		t.Fatalf("TicketEvents returned error: %+v", res)
@@ -781,4 +788,277 @@ func TestTE_TimeoutReportsLastObservedStatus(t *testing.T) {
 			t.Errorf("returned after %v, want >= ~2s", elapsed)
 		}
 	})
+}
+
+// --- wake_on filter (t_0e55e8dc) ---------------------------------------
+//
+// The filter exists because a review cycle writes its own bookkeeping every
+// ~30s and every return is a model turn for an MCP client. The cases below
+// are the whole contract: churn never ends a verdicts-mode wait, an unknown
+// kind always does, the review lane's own claim is not "movement", `any`
+// keeps the pre-filter behaviour byte for byte, and the suppression is
+// counted rather than silently dropped. Each one fails on the parent
+// commit: the parent has no filter at all.
+
+// TE returns the decoded result or fails the test.
+func teResult(t *testing.T, res *ToolResult) TicketEventsOut {
+	t.Helper()
+	if res == nil || res.IsError {
+		t.Fatalf("TicketEvents returned error: %+v", res)
+	}
+	var out TicketEventsOut
+	if err := json.Unmarshal([]byte(res.Content[0].Text), &out); err != nil {
+		t.Fatalf("decode result: %v (text=%q)", err, res.Content[0].Text)
+	}
+	return out
+}
+
+// TestTE_VerdictsModePollsThroughHeartbeats: a ticket in review whose run
+// keeps heartbeating must NOT wake the caller. The status also moves
+// review -> running as the review run's own claim lands, which the parent
+// commit reports as "the ticket moved" — that is the second half of the
+// same defect.
+func TestTE_VerdictsModePollsThroughHeartbeats(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{})
+	b.setStatus("review")
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		// The review run claims the card: status churn plus bookkeeping
+		// events, and a heartbeat on every later tick.
+		b.setStatus("running")
+		n := 1
+		for i := 0; i < 12; i++ {
+			b.setEvents([]json.RawMessage{
+				mkEvent(int64(n), "claimed", int64(1000+n), "review run"),
+				mkEvent(int64(n+1), "spawned", int64(1001+n), ""),
+				mkEvent(int64(n+2), "heartbeat", int64(1002+n), ""),
+			})
+			n += 3
+			time.Sleep(40 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+		ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 2,
+	}))
+	elapsed := time.Since(start)
+
+	if !out.TimedOut {
+		t.Fatalf("TimedOut = false, want true: churn (claimed/spawned/heartbeat) and review->running ended a verdicts-mode wait")
+	}
+	if len(out.Events) != 0 {
+		t.Errorf("returned %d events, want 0 (churn is never a wake)", len(out.Events))
+	}
+	if out.Suppressed == 0 {
+		t.Errorf("Suppressed = 0, want > 0: the swallowed bookkeeping must be counted, not silently dropped")
+	}
+	if out.TicketStatus != "running" {
+		t.Errorf("TicketStatus = %q, want running (a timeout still reports where the card stood)", out.TicketStatus)
+	}
+	if elapsed < 1500*time.Millisecond {
+		t.Errorf("returned after %v, want >= ~2s (an early return is the pre-filter behaviour)", elapsed)
+	}
+}
+
+// TestTE_VerdictsModeReturnsOnVerdict: the event the caller is actually
+// waiting for still ends the wait immediately, and it is the ONLY thing
+// returned — the heartbeats before it are not replayed.
+func TestTE_VerdictsModeReturnsOnVerdict(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{mkEvent(1, "heartbeat", 1000, "")})
+	b.setStatus("review")
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		b.setEvents([]json.RawMessage{
+			mkEvent(1, "heartbeat", 1000, ""),
+			mkEvent(2, "heartbeat", 2000, ""),
+			mkEvent(3, "completed", 3000, "APPROVE: verified on 65dc87a6"),
+		})
+		b.setStatus("done")
+	}()
+
+	out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+		ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 10,
+	}))
+	if out.TimedOut {
+		t.Fatalf("TimedOut = true: a completed event must end the wait")
+	}
+	if len(out.Events) != 1 || out.Events[0].Kind != "completed" || out.Events[0].ID != 3 {
+		t.Fatalf("events = %+v, want exactly the completed event", out.Events)
+	}
+	if out.Suppressed != 2 {
+		t.Errorf("Suppressed = %d, want 2 (the two heartbeats seen past the cursor)", out.Suppressed)
+	}
+	if out.TicketStatus != "done" {
+		t.Errorf("TicketStatus = %q, want done", out.TicketStatus)
+	}
+}
+
+// TestTE_VerdictsModeUnknownKindWakes pins the FAIL-SAFE direction: the
+// filter is a denylist of known churn, so a kind this build has never seen
+// wakes the caller. A missed verdict is silent and unrecoverable; a missed
+// noise-suppression only shows up in `suppressed`.
+func TestTE_VerdictsModeUnknownKindWakes(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{mkEvent(7, "brand_new_kernel_kind", 1000, "whatever this is")})
+	b.setStatus("review")
+
+	out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+		ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 5,
+	}))
+	if out.TimedOut {
+		t.Fatalf("TimedOut = true: an unknown kind must wake (denylist, not allowlist)")
+	}
+	if len(out.Events) != 1 || out.Events[0].Kind != "brand_new_kernel_kind" {
+		t.Errorf("events = %+v, want the unknown-kind event", out.Events)
+	}
+}
+
+// TestTE_AnyModeKeepsPreFilterBehaviour is the compatibility pin: callers
+// that want the full tail get exactly what the parent shipped — a heartbeat
+// wakes the wait, and a change into `running` ends it.
+func TestTE_AnyModeKeepsPreFilterBehaviour(t *testing.T) {
+	t.Run("heartbeat wakes", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 50 * time.Millisecond
+
+		b := newEventsBackend()
+		defer b.close()
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
+
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("review")
+		go func() {
+			for b.tickCount.Load() < 2 {
+				time.Sleep(20 * time.Millisecond)
+			}
+			b.setEvents([]json.RawMessage{mkEvent(9, "heartbeat", 1000, "")})
+		}()
+
+		out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+			ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 10, WakeOn: WakeOnAny,
+		}))
+		if out.TimedOut || len(out.Events) != 1 || out.Events[0].Kind != "heartbeat" {
+			t.Fatalf("out = %+v, want the heartbeat returned in any mode", out)
+		}
+		if out.Suppressed != 0 {
+			t.Errorf("Suppressed = %d, want 0 in any mode (nothing is filtered)", out.Suppressed)
+		}
+	})
+
+	t.Run("status change into running wakes", func(t *testing.T) {
+		defer restorePollInterval(t)
+		eventsPollInterval = 50 * time.Millisecond
+
+		b := newEventsBackend()
+		defer b.close()
+		s := NewServer(b.server.URL, "hermes-agent")
+		SetBoardLister(s)
+
+		b.setEvents([]json.RawMessage{})
+		b.setStatus("review")
+		go func() {
+			for b.tickCount.Load() < 2 {
+				time.Sleep(20 * time.Millisecond)
+			}
+			b.setStatus("running")
+		}()
+
+		out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+			ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 10, WakeOn: WakeOnAny,
+		}))
+		if out.TimedOut {
+			t.Fatalf("TimedOut = true, want the status change to end the wait in any mode")
+		}
+		if out.TicketStatus != "running" {
+			t.Errorf("TicketStatus = %q, want running", out.TicketStatus)
+		}
+	})
+}
+
+// TestTE_VerdictsModeWakesOnSettledStatus covers the other half of the
+// status rule: a change that lands on a status a waiter can act on DOES end
+// the wait, even with no matching event (a return to `ready` can be written
+// by a promote with no event the caller selected).
+func TestTE_VerdictsModeWakesOnSettledStatus(t *testing.T) {
+	defer restorePollInterval(t)
+	eventsPollInterval = 50 * time.Millisecond
+
+	b := newEventsBackend()
+	defer b.close()
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	b.setEvents([]json.RawMessage{})
+	b.setStatus("review")
+	go func() {
+		for b.tickCount.Load() < 2 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		b.setStatus("ready")
+	}()
+
+	out := teResult(t, s.TicketEvents(context.Background(), TicketEventsInput{
+		ID: "t_1", Board: testBoard, SinceEventID: 0, TimeoutSeconds: 5,
+	}))
+	if out.TimedOut {
+		t.Fatalf("TimedOut = true, want the review -> ready change to end the wait")
+	}
+	if out.TicketStatus != "ready" {
+		t.Errorf("TicketStatus = %q, want ready", out.TicketStatus)
+	}
+}
+
+// TestTE_InvalidWakeOnRefused: an unknown wake_on is refused before any
+// backend call. Silently treating it as the default would leave a caller
+// who meant "any" waiting out every timeout.
+func TestTE_InvalidWakeOnRefused(t *testing.T) {
+	b := newEventsBackend()
+	defer b.close()
+	s := NewServer(b.server.URL, "hermes-agent")
+	SetBoardLister(s)
+
+	res := s.TicketEvents(context.Background(), TicketEventsInput{
+		ID: "t_1", Board: testBoard, WakeOn: "everything", TimeoutSeconds: 1,
+	})
+	if res == nil || !res.IsError {
+		t.Fatalf("expected an error result for an unknown wake_on, got: %+v", res)
+	}
+	if !strings.Contains(res.Content[0].Text, "wake_on") {
+		t.Errorf("refusal does not name wake_on: %q", res.Content[0].Text)
+	}
+	if n := b.tickCount.Load(); n != 0 {
+		t.Errorf("backend tick count = %d, want 0 (validation must reject before HTTP)", n)
+	}
 }

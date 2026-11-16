@@ -41,14 +41,21 @@ MCP tools for a Hermes kanban board:
     body. Use full whenever you must read a long-form comment verbatim —
     a steer, a revision comment, a review verdict — because partial clips
     every comment body and the clipped tail is usually the payload.
-- ticket_events   tail a ticket's events (verdicts/block/unblock); returns events
-    newer than since_event_id or empty on timeout (default 120s, max 15m).
-    The wait ends on new events, on the ticket's status CHANGING from the
-    status it had when you called, or on the timeout — whichever comes first.
-    ticket_status is reported on every return, so "no events + a different
-    ticket_status" is the "something happened" signal. A ticket that already
-    finished, polled with your cursor caught up, waits out the timeout: pass
-    the last seen event id (a verdict writes an event) for an instant answer.
+- ticket_events   tail a ticket's events and wait for a VERDICT. The wait ends
+    on a matching event newer than since_event_id, on the ticket's
+    status CHANGING to a status you can act on (done/blocked/ready/triage/
+    archived/scheduled), or on the timeout (default 120s, max 15m) — whichever
+    comes first. wake_on picks the matcher: "verdicts" (default) ignores the
+    kernel's own bookkeeping — heartbeat, claimed, spawned, owner_admitted,
+    worker_bound, assigned, reclaimed, created — and does NOT wake when the
+    card moves into running or review, because that is the reviewer's own
+    claim landing; "any" wakes on everything, the pre-filter behaviour.
+    suppressed counts the events the filter swallowed, so "nothing happened"
+    and "40 heartbeats happened" stay distinguishable. ticket_status is
+    reported on every return, so "no events + a different ticket_status" is
+    the "something happened" signal. A ticket that already finished, polled
+    with your cursor caught up, waits out the timeout: pass the last seen
+    event id (a verdict writes an event) for an instant answer.
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required marker via block_reason or latest_summary);
     replaces per-board scans
@@ -189,8 +196,9 @@ Lifecycle facts:
   its run.
 - ticket_events is stateless long-polling: pass the last seen event id as
   since_event_id to wait for the next verdict; empty + timed_out means
-  nothing new arrived. When truncated is set, some events were dropped to
-  the size cap — fall back to ticket_get rather than advancing the cursor
+  nothing new arrived, and suppressed > 0 says how much kernel bookkeeping
+  went by while nothing did. When truncated is set, some events were dropped
+  to the size cap — fall back to ticket_get rather than advancing the cursor
   past unseen events.
 
 Rules:

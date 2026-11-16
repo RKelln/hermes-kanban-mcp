@@ -175,12 +175,20 @@ exits non-zero with the failing step named.
 
 The roster is all that the script pins about `ticket_events` — it does not
 exercise the wait, so a binary can pass the smoke test while serving the wrong
-wait contract. `ticket_events` ends its wait on new events, on the ticket's
-status CHANGING from the status at call time, or on the timeout, and reports
-`ticket_status` on every return. That status-change return is what a
-review-lane waiter depends on (a verdict that writes no event still ends the
+wait contract. `ticket_events` ends its wait on a **matching** event, on the
+ticket's status CHANGING to a status the caller can act on, or on the timeout,
+and reports `ticket_status` on every return. That status-change return is what
+a review-lane waiter depends on (a verdict that writes no event still ends the
 wait), and a binary predating it polls to the timeout instead: a wait that ends
 on the change is the one call worth making by hand after an upgrade.
+`wake_on` selects the matcher: `verdicts` (the default) suppresses the kernel's
+own bookkeeping (heartbeat/claimed/spawned/owner_admitted/worker_bound/
+assigned/reclaimed/created) and does not wake when the card moves into
+`running` or `review` — that is the reviewer's own claim landing — while `any`
+returns on every event (the pre-filter behaviour). Suppressed events are
+reported as a count in `suppressed`; nothing is dropped silently. A bridge older
+than this option ignores the field, so a post-upgrade probe should pass
+`wake_on: "any"` and confirm a heartbeat still wakes it.
 
 For a remote host (e.g. framework over Tailscale):
 

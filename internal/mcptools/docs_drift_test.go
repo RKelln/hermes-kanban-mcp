@@ -362,3 +362,67 @@ func TestDocs_ServeTheClaimTTLKnob(t *testing.T) {
 		}
 	}
 }
+
+// TestDocs_ServeTheWakeFilter pins the ticket_events wake contract
+// (t_0e55e8dc). The filter is invisible from the outside: a bridge that
+// ignores `wake_on` behaves EXACTLY like the old one for a caller who never
+// passes it, so nothing in a smoke test or a green unit suite would notice a
+// rewrite that dropped the option from the served schema or the prose. That
+// silence is the whole failure mode — an agent told "long-poll until it
+// leaves review" against a bridge that wakes on heartbeats burns a model turn
+// per heartbeat and concludes the tool is broken, which is the report this
+// card came from.
+func TestDocs_ServeTheWakeFilter(t *testing.T) {
+	// Served help: an agent reads this first, so both halves must be there —
+	// the option, and the fact that suppression is COUNTED rather than
+	// silent (the house truncation rule applied to a filter).
+	for _, want := range []string{"wake_on", "suppressed", "heartbeat"} {
+		if !strings.Contains(helpDoc, want) {
+			t.Errorf("helpDoc no longer states the ticket_events wake filter (no %q): a client would long-poll against churn and pay a turn per heartbeat", want)
+		}
+	}
+
+	// register.go is what tools/list serves: the schema property AND its
+	// description travel to the client, so a dropped `wake_on` here is a
+	// dropped capability even though the handler still supports it.
+	t.Run("served tool description", func(t *testing.T) {
+		b, err := os.ReadFile("register.go")
+		if err != nil {
+			t.Fatalf("read register.go: %v", err)
+		}
+		text := string(b)
+		for _, want := range []string{
+			`"wake_on"`,
+			WakeOnVerdicts,
+			WakeOnAny,
+			"suppressed counts the events the filter swallowed",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("register.go no longer serves the wake filter (no %q)", want)
+			}
+		}
+	})
+
+	// The operator/implementer prose surfaces, each in its own words.
+	surfaces := []struct {
+		name string
+		want []string
+	}{
+		{"../../README.md", []string{"wake_on", "suppressed"}},
+		{"../../deploy/install.md", []string{"wake_on", "suppressed"}},
+		{"../../deploy/AGENTS.kanban-mcp.template.md", []string{"wake_on", "suppressed"}},
+		{"../../AGENTS.md", []string{"wake_on", "suppressed"}},
+	}
+	for _, s := range surfaces {
+		b, err := os.ReadFile(filepath.Clean(s.name))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", s.name, err)
+			continue
+		}
+		for _, want := range s.want {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s no longer states the wake filter (no %q)", s.name, want)
+			}
+		}
+	}
+}
