@@ -41,12 +41,29 @@ def load():
 up = load()
 
 
-# --- the repo-wide secret-hygiene scan (scripts/smoke.sh:207-208) -------------
-# Composed from the module's key constants rather than written as a literal:
-# a literal NAME=[value] here would itself be a line the scan reports, which is
-# exactly the defect these tests exist to pin.
-HYGIENE_PATTERN = "(%s|%s)=[^ ]" % (up.TOKEN_KEY, up.PASSWORD_KEY)
-HYGIENE_EXCLUDE = r"=<[^>]+>|=[.]{3}"
+# --- the repo-wide secret-hygiene scan (scripts/smoke.sh) ---------------------
+# The pattern is READ FROM THE SCRIPT rather than re-typed here. Two copies of a
+# regex are two chances to drift, and the drift is silent in the direction that
+# matters: this suite stays green while the deploy gate turns red.
+SMOKE_SH = os.path.join(REPO_ROOT, "scripts", "smoke.sh")
+
+
+def scan_patterns() -> tuple[str, str]:
+    """(pattern, exclude) exactly as scripts/smoke.sh defines them."""
+    with open(SMOKE_SH, encoding="utf-8") as fh:
+        src = fh.read()
+    found = {}
+    for key in ("SECRET_SCAN_RE", "SECRET_SCAN_EXCLUDE"):
+        m = re.search(r"^%s='([^']+)'$" % key, src, re.MULTILINE)
+        if not m:
+            raise RuntimeError(
+                "scripts/smoke.sh no longer defines %s='...': the hygiene scan and "
+                "this suite must share ONE pattern, or the gate proves nothing" % key)
+        found[key] = m.group(1)
+    return found["SECRET_SCAN_RE"], found["SECRET_SCAN_EXCLUDE"]
+
+
+HYGIENE_PATTERN, HYGIENE_EXCLUDE = scan_patterns()
 
 
 def hygiene_hits(cwd: str) -> list[str]:
@@ -385,11 +402,34 @@ class TestSecretHygieneScan(unittest.TestCase):
     """
 
     def test_the_scan_is_the_one_smoke_sh_runs(self):
-        with open(os.path.join(REPO_ROOT, "scripts", "smoke.sh"), encoding="utf-8") as fh:
+        with open(SMOKE_SH, encoding="utf-8") as fh:
             smoke = fh.read()
-        self.assertIn("git grep -nE", smoke)
-        self.assertIn(HYGIENE_EXCLUDE, smoke,
-                      "the exclude pattern must stay in step with scripts/smoke.sh")
+        self.assertIn('git grep -nE "$SECRET_SCAN_RE"', smoke,
+                      "smoke.sh must run the shared variable, not a private copy")
+        self.assertIn('grep -vE "$SECRET_SCAN_EXCLUDE"', smoke)
+        self.assertIn("{16,}", HYGIENE_PATTERN,
+                      "the value floor is the fix: `=[^ ]` reported every shell idiom "
+                      "that mentions the variable name as a committed credential")
+
+    def test_source_idioms_are_not_credentials(self):
+        """The four lines that made a healthy deploy print FAILED (2026-11-16).
+
+        Each mentions a secret VARIABLE NAME and continues into source syntax —
+        an awk program, a shell expansion, a grep pattern — rather than a value.
+        The scan's subject is a pasted credential; a false FAIL here teaches the
+        operator to ignore the deploy's own final verdict.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
+            idioms = os.path.join(tmp, "idioms.sh")
+            with open(idioms, "w", encoding="utf-8") as fh:
+                fh.write("TOKEN=\"$(awk -F= '/^%s=/{sub(/^[^=]*=/,\"\"); print; exit}' \"$ENV_FILE\")\"\n"
+                         % up.TOKEN_KEY)
+                fh.write('%s="$TOKEN" exec codex "$@"\n' % up.TOKEN_KEY)
+                fh.write("sudo grep '^%s=' /etc/kanban-mcp.env\n" % up.TOKEN_KEY)
+            subprocess.run(["git", "add", "idioms.sh"], cwd=tmp, capture_output=True)
+            self.assertEqual(hygiene_hits(tmp), [],
+                             "source that READS the variable is not a committed secret")
 
     def test_the_pipeline_is_not_vacuous(self):
         with tempfile.TemporaryDirectory() as tmp:
