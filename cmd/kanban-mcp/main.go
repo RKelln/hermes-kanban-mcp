@@ -107,7 +107,10 @@ func main() {
 func newMux(cfg *config.Config, logger *slog.Logger, toolServer *mcptools.Server) http.Handler {
 	rl := httpauth.NewRateLimiter(cfg.MCPRateLimit, httpauth.DefaultBurst)
 
-	srv := mcp.NewServer(&mcp.Implementation{Name: "hermes-kanban-mcp", Version: version}, nil)
+	srv := mcp.NewServer(
+		&mcp.Implementation{Name: "hermes-kanban-mcp", Version: version},
+		&mcp.ServerOptions{Instructions: mcptools.LaneInstructions},
+	)
 	mcptools.Register(srv, toolServer)
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil)
 
