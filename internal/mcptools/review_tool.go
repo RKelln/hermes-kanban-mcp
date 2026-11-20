@@ -275,20 +275,15 @@ func (s *Server) profileSpawnable(ctx context.Context, reviewer string) (ok, che
 	if err := s.doJSON(ctx, http.MethodGet, "/profiles", nil, nil, &roster); err != nil {
 		return false, false, nil
 	}
-	// Build the WHOLE roster before answering: names is the list a refusal
-	// quotes, and the earlier early-return-on-match version reported only the
-	// profiles up to the match — "Installed profiles: default, alice" when
-	// bob, carol and dave were installed too. A refusal that under-reports the
-	// roster sends the caller looking for a value it already has.
 	for _, p := range roster.Profiles {
 		if p.Name != "" {
 			names = append(names, p.Name)
 		}
 		if strings.EqualFold(p.Name, reviewer) {
-			ok = true
+			return true, true, names
 		}
 	}
-	return ok, true, names
+	return false, true, names
 }
 
 // labelVerdict is the shared answer to the one roster question both
