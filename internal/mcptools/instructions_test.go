@@ -146,15 +146,21 @@ func TestLaneInstructionsOnlyNameRegisteredTools(t *testing.T) {
 // tool and the parameter must appear on ONE line of the text.
 //
 // The second half is the point. Round 1 taught `worker` on ticket_claim:
-// the tool exists, the parameter exists in its schema, and it is silently
-// discarded — the identity a lane needs was never recorded. A schema-only
-// check passes that sentence. A same-line check fails it, because the line
-// that teaches worker must also name ticket_request_review, where the
-// label is actually resolved.
+// the tool existed and so did the parameter, but the claim path discarded
+// it and the handoff that needed an identity refused. A schema-only check
+// passed that sentence; a same-line check fails it, because a line that
+// teaches a pair must name both for the same reason.
+//
+// The table also pins the two identity/force rules that only the merged
+// claim path makes true: identity is settled by ticket_claim (the label is
+// assigned to the card before the claim), and a handoff on that claimed,
+// RUNNING card needs force — a line naming ticket_request_review without
+// force is how a lane lost its first handoff.
 //
 // Add a pair here whenever the text starts teaching a new parameter.
 var laneInstructionParams = []struct{ tool, param string }{
-	{"ticket_request_review", "worker"},   // implementer label: resolved here, not at claim
+	{"ticket_claim", "worker"},            // lane label: written to the card before the claim
+	{"ticket_request_review", "force"},    // a handoff on the card this lane claimed is RUNNING
 	{"ticket_request_review", "reviewer"}, // omit it; the server resolves a profile
 	{"ticket_request_review", "summary"},  // the reviewer's handoff, required
 	{"ticket_events", "since_event_id"},   // resume the wait from the last event seen
@@ -210,5 +216,26 @@ func TestLaneInstructionsOnlyTeachRealParams(t *testing.T) {
 	// outright, the same way the tool-token gate does.
 	if len(laneInstructionParams) == 0 {
 		t.Fatal("no tool↔param pair pinned: the param gate would pass vacuously")
+	}
+}
+
+// TestLaneInstructionsTeachTheMergedIdentityRule pins the DIRECTION of the
+// two rules no schema can witness.
+//
+// Existence gates cannot see a sentence that names the right tool and the
+// right parameter and still describes the opposite contract. That is not
+// hypothetical here: round 2 shipped `ticket_claim records no label: its
+// worker is a no-op` — the pre-t_7f1caa0a truth — and every parameter in
+// it existed. The merged claim path writes the label BEFORE the claim and
+// the handoff inherits it, so the served text has to say that, and this is
+// the text that says it.
+func TestLaneInstructionsTeachTheMergedIdentityRule(t *testing.T) {
+	for _, want := range []string{
+		"ticket_claim stamps worker",        // identity is written at the claim
+		"ticket_request_review inherits it", // and never has to be passed again
+	} {
+		if !strings.Contains(LaneInstructions, want) {
+			t.Errorf("instructions do not say %q: the identity rule is inverted or missing, which no schema check can see", want)
+		}
 	}
 }
