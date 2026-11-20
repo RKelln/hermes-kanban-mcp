@@ -10,6 +10,12 @@ package mcptools
 // Coverage per the T6 spec: success, failure, timeout, binary-missing,
 // validation rejection — plus preflight rejection (todo/blocked),
 // already-claimed, and the ticket_block typed/untyped/fallback matrix.
+//
+// It also pins the claim's identity contract (t_7f1caa0a): the lane label is
+// ASSIGNED while the card is still ready, BEFORE the claim, so the kernel's
+// run row carries an implementer and the review handoff inherits it. The
+// fixtures task-assignfail / task-claimfail / task-claimfail-stuck exist for
+// the failure edges of that pair.
 
 import (
 	"context"
@@ -25,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/RKelln/hermes-kanban-mcp/internal/config"
 	"github.com/RKelln/hermes-kanban-mcp/internal/kanban"
 )
 
@@ -200,6 +207,31 @@ func breakBin(t *testing.T) {
 	kanban.ResetCLIBinCacheForTests()
 }
 
+// noEnvClaimLabel clears the ambient lane label so a test observes the
+// resolution it means to (the argument, or the configured default) instead of
+// the operator's environment.
+func noEnvClaimLabel(t *testing.T) {
+	t.Helper()
+	t.Setenv("MCP_CLAIM_WORKER", "")
+}
+
+// claimSeq renders the three GET bodies of a claim that has to WRITE the lane
+// label: the preflight (ready, unassigned), the read-back that proves the write
+// landed, and the authoritative post-claim read.
+func claimSeq(id, label string, exp int64) []string {
+	return []string{
+		fmt.Sprintf(`{"task":{"id":%q,"title":"T","status":"ready"}}`, id),
+		fmt.Sprintf(`{"task":{"id":%q,"title":"T","status":"ready","assignee":%q}}`, id, label),
+		claimedRow(id, label, exp),
+	}
+}
+
+// claimedRow is the post-claim body on its own: a card that already carried the
+// label, so the tool skipped the write and the read-back.
+func claimedRow(id, label string, exp int64) string {
+	return fmt.Sprintf(`{"task":{"id":%q,"title":"T","status":"running","assignee":%q,"claim_lock":"exp:1","claim_expires":%d}}`, id, label, exp)
+}
+
 func decodeOut[T any](t *testing.T, res *ToolResult) T {
 	t.Helper()
 	if res.IsError {
@@ -217,12 +249,10 @@ func TestTC_ClaimSuccess(t *testing.T) {
 	// Pin the knob so the caller's environment cannot decide what this
 	// asserts; the default world is four hours.
 	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
 	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
 	backend := newClaimBackend()
-	backend.orders["task-ok"] = []string{
-		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
-		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","assignee":"alice","claim_lock":"exp:1","claim_expires":%d}}`, exp),
-	}
+	backend.orders["task-ok"] = claimSeq("task-ok", defaultClaimWorkerLabel, exp)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
@@ -233,8 +263,10 @@ func TestTC_ClaimSuccess(t *testing.T) {
 		t.Errorf("rendered result %d bytes > %d", rendered, MaxToolResultBytes)
 	}
 	out := decodeOut[TicketClaimOut](t, res)
-	if out.ID != "task-ok" || out.Status != "running" || out.Assignee != "alice" {
-		t.Errorf("out = %+v, want id task-ok status running assignee alice", out)
+	// The label is the configured default here, and both fields come from the
+	// post-claim re-read, not from what was asked.
+	if out.ID != "task-ok" || out.Status != "running" || out.Assignee != defaultClaimWorkerLabel {
+		t.Errorf("out = %+v, want id task-ok status running assignee %s", out, defaultClaimWorkerLabel)
 	}
 	if out.ClaimExpires != exp {
 		t.Errorf("claim_expires = %d, want %d", out.ClaimExpires, exp)
@@ -246,15 +278,223 @@ func TestTC_ClaimSuccess(t *testing.T) {
 	if out.ClaimTTLSource != "default" {
 		t.Errorf("claim_ttl_source = %q, want %q", out.ClaimTTLSource, "default")
 	}
-	if want := claimNote(kanban.ClaimTTLSettings{Seconds: kanban.DefaultClaimTTLSeconds, Source: "default"}); out.Note != want {
-		t.Errorf("note = %q, want %q", out.Note, want)
+	wantNote := claimNote(kanban.ClaimTTLSettings{Seconds: kanban.DefaultClaimTTLSeconds, Source: "default"}) +
+		"; " + claimIdentityNote(defaultClaimWorkerLabel, "the server default")
+	if out.Note != wantNote {
+		t.Errorf("note = %q, want %q", out.Note, wantNote)
 	}
-	// authoritative state: exactly 2 GETs (preflight + re-read), no PATCH.
-	if n := backend.getCount("task-ok"); n != 2 {
-		t.Errorf("GET count = %d, want 2 (preflight + authoritative re-read)", n)
+	// authoritative state: exactly 3 GETs (preflight, label read-back,
+	// post-claim re-read), no PATCH.
+	if n := backend.getCount("task-ok"); n != 3 {
+		t.Errorf("GET count = %d, want 3 (preflight + label read-back + authoritative re-read)", n)
 	}
 	if n := len(backend.patches()); n != 0 {
 		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// TestTC_ClaimStampsLabelThenClaims is the identity contract of t_7f1caa0a:
+// the label is ASSIGNED while the card is still ready and only then claimed,
+// in that order, so the kernel's _claim_and_open_run copies it into the run
+// row the review handoff records its implementer from.
+func TestTC_ClaimStampsLabelThenClaims(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
+	argvLog := filepath.Join(t.TempDir(), "argv.log")
+	t.Setenv("HERMES_FAKE_ARGV_LOG", argvLog)
+	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = claimSeq("task-ok", "codex-orchestrator", exp)
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{
+		ID: "task-ok", Board: testBoard, Worker: "codex-orchestrator",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketClaimOut](t, res)
+	if out.Assignee != "codex-orchestrator" || out.Status != "running" {
+		t.Errorf("out = %+v, want assignee codex-orchestrator status running (read back from the ticket)", out)
+	}
+	if !strings.Contains(out.Note, `lane label "codex-orchestrator" assigned before the claim (the worker argument)`) {
+		t.Errorf("note = %q, want it to name the label and its source", out.Note)
+	}
+
+	raw, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("fake CLI captured no argv (%v): the claim path did not reach the CLI", err)
+	}
+	argv := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(argv) != 2 {
+		t.Fatalf("argv = %q, want exactly two invocations (assign then claim)", argv)
+	}
+	if want := "kanban --board " + testBoard + " assign task-ok codex-orchestrator"; argv[0] != want {
+		t.Errorf("argv[0] = %q, want %q", argv[0], want)
+	}
+	if want := fmt.Sprintf("kanban --board %s claim --ttl %d task-ok", testBoard, kanban.DefaultClaimTTLSeconds); argv[1] != want {
+		t.Errorf("argv[1] = %q, want %q", argv[1], want)
+	}
+}
+
+// TestTC_ClaimLabelResolution pins the precedence: explicit worker, then
+// MCP_CLAIM_WORKER, then the configured default. Every row asserts the label
+// that actually reached the CLI's assign argv AND the source the note reports,
+// so a silently changed precedence fails here.
+func TestTC_ClaimLabelResolution(t *testing.T) {
+	cases := []struct {
+		name, worker, env, want, wantSource string
+	}{
+		{"the argument wins over the knob", "codex-orchestrator", "remote-mcp", "codex-orchestrator", "the worker argument"},
+		{"the knob, when no argument", "", "framework-lane", "framework-lane", "MCP_CLAIM_WORKER"},
+		{"the configured default, when neither", "", "", "remote-mcp", "the server default"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeBin(t)
+			noEnvClaimLabel(t)
+			if tc.env != "" {
+				t.Setenv("MCP_CLAIM_WORKER", tc.env)
+			}
+			argvLog := filepath.Join(t.TempDir(), "argv.log")
+			t.Setenv("HERMES_FAKE_ARGV_LOG", argvLog)
+			exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
+			backend := newClaimBackend()
+			backend.orders["task-ok"] = claimSeq("task-ok", tc.want, exp)
+			s := newClaimToolServer(t, backend)
+
+			res := s.TicketClaim(context.Background(), TicketClaimInput{
+				ID: "task-ok", Board: testBoard, Worker: tc.worker,
+			})
+			if res.IsError {
+				t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+			}
+			out := decodeOut[TicketClaimOut](t, res)
+			if out.Assignee != tc.want {
+				t.Errorf("assignee = %q, want the resolved label %q", out.Assignee, tc.want)
+			}
+			if want := claimIdentityNote(tc.want, tc.wantSource); !strings.Contains(out.Note, want) {
+				t.Errorf("note = %q, want it to contain %q", out.Note, want)
+			}
+			raw, err := os.ReadFile(argvLog)
+			if err != nil {
+				t.Fatalf("fake CLI captured no argv: %v", err)
+			}
+			wantAssign := "kanban --board " + testBoard + " assign task-ok " + tc.want
+			if !strings.Contains(string(raw), wantAssign) {
+				t.Errorf("argv = %q, want it to contain %q", string(raw), wantAssign)
+			}
+		})
+	}
+}
+
+// TestTC_ClaimLabelDefaultMatchesConfig ties the bridge's built-in fallback to
+// internal/config's MCPClaimWorker default. Two independent copies of
+// "remote-mcp" is exactly how the claim and the review handoff would end up
+// naming different lanes.
+func TestTC_ClaimLabelDefaultMatchesConfig(t *testing.T) {
+	t.Setenv("KANBAN_USERNAME", "u")
+	t.Setenv("KANBAN_PASSWORD", "p")
+	t.Setenv("MCP_BEARER_TOKEN", "0123456789abcdef")
+	t.Setenv("MCP_COMPLETE_MODE", "review")
+	noEnvClaimLabel(t)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.MCPClaimWorker != defaultClaimWorkerLabel {
+		t.Errorf("config MCPClaimWorker default = %q, tool default = %q: change both or neither", cfg.MCPClaimWorker, defaultClaimWorkerLabel)
+	}
+}
+
+// TestTC_ClaimRefusesProfileLabel is the guard that has to fire BEFORE the
+// write: a ready card assigned to an installed profile is claimed by the
+// dispatcher within about a minute, so assigning one invites a second worker
+// onto this lane's card. Zero CLI invocations, and the message names the
+// roster and the reason.
+func TestTC_ClaimRefusesProfileLabel(t *testing.T) {
+	installFakeBin(t)
+	noEnvClaimLabel(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = []string{`{"task":{"id":"task-ok","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	// Case-insensitive: the kernel canonicalises the assignee before writing.
+	for _, label := range []string{"alice", "ALICE"} {
+		res := s.TicketClaim(context.Background(), TicketClaimInput{
+			ID: "task-ok", Board: testBoard, Worker: label,
+		})
+		if !res.IsError {
+			t.Fatalf("label %q: expected IsError, got success: %s", label, res.Content[0].Text)
+		}
+		for _, want := range []string{"IS an installed profile", "dispatcher", "second worker", "default, alice"} {
+			if !strings.Contains(res.Content[0].Text, want) {
+				t.Errorf("label %q: error = %q, want it to mention %q", label, res.Content[0].Text, want)
+			}
+		}
+	}
+	assertNoCLI(t, readArgv())
+	if n := len(backend.patches()); n != 0 {
+		t.Errorf("PATCH count = %d, want 0", n)
+	}
+}
+
+// TestTC_ClaimRefusesUnreadableRoster fails closed: without the roster nothing
+// can tell a lane label from a spawnable profile, and the collision it would
+// risk is silent by construction.
+func TestTC_ClaimRefusesUnreadableRoster(t *testing.T) {
+	installFakeBin(t)
+	noEnvClaimLabel(t)
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.profiles = nil // GET /profiles 404s
+	backend.orders["task-ok"] = []string{`{"task":{"id":"task-ok","title":"T","status":"ready"}}`}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{
+		ID: "task-ok", Board: testBoard, Worker: "codex-orchestrator",
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError for an unreadable roster, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{"could not read the installed profile roster", "refused rather than risked"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	assertNoCLI(t, readArgv())
+}
+
+// TestTC_ClaimLabelAlreadyOnCardSkipsWrite covers the re-claim: the card
+// already carries the label, so there is nothing to write (and nothing to undo
+// if the claim fails — the tool did not put it there).
+func TestTC_ClaimLabelAlreadyOnCardSkipsWrite(t *testing.T) {
+	installFakeBin(t)
+	noEnvClaimLabel(t)
+	readArgv := argvLog(t)
+	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
+	backend := newClaimBackend()
+	backend.orders["task-ok"] = []string{
+		`{"task":{"id":"task-ok","title":"T","status":"ready","assignee":"codex-orchestrator"}}`,
+		claimedRow("task-ok", "codex-orchestrator", exp),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{
+		ID: "task-ok", Board: testBoard, Worker: "codex-orchestrator",
+	})
+	if res.IsError {
+		t.Fatalf("expected success, got IsError: %s", res.Content[0].Text)
+	}
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "claim --ttl") {
+		t.Fatalf("argv = %v, want only the claim (no redundant assign)", argv)
+	}
+	if n := backend.getCount("task-ok"); n != 2 {
+		t.Errorf("GET count = %d, want 2 (preflight + post-claim; nothing to read back)", n)
 	}
 }
 
@@ -265,14 +505,12 @@ func TestTC_ClaimSuccess(t *testing.T) {
 func TestTC_ClaimTTLFromKnob(t *testing.T) {
 	installFakeBin(t)
 	t.Setenv(kanban.ClaimTTLEnv, "7200")
+	noEnvClaimLabel(t)
 	argvLog := filepath.Join(t.TempDir(), "argv.log")
 	t.Setenv("HERMES_FAKE_ARGV_LOG", argvLog)
 	exp := time.Now().Unix() + 7200
 	backend := newClaimBackend()
-	backend.orders["task-ok"] = []string{
-		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
-		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
-	}
+	backend.orders["task-ok"] = claimSeq("task-ok", defaultClaimWorkerLabel, exp)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
@@ -305,12 +543,10 @@ func TestTC_ClaimTTLFromKnob(t *testing.T) {
 func TestTC_ClaimTTLDisagreementWarns(t *testing.T) {
 	installFakeBin(t)
 	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
 	exp := time.Now().Unix() + 900 // the old CLI default, i.e. the flag was ignored
 	backend := newClaimBackend()
-	backend.orders["task-ok"] = []string{
-		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
-		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
-	}
+	backend.orders["task-ok"] = claimSeq("task-ok", defaultClaimWorkerLabel, exp)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
@@ -333,12 +569,10 @@ func TestTC_ClaimTTLDisagreementWarns(t *testing.T) {
 func TestTC_ClaimTTLInvalidKnob(t *testing.T) {
 	installFakeBin(t)
 	t.Setenv(kanban.ClaimTTLEnv, "15m")
+	noEnvClaimLabel(t)
 	exp := time.Now().Unix() + kanban.DefaultClaimTTLSeconds
 	backend := newClaimBackend()
-	backend.orders["task-ok"] = []string{
-		`{"task":{"id":"task-ok","title":"T","status":"ready"}}`,
-		fmt.Sprintf(`{"task":{"id":"task-ok","title":"T","status":"running","claim_expires":%d}}`, exp),
-	}
+	backend.orders["task-ok"] = claimSeq("task-ok", defaultClaimWorkerLabel, exp)
 	s := newClaimToolServer(t, backend)
 
 	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-ok", Board: testBoard})
@@ -351,20 +585,155 @@ func TestTC_ClaimTTLInvalidKnob(t *testing.T) {
 	}
 }
 
-func TestTC_ClaimFailure(t *testing.T) {
+// TestTC_ClaimAssignFailure is the write failing on its own: nothing was
+// claimed, so the error must not tell the caller to undo anything.
+func TestTC_ClaimAssignFailure(t *testing.T) {
 	installFakeBin(t)
+	noEnvClaimLabel(t)
+	readArgv := argvLog(t)
 	backend := newClaimBackend()
-	backend.orders["task-fail"] = []string{`{"task":{"id":"task-fail","title":"T","status":"ready"}}`}
+	backend.orders["task-assignfail"] = []string{`{"task":{"id":"task-assignfail","title":"T","status":"ready"}}`}
 	s := newClaimToolServer(t, backend)
 
-	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-fail", Board: testBoard})
+	res := s.TicketClaim(context.Background(), TicketClaimInput{ID: "task-assignfail", Board: testBoard})
 	if !res.IsError {
 		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
 	}
-	// first non-empty stderr line of the fake, verbatim.
-	want := "error: task already claimed"
-	if res.Content[0].Text != want {
-		t.Errorf("error = %q, want %q", res.Content[0].Text, want)
+	for _, want := range []string{"could not assign the lane label", "error: cannot assign: task is already running", "NOT claimed"} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	// The claim must not run after a failed label write.
+	argv := readArgv()
+	if len(argv) != 1 || !strings.Contains(argv[0], "assign task-assignfail") {
+		t.Fatalf("argv = %v, want only the failed assign", argv)
+	}
+}
+
+// TestTC_ClaimFailureAfterAssignUnassigns is AC 5's first branch (t_7f1caa0a):
+// the label landed and the claim then lost the race, so the tool puts the card
+// back to unassigned+ready and says so.
+func TestTC_ClaimFailureAfterAssignUnassigns(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
+	readArgv := argvLog(t)
+	label := "codex-orchestrator"
+	backend := newClaimBackend()
+	backend.orders["task-claimfail"] = []string{
+		`{"task":{"id":"task-claimfail","title":"T","status":"ready"}}`,
+		fmt.Sprintf(`{"task":{"id":"task-claimfail","title":"T","status":"ready","assignee":%q}}`, label),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{
+		ID: "task-claimfail", Board: testBoard, Worker: label,
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{
+		"error: ticket is no longer ready (lost the CAS race)",
+		"back to ready and unassigned",
+		"Re-read it (ticket_get)",
+	} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+	argv := readArgv()
+	want := []string{
+		"kanban --board " + testBoard + " assign task-claimfail " + label,
+		fmt.Sprintf("kanban --board %s claim --ttl %d task-claimfail", testBoard, kanban.DefaultClaimTTLSeconds),
+		"kanban --board " + testBoard + " assign task-claimfail none",
+	}
+	if len(argv) != len(want) {
+		t.Fatalf("argv = %q, want %q", argv, want)
+	}
+	for i := range want {
+		if argv[i] != want[i] {
+			t.Errorf("argv[%d] = %q, want %q", i, argv[i], want[i])
+		}
+	}
+}
+
+// TestTC_ClaimFailureUnassignFails is AC 5's second branch: the label cannot be
+// removed either, so the caller is told the card is ready and still assigned to
+// the lane label, and that an operator has to unassign it.
+func TestTC_ClaimFailureUnassignFails(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
+	label := "codex-orchestrator"
+	backend := newClaimBackend()
+	backend.orders["task-claimfail-stuck"] = []string{
+		`{"task":{"id":"task-claimfail-stuck","title":"T","status":"ready"}}`,
+		fmt.Sprintf(`{"task":{"id":"task-claimfail-stuck","title":"T","status":"ready","assignee":%q}}`, label),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketClaim(context.Background(), TicketClaimInput{
+		ID: "task-claimfail-stuck", Board: testBoard, Worker: label,
+	})
+	if !res.IsError {
+		t.Fatalf("expected IsError, got success: %s", res.Content[0].Text)
+	}
+	for _, want := range []string{
+		"automatic unassign ALSO failed",
+		"cannot assign: task is locked by a live claim",
+		"ready and assigned to \"codex-orchestrator\"",
+		"operator unassign",
+	} {
+		if !strings.Contains(res.Content[0].Text, want) {
+			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
+		}
+	}
+}
+
+// TestTC_ClaimThenReviewNeedsNoWorker is AC 7: identity is supplied ONCE, at
+// claim. A card claimed through ticket_claim carries the label, so the review
+// handoff resolves the implementer off the card with no worker argument, makes
+// NO assign/reassign call (the stamp is a no-op), and still carries the
+// explicit --reviewer plus --force for the live claim.
+func TestTC_ClaimThenReviewNeedsNoWorker(t *testing.T) {
+	installFakeBin(t)
+	t.Setenv(kanban.ClaimTTLEnv, "")
+	noEnvClaimLabel(t)
+	label := "codex-orchestrator"
+	readArgv := argvLog(t)
+	backend := newClaimBackend()
+	backend.orders["task-review-now"] = []string{
+		// request-review's preflight: running under the claim ticket_claim took.
+		fmt.Sprintf(`{"task":{"id":"task-review-now","title":"T","status":"running","assignee":%q,"claim_lock":"holder-1","claim_expires":9999999999}}`, label),
+		// the authoritative post-transition read: the review row + the
+		// implementer the kernel recorded.
+		fmt.Sprintf(`{"task":{"id":"task-review-now","title":"T","status":"review","assignee":"alice"},`+
+			`"events":[{"id":9,"kind":"review_requested","payload":{"implementer":%q,"reviewer":"alice"}}]}`, label),
+	}
+	s := newClaimToolServer(t, backend)
+
+	res := s.TicketRequestReview(context.Background(), TicketRequestReviewInput{
+		ID: "task-review-now", Board: testBoard, Summary: "shipped it", Reviewer: "alice", Force: true,
+	})
+	if res.IsError {
+		t.Fatalf("expected the handoff to inherit the claim's label, got IsError: %s", res.Content[0].Text)
+	}
+	out := decodeOut[TicketRequestReviewOut](t, res)
+	if out.Implementer != label {
+		t.Errorf("implementer = %q, want %q (the label ticket_claim wrote)", out.Implementer, label)
+	}
+	argv := readArgv()
+	if len(argv) != 1 {
+		t.Fatalf("argv = %v, want exactly one invocation (the handoff; the stamp is a no-op)", argv)
+	}
+	if strings.Contains(argv[0], "assign") || strings.Contains(argv[0], "reassign") {
+		t.Errorf("argv[0] = %q, must not write the assignee when it already matches", argv[0])
+	}
+	for _, want := range []string{"request-review task-review-now", "--reviewer=alice", "--force"} {
+		if !strings.Contains(argv[0], want) {
+			t.Errorf("argv[0] = %q, want it to contain %q", argv[0], want)
+		}
 	}
 }
 

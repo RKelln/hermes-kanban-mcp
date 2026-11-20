@@ -61,7 +61,15 @@ MCP tools for a Hermes kanban board:
 - review_queue    single-call scan for tickets awaiting human review across ALL
     boards (blocked + review-required marker via block_reason or latest_summary);
     replaces per-board scans
-- ticket_claim    ready->running BEFORE editing. The claim TTL is the server's
+- ticket_claim    ready->running BEFORE editing. Identity is set once, at claim:
+    the lane label (worker > MCP_CLAIM_WORKER > the default remote-mcp) is
+    ASSIGNED to the card while it is still ready, so the kernel records it as the
+    review handoff's implementer and ticket_request_review needs no worker
+    argument for a card claimed here. The label is stable per lane, never per
+    ticket (an assignee change resets the kernel's consecutive_failures), and it
+    must NOT be an installed profile — that is refused before any write, because
+    the dispatcher claims a ready card assigned to a profile within a minute. The
+    claim TTL is the server's
     MCP_CLAIM_TTL_SECONDS (default 14400s = 4h), passed as an explicit --ttl on
     every call: this lane has no heartbeat verb, so the TTL is the whole margin a
     run gets. The result reports claim_ttl_seconds and claim_ttl_source
@@ -95,8 +103,11 @@ MCP tools for a Hermes kanban board:
     whatever assignee the card carries, which the stamp has just set to the lane
     label, and passing that value would make a re-review a self-review.
     worker is the IMPLEMENTER
-    label stamped on the card before the handoff (explicit worker >
-    MCP_CLAIM_WORKER; REFUSED when neither supplies one). The kernel records it
+    label, and it is usually NOT needed: a card claimed through ticket_claim
+    already carries it, so the handoff inherits the label already on the card
+    (explicit worker > MCP_CLAIM_WORKER > the label already on the card) and the
+    stamp is a no-op; when none of those supplies one the request is REFUSED.
+    The kernel records it
     as the handoff's implementer, which is what lets a request-changes verdict
     return the card to you — without it the reviewer's only exit is a block. It
     must NOT be an installed profile, or the dispatcher spawns a worker for the
@@ -197,7 +208,8 @@ Lifecycle facts:
   transition nobody will act on. The handoff needs BOTH values, and they pull
   opposite ways: a reviewer the dispatcher CAN spawn, and an implementer label
   it must NEVER spawn. The kernel writes the implementer once, at request
-  time, from the ticket's assignee — so the tool settles the REVIEWER first
+  time, from the claim run's profile — the label ticket_claim assigned before
+  it claimed — falling back to the ticket's assignee; so the tool settles the REVIEWER first
   (the stamp moves the assignee, so nothing may depend on it), stamps the
   label (on a
   RUNNING card that is reassign --reclaim, which is what force authorises)

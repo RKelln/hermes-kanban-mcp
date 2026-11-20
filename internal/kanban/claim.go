@@ -209,7 +209,10 @@ func ResolveClaimTTL() ClaimTTLSettings {
 // worker is accepted for API compatibility with the MCP layer but is not
 // passed to the CLI: as of 2026-08 the real `hermes kanban claim` defines
 // no assignee/worker flag (only --ttl), and inventing one is forbidden.
-// When the CLI grows an assignee flag, plumb worker through here.
+// The label reaches the card BEFORE the claim instead, through AssignLabel —
+// that separate write is what makes the claim's run row carry an implementer
+// for the review handoff (ticket_claim, t_7f1caa0a). When the CLI grows an
+// assignee flag on claim, plumb worker through here and drop that write.
 //
 // stdout and stderr are the (4 KiB-capped) CLI streams; err is non-nil on
 // argument rejection, missing binary, timeout, or non-zero exit.
