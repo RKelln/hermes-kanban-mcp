@@ -12,6 +12,12 @@
 #   task-big   -> write >4 KiB to stdout and stderr (cap test)
 #   task-reviewfail -> succeed on every verb EXCEPT request-review, which
 #                exits 1 (the handoff fails after a successful stamp)
+#   task-assignfail -> exit 1 on `assign` (the lane-label write itself fails)
+#   task-claimfail  -> succeed on assign/reassign/unassign, exit 1 on `claim`
+#                (the claim fails AFTER the label landed; the tool's own
+#                best-effort unassign is the `assign <id> none` call)
+#   task-claimfail-stuck -> like task-claimfail, but the unassign fails too
+#                (a card left assigned with no automatic way back)
 
 verb=""
 id=""
@@ -63,6 +69,35 @@ case "$id" in
   task-reviewfail)
     if [ "$verb" = "request-review" ]; then
       echo "error: re-review has no durable reviewer provenance" >&2
+      exit 1
+    fi
+    echo "assigned $id"
+    ;;
+  task-assignfail)
+    if [ "$verb" = "assign" ]; then
+      echo "error: cannot assign: task is already running" >&2
+      exit 1
+    fi
+    echo "claimed $id"
+    ;;
+  task-claimfail)
+    if [ "$verb" = "claim" ]; then
+      echo "error: ticket is no longer ready (lost the CAS race)" >&2
+      exit 1
+    fi
+    echo "assigned $id"
+    ;;
+  task-claimfail-stuck)
+    has_none=0
+    for arg in "$@"; do
+      if [ "$arg" = "none" ]; then has_none=1; fi
+    done
+    if [ "$verb" = "claim" ]; then
+      echo "error: ticket is no longer ready (lost the CAS race)" >&2
+      exit 1
+    fi
+    if [ "$has_none" = "1" ]; then
+      echo "error: cannot assign: task is locked by a live claim" >&2
       exit 1
     fi
     echo "assigned $id"

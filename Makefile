@@ -1,8 +1,14 @@
 .PHONY: test test-sweeper test-deploy
 
-# Go suite (the MCP server). Run race-enabled as the CI gate does.
+# Go suite (the MCP server). Run race-enabled as the CI gate does, then the
+# offline deploy-tooling suite: its repo-wide secret-hygiene scan is the final
+# verification step of a real upgrade, and it sat RED on main behind a green
+# `make test` until a deploy printed FAILED after installing a healthy binary
+# (2026-11-16). Two seconds, stdlib only, no board/host/sudo.
 test:
 	go build ./... && go vet ./... && go test -race ./...
+	@echo "== deploy tooling (offline)"
+	@python3 deploy/tests/test_upgrade.py
 
 # Python review-sweeper unit suite. Offline-only tests; the e2e setup/repro
 # scripts under sweeper/tests (review-sweeper-e2e-*.py, review-sweeper-repro.py)

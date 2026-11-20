@@ -33,16 +33,19 @@ package mcptools
 //
 // The kernel writes the implementer once, at request time, from the
 // current run's profile, falling back to the ticket's assignee only when
-// that assignee is not the reviewer (kanban_db.request_review). A bridge
-// claim writes no run profile — `hermes kanban claim` has no profile flag
-// — and the external lane never assigned its cards, so both sources were
-// empty and every handoff recorded implementer=null. request_changes then
-// REFUSED (\"review handoff has no valid implementer provenance\") and the
-// reviewer's only remaining exit was a block: measured live 2026-10-18 on
-// board `togather`, ticket t_a6e3ba60 (t_b917c3c6). This tool therefore
-// stamps a durable lane label on the card BEFORE the handoff, which is
-// the kernel's own designed fallback, and then verifies the value the
-// kernel actually recorded.
+// that assignee is not the reviewer (kanban_db.request_review). ticket_claim
+// ASSIGNS the lane label to a ready card BEFORE claiming it (t_7f1caa0a), so
+// the claim's run row carries that label and the handoff records it by
+// construction. This tool therefore reads the label off the card's own
+// assignee when the caller and the server knob supply none (resolveLaneLabel),
+// and the stamp that follows is a no-op. The stamp still exists for cards
+// claimed another way — a claim that wrote no run profile is how every handoff
+// used to record implementer=null: request_changes then REFUSED (\"review
+// handoff has no valid implementer provenance\") and the reviewer's only
+// remaining exit was a block. Measured live 2026-10-18 on board `togather`,
+// ticket t_a6e3ba60 (t_b917c3c6). Either way this tool writes a durable lane
+// label on the card BEFORE the handoff, which is the kernel's own designed
+// fallback, and then verifies the value the kernel actually recorded.
 //
 // ORDER MATTERS, and it is the one thing that can silently undo the above
 // (review F1 on t_b917c3c6). request_review takes its reviewer from an
@@ -85,9 +88,11 @@ import (
 // name an installed profile the dispatcher can spawn.
 //
 // worker is the implementer label stamped on the card before the handoff
-// (the same name ticket_claim accepts). It falls back to
-// MCP_CLAIM_WORKER, and the handoff is REFUSED when neither supplies one:
-// an unnamed implementer is the exact defect this parameter exists to
+// (the same name ticket_claim accepts). It is an OVERRIDE: when it and
+// MCP_CLAIM_WORKER are both empty, the label is read off the card's own
+// assignee — the identity ticket_claim wrote at claim time, which is what the
+// kernel will record — and when the card carries none either, the handoff is
+// REFUSED: an unnamed implementer is the exact defect this parameter exists to
 // end. Do not read it as a profile — it must NOT be one (see the file
 // comment).
 //
@@ -268,50 +273,151 @@ func (s *Server) profileSpawnable(ctx context.Context, reviewer string) (ok, che
 	return false, true, names
 }
 
+// labelVerdict is the shared answer to the one roster question both
+// identity-setting tools must ask about an implementer label: is it an
+// installed profile the dispatcher would spawn? The direction is easy to
+// invert — a REVIEWER must be a profile, an IMPLEMENTER must not be — so the
+// oracle and the verdict live in one place and each tool formats its own
+// refusal (they name different knobs and have different fallbacks).
+type labelVerdict int
+
+const (
+	// labelUsable: a lane token the installed roster does not list.
+	labelUsable labelVerdict = iota
+	// labelInvalidToken: not a lane token at all, so it must never reach argv.
+	labelInvalidToken
+	// labelIsProfile: an installed profile — a ready card assigned to it is
+	// claimed by the dispatcher, which is exactly what an implementer label
+	// must prevent.
+	labelIsProfile
+	// labelRosterUnreadable: GET /profiles did not answer, so nothing can be
+	// verified. Both callers fail closed.
+	labelRosterUnreadable
+)
+
+// resolvedLabel is a resolved implementer label plus the verdict and the roster
+// the caller needs to write its refusal.
+type resolvedLabel struct {
+	label   string
+	source  string // where it came from, in the vocabulary the success notes use
+	verdict labelVerdict
+	roster  []string // installed profiles, so a refusal can name them
+}
+
+// classifyImplementerLabel asks the roster the question an implementer label
+// has to answer: is this an installed profile? It is the single oracle behind
+// both ticket_claim's and ticket_request_review's label checks.
+func (s *Server) classifyImplementerLabel(ctx context.Context, label string) (labelVerdict, []string) {
+	ok, checked, names := s.profileSpawnable(ctx, label)
+	switch {
+	case !checked:
+		return labelRosterUnreadable, names
+	case ok:
+		return labelIsProfile, names
+	}
+	return labelUsable, names
+}
+
+// verifyLaneLabel classifies ONE candidate: token shape first (never ask the
+// roster about a value that could not be written), then the roster.
+func (s *Server) verifyLaneLabel(ctx context.Context, label, source string) resolvedLabel {
+	out := resolvedLabel{label: label, source: source}
+	if !kanban.ValidLaneToken(label) {
+		out.verdict = labelInvalidToken
+		return out
+	}
+	out.verdict, out.roster = s.classifyImplementerLabel(ctx, label)
+	return out
+}
+
+// implementerKnobLabel is MCP_CLAIM_WORKER as the server has it, read raw at
+// call time. There is deliberately no invented default here: ticket_claim has
+// its own configured fallback, and ticket_request_review refuses rather than
+// silently becoming every lane's identity.
+func implementerKnobLabel() string { return strings.TrimSpace(os.Getenv(implementerKnob)) }
+
+// resolveLaneLabel resolves the implementer label from the sources BOTH
+// identity-setting tools share, in a fixed order:
+//
+//  1. the explicit worker argument — always an override;
+//  2. MCP_CLAIM_WORKER, the deployment's STABLE lane label. A bridge that sets
+//     it has already named its lane once, at deploy time, so it wins over
+//     anything a single card carries;
+//  3. the card's own recorded assignee — only when ts is passed, and only when
+//     that value is a lane token the roster does not list. This is the identity
+//     ticket_claim wrote at claim time (it assigns the label BEFORE claiming),
+//     and the kernel itself records that value on the handoff, because it comes
+//     from the claim run's profile. It is the last source before a refusal, and
+//     it is what lets a bridge that sets no knob still hand off without a
+//     worker argument — `togather`'s t_03346236 was exactly that deployment.
+//     A card assignee that is not a lane token, or is an installed profile, is
+//     SKIPPED rather than refused: cards legitimately carry profile names
+//     (`default`) and junk, and those must never become the implementer;
+//  4. fallback, when the caller has one (ticket_claim's configured default; the
+//     review handoff has none and refuses instead).
+//
+// An empty result means no source supplied anything; each caller decides what
+// that means for it.
+func (s *Server) resolveLaneLabel(ctx context.Context, worker string, ts *kanban.TaskSummary, fallback string) resolvedLabel {
+	if v := strings.TrimSpace(worker); v != "" {
+		return s.verifyLaneLabel(ctx, v, "the worker argument")
+	}
+	if v := implementerKnobLabel(); v != "" {
+		return s.verifyLaneLabel(ctx, v, implementerKnob)
+	}
+	if ts != nil {
+		if v := strings.TrimSpace(ts.Assignee); v != "" && kanban.ValidLaneToken(v) {
+			if verdict, names := s.classifyImplementerLabel(ctx, v); verdict == labelUsable {
+				return resolvedLabel{label: v, source: "the ticket's assignee, recorded at claim", verdict: labelUsable, roster: names}
+			}
+		}
+	}
+	if fallback != "" {
+		return s.verifyLaneLabel(ctx, fallback, "the server default")
+	}
+	return resolvedLabel{}
+}
+
 // resolveImplementerLabel decides which lane label the handoff records.
 //
-// Sources, in order: the explicit worker argument (the same name
-// ticket_claim accepts), then MCP_CLAIM_WORKER. There is deliberately no
-// third source and no default: a handoff with no provenance is the defect
-// this card exists to end, so the refusal names the knob instead of
-// inventing a label that would silently become every lane's identity.
+// Sources, in order (see resolveLaneLabel for the precedence and the reasoning):
+// the explicit worker argument, then MCP_CLAIM_WORKER, then the label already
+// on the card. When every source is empty the handoff is
+// REFUSED: a handoff with no provenance is the defect this tool exists to end,
+// so the refusal names the knob instead of inventing a label that would
+// silently become every lane's identity.
 //
-// The label is then checked in the direction that is easy to forget: it
-// must NOT be an installed profile. The kernel lands the card back at
-// `ready` with assignee = implementer, and the dispatcher claims ready
-// cards assigned to on-disk profiles, so a profile here puts an agent
-// worker on the card when changes come back — the "reviewer writes code"
-// failure with a different actor. A label that is already the reviewer is
-// refused too, because the kernel only falls back to the assignee when it
-// DIFFERS from the reviewer: that handoff would still record null.
+// The label is then checked in the direction that is easy to forget: it must
+// NOT be an installed profile. The kernel lands the card back at `ready` with
+// assignee = implementer, and the dispatcher claims ready cards assigned to
+// on-disk profiles, so a profile here puts an agent worker on the card when
+// changes come back — the "reviewer writes code" failure with a different
+// actor. A label that is already the reviewer is refused too, because the
+// kernel only falls back to the assignee when it DIFFERS from the reviewer:
+// that handoff would still record null.
 //
 // The roster could not be read case is a refusal, not an announcement.
 // For the reviewer an unverified value strands a card (loud enough at the
-// next ticket_events); for the implementer an unverified COLLISION
-// spawns a worker on work the lane was supposed to resume, which is
-// silent by construction. Fail closed.
-func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestReviewInput, reviewer string) (label, source string, failure *ToolResult) {
-	label = strings.TrimSpace(in.Worker)
-	source = "the worker argument"
-	if label == "" {
-		label = strings.TrimSpace(os.Getenv(implementerKnob))
-		source = implementerKnob
-	}
+// next ticket_events); for the implementer an unverified COLLISION spawns a
+// worker on work the lane was supposed to resume, which is silent by
+// construction. Fail closed.
+func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestReviewInput, ts *kanban.TaskSummary, reviewer string) (label, source string, failure *ToolResult) {
+	resolved := s.resolveLaneLabel(ctx, in.Worker, ts, "")
+	label, source = resolved.label, resolved.source
 	if label == "" {
 		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"remote-mcp\").", implementerKnob, implementerKnob)
 	}
-	if !kanban.ValidLaneToken(label) {
+	if resolved.verdict == labelInvalidToken {
 		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, kanban.LaneTokenPattern)
 	}
 	if strings.EqualFold(label, reviewer) {
 		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"remote-mcp\"), or a different reviewer.", label, implementerKnob)
 	}
-	ok, checked, names := s.profileSpawnable(ctx, label)
-	switch {
-	case !checked:
+	switch resolved.verdict {
+	case labelRosterUnreadable:
 		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so implementer label %q could NOT be checked. The handoff is refused rather than risked: if that label matches a profile, the dispatcher spawns a worker on the card when a request-changes verdict returns it. Retry once the dashboard API answers, or set %s to a label you know is not a profile (e.g. \"remote-mcp\").", label, implementerKnob)
-	case ok:
-		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"remote-mcp\"), not a profile.", label, strings.Join(names, ", "), implementerKnob)
+	case labelIsProfile:
+		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"remote-mcp\"), not a profile.", label, strings.Join(resolved.roster, ", "), implementerKnob)
 	}
 	return label, source, nil
 }
@@ -494,8 +600,11 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	}
 
 	// Implementer provenance. Resolved and verified BEFORE the stamp,
-	// because a refused label must leave the ticket untouched.
-	label, labelSource, failure := s.resolveImplementerLabel(ctx, in, flagReviewer)
+	// because a refused label must leave the ticket untouched. The card's own
+	// assignee is a source (ticket_claim wrote it at claim time), so a card
+	// claimed through this bridge needs no worker argument here and the stamp
+	// below is a no-op.
+	label, labelSource, failure := s.resolveImplementerLabel(ctx, in, ts, flagReviewer)
 	if failure != nil {
 		return failure
 	}
