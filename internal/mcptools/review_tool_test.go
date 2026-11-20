@@ -48,6 +48,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // argvLog installs the fake CLI and returns a function that reads back
@@ -1379,5 +1381,47 @@ func TestIdentityRefusalRejectsAuthoringBugs(t *testing.T) {
 				t.Errorf("identityRefusal(%s, %s) = %+v, want a single loud authoring-bug error", tc.code, tc.field, res)
 			}
 		})
+	}
+}
+
+// TestTRR_RefusalReachesTheWireWithBothBlocks closes the gap between the
+// ToolResult the tool builds and the CallToolResult a client receives: the
+// adapter must carry BOTH blocks and leave structuredContent nil. A future
+// adapter change that flattened to one text block would leave the structured
+// repair unreachable while the delivery-shape test above stayed green.
+func TestTRR_RefusalReachesTheWireWithBothBlocks(t *testing.T) {
+	noEnvReviewer(t)
+	noEnvClaimWorker(t)
+	installFakeBin(t)
+	backend := newClaimBackend()
+	backend.orders["t_x1"] = []string{`{"task":{"id":"t_x1","title":"T","status":"ready"},"events":[]}`}
+	s := newClaimToolServer(t, backend)
+
+	res, structured, err := adapt(s.TicketRequestReview)(context.Background(), nil, TicketRequestReviewInput{
+		ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice",
+	})
+	if err != nil {
+		t.Fatalf("adapted handler returned an error: %v", err)
+	}
+	if structured != nil {
+		t.Errorf("structuredContent = %v, want nil: the payload is the text blocks", structured)
+	}
+	if !res.IsError || len(res.Content) != 2 {
+		t.Fatalf("wire result = %+v, want IsError with two content blocks", res)
+	}
+	prose, ok := res.Content[0].(*mcp.TextContent)
+	if !ok || !strings.HasPrefix(prose.Text, "invalid_input: ") {
+		t.Fatalf("first wire block = %T %+v, want the prose message", res.Content[0], res.Content[0])
+	}
+	repair, ok := res.Content[1].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("second wire block = %T, want the JSON repair as text", res.Content[1])
+	}
+	var rep identityRepair
+	if err := json.Unmarshal([]byte(repair.Text), &rep); err != nil {
+		t.Fatalf("second wire block is not JSON: %v (%q)", err, repair.Text)
+	}
+	if rep.Code != refusalMissingWorker || rep.Field != "worker" || rep.Fix["worker"] == "" {
+		t.Errorf("wire repair = %+v, want missing_worker on worker with a worker fix", rep)
 	}
 }
