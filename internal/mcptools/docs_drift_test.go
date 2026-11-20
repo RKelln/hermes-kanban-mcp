@@ -260,7 +260,7 @@ func TestDocs_ServeTheImplementerRule(t *testing.T) {
 		for _, want := range []string{
 			"IMPLEMENTER label",
 			"worker is the IMPLEMENTER label",
-			"explicit worker > MCP_CLAIM_WORKER, and refused when neither supplies one",
+			"explicit worker > MCP_CLAIM_WORKER > the label already on the card",
 			"must NOT be an installed profile",
 		} {
 			if !strings.Contains(text, want) {
@@ -557,6 +557,81 @@ func TestDocs_TellTheLaneToOmitTheReviewer(t *testing.T) {
 		}
 		if !strings.Contains(s.text, "operator override") {
 			t.Errorf("%s does not call an explicit reviewer an operator override, so omitting it reads as incomplete", s.name)
+		}
+	}
+}
+
+// TestDocs_ServeTheClaimIdentityRule pins the contract of t_7f1caa0a: identity
+// is set ONCE, at claim, and the review handoff inherits it. The failure it
+// prevents is not a wrong sentence but a MISSING one: a remote lane pushed its
+// branch, sent a full handoff summary, and only then learned that the review
+// call wanted a second identity argument it had never been told about (board
+// `togather`, t_03346236). Every surface an implementer reads before claiming
+// has to say where the label comes from, that it is stable per lane, and that
+// the review step therefore needs no worker argument — and the two surfaces an
+// agent reads (served help, served tool description) also have to say why a
+// profile label is refused.
+func TestDocs_ServeTheClaimIdentityRule(t *testing.T) {
+	t.Run("served help", func(t *testing.T) {
+		for _, want := range []string{
+			"Identity is set once, at claim",
+			"stable per lane",
+			"needs no worker",
+			"must NOT be an installed profile",
+		} {
+			if !strings.Contains(helpDoc, want) {
+				t.Errorf("helpDoc no longer states the claim identity rule (no %q): a lane supplies the label at claim and then reads a second demand at request-review", want)
+			}
+		}
+	})
+
+	t.Run("served tool description", func(t *testing.T) {
+		b, err := os.ReadFile("register.go")
+		if err != nil {
+			t.Fatalf("read register.go: %v", err)
+		}
+		text := string(b)
+		for _, want := range []string{
+			"identity is set once, at claim",
+			"stable per lane",
+			"needs no worker argument for a card claimed here",
+			"must NOT be an installed profile",
+			"claimed by the dispatcher within about a minute",
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("register.go no longer serves the claim identity rule (no %q): the agent never reads the Go constant, only the string tools/list carries", want)
+			}
+		}
+	})
+
+	// The two prose surfaces an implementer or operator actually reads.
+	surfaces := []struct {
+		name string
+		want []string
+	}{
+		{"../../deploy/AGENTS.kanban-mcp.template.md", []string{
+			"Identity is set once, at claim",
+			"stable per lane",
+			"needs no `worker` argument for a card claimed here",
+			"refused before any CLI call",
+		}},
+		{"../../README.md", []string{
+			"identity is set once, at claim",
+			"stable per lane",
+			"assigns that label before claiming",
+			"would put a second worker on the lane's card",
+		}},
+	}
+	for _, s := range surfaces {
+		b, err := os.ReadFile(filepath.Clean(s.name))
+		if err != nil {
+			t.Errorf("cannot read %s: %v (the gate is blind without it)", s.name, err)
+			continue
+		}
+		for _, want := range s.want {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s no longer states the claim identity rule (no %q): the lane meets a second identity demand after the work is done", s.name, want)
+			}
 		}
 	}
 }

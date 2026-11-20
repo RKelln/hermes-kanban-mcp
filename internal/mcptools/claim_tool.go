@@ -32,6 +32,30 @@ package mcptools
 // transient) through the hardened CLI path and keeps T5's REST fallback
 // engaged: when the CLI is unavailable the untyped REST PATCH still runs,
 // and the result reports kind_applied=false with the fallback note.
+//
+// IDENTITY IS WRITTEN BEFORE THE CLAIM (t_7f1caa0a). `hermes kanban claim`
+// records no owner: it has no assignee flag, and internal/kanban/claim.go
+// accepts `worker` only for API compatibility. The kernel does record an
+// implementer at a review handoff — from the CURRENT RUN's profile, which
+// _claim_and_open_run fills with tasks.assignee at claim time — so a card
+// claimed while unassigned has run.profile = NULL and the handoff records
+// implementer=null, which request_changes then refuses (the reviewer's only
+// exit is a block). Measured 2026-11-20 on board `togather`, card t_03346236:
+// one full handoff summary discarded. assign_task refuses only a RUNNING
+// claimed card, so `assign <id> <label>` + `claim <id>` is a legal pair that
+// leaves tasks.assignee = label for the kernel to copy into the run row. The
+// label is resolved ONCE, here, at the moment the caller takes the work; the
+// review handoff then inherits it (internal/mcptools/review_tool.go reads the
+// card's assignee as its implementer source) instead of demanding a second
+// identity argument after the work is done.
+//
+// The label must be STABLE per lane, never per ticket: assign_task resets
+// consecutive_failures whenever the assignee changes, so a per-ticket label
+// would silently clear the kernel's block-loop counter on every claim. It must
+// also not be an installed profile: the dispatcher claims a READY card whose
+// assignee is an on-disk profile within about a minute, which would put a
+// second worker on this lane's card. Both rules are enforced before any CLI
+// call (see resolveClaimLabel).
 
 import (
 	"context"
@@ -48,11 +72,11 @@ import (
 // error, per the T6 spec (first non-empty stderr line, <=200 chars).
 const maxCLIErrorRunes = 200
 
-// TicketClaimInput is the ticket_claim tool input. ID is required; board
-// required; board is required; worker is accepted
-// for forward compatibility but never passed to the CLI: as of 2026-08
-// `hermes kanban claim` defines no assignee flag, and inventing one is
-// forbidden.
+// TicketClaimInput is the ticket_claim tool input. ID is required; board is
+// required; worker is the LANE LABEL assigned to the ticket before it is
+// claimed (explicit worker > MCP_CLAIM_WORKER > the configured default,
+// remote-mcp). That label is the identity the review handoff inherits, so a
+// lane supplies it once — here — rather than again at request-review time.
 type TicketClaimInput struct {
 	ID     string `json:"id"`
 	Board  string `json:"board"`
@@ -112,12 +136,74 @@ func claimTTLWarning(ttl kanban.ClaimTTLSettings, claimExpires int64) string {
 		rem, ttl.Seconds)
 }
 
+// defaultClaimWorkerLabel is the label ticket_claim assigns when neither the
+// `worker` argument nor MCP_CLAIM_WORKER supplies one. It mirrors
+// internal/config's defaultClaimWorker (MCPClaimWorker, "remote-mcp");
+// claim_tool_test.go loads a Config with MCP_CLAIM_WORKER unset and compares
+// the two, so changing one without the other fails the suite instead of
+// splitting the server's identity into two answers.
+const defaultClaimWorkerLabel = "remote-mcp"
+
+// unassignLabel is the CLI's "no assignee" value for `hermes kanban assign`,
+// used to put a card back the way ticket_claim found it when the claim fails
+// after the label landed.
+const unassignLabel = "none"
+
+// claimIdentityNote is the identity half of every successful claim's note: the
+// label written to the card, where it came from, and the fact that the review
+// handoff inherits it. It is what teaches a lane that it does not have to name
+// its identity a second time after the work is done (t_7f1caa0a).
+func claimIdentityNote(label, source string) string {
+	return fmt.Sprintf("lane label %q assigned before the claim (%s), so ticket_request_review records it as the implementer without a worker argument", label, source)
+}
+
+// resolveClaimLabel settles the lane label ticket_claim writes, and refuses the
+// two ways a label can hurt, both BEFORE any CLI call:
+//
+//   - an installed profile. The dispatcher claims a READY card assigned to an
+//     on-disk profile within about a minute, so assigning one would put a
+//     second worker on this lane's card — the assignment is the invitation.
+//   - an unreadable roster. Same fail-closed reasoning as the review handoff:
+//     the collision above is silent by construction, so it must not be risked.
+//
+// Sources, in order: the explicit worker argument, MCP_CLAIM_WORKER, then the
+// configured default. There is always a label — a claim with no identity is the
+// defect this card ended.
+func (s *Server) resolveClaimLabel(ctx context.Context, worker string) (label, source string, failure *ToolResult) {
+	if v := strings.TrimSpace(worker); v != "" {
+		label, source = v, "the worker argument"
+	} else if v := implementerKnobLabel(); v != "" {
+		label, source = v, implementerKnob
+	} else {
+		label, source = defaultClaimWorkerLabel, "the server default"
+	}
+	resolved := s.verifyLaneLabel(ctx, label, source)
+	label, source = resolved.label, resolved.source
+	switch resolved.verdict {
+	case labelInvalidToken:
+		return "", "", ErrorResult("invalid_input: lane label %q (from %s) is not a lane token (must match %s); it is written to the ticket's assignee before the claim, so keep it to a plain control-plane name", label, source, kanban.LaneTokenPattern)
+	case labelRosterUnreadable:
+		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so lane label %q could not be checked. The claim is refused rather than risked: if that label matched a profile, the dispatcher would claim the card for a local worker the moment it was assigned. Retry once the dashboard API answers.", label)
+	case labelIsProfile:
+		return "", "", ErrorResult("invalid_input: lane label %q IS an installed profile, and ticket_claim assigns it to the card BEFORE claiming it — a READY card assigned to an on-disk profile is claimed by the dispatcher within about a minute, so a second worker would land on this lane's card. Installed profiles: %s. Pass worker with the lane's stable control-plane label (e.g. \"remote-mcp\"), which must never be a profile.", label, strings.Join(resolved.roster, ", "))
+	}
+	return label, source, nil
+}
+
 // TicketClaim implements the ticket_claim MCP tool: validate, fail fast
 // when HERMES_BIN is missing, preflight the ticket status over REST
 // (ready is claimable; a running ticket with a held lock is reported as
-// already claimed; anything else is rejected without exec), shell out to
-// the hermes CLI, then re-read the ticket and return the authoritative
+// already claimed; anything else is rejected without exec), resolve and verify
+// the lane label, assign it while the card is still ready, shell out to the
+// hermes CLI to claim, then re-read the ticket and return the authoritative
 // state. Every expected failure is a one-line IsError result.
+//
+// The assign-then-claim pair is what puts an implementer on the card before any
+// run exists: assign_task refuses only a RUNNING claimed task, so a ready card
+// accepts the label, and the kernel copies it into the run row at claim time.
+// If the claim then fails, the label is removed again (best effort) so the card
+// ends up exactly as it was found rather than carrying an identity nothing
+// claimed.
 func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResult {
 	board := in.Board
 	if board == "" {
@@ -142,27 +228,72 @@ func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResu
 	}
 	switch {
 	case ts.Status == "ready":
-		// Claimable; fall through to the CLI.
+		// Claimable; fall through to the identity write and the CLI.
 	case ts.Status == "running" && ts.ClaimLock != "" && ts.ClaimExpires > time.Now().Unix():
 		return ErrorResult("already claimed (expires %d)", ts.ClaimExpires)
 	default:
 		return ErrorResult("%s", claimRefusal(ts.Status, parents))
 	}
 
-	if _, stderr, err := kanban.ClaimWithTTL(ctx, in.ID, board, in.Worker, ttl); err != nil {
-		return ErrorResult("%s", cliFailureText(stderr, err))
+	// Identity BEFORE the claim. Resolved and verified first (a refused label
+	// must leave the card untouched), then written; the write is skipped only
+	// when the card already carries the label (a re-claim), because there is
+	// nothing to change and the kernel resets consecutive_failures whenever the
+	// assignee CHANGES.
+	label, labelSource, failure := s.resolveClaimLabel(ctx, in.Worker)
+	if failure != nil {
+		return failure
+	}
+	wroteLabel := !strings.EqualFold(strings.TrimSpace(ts.Assignee), label)
+	if wroteLabel {
+		if _, stderr, err := kanban.AssignLabel(ctx, in.ID, board, label, "", false); err != nil {
+			return ErrorResult("could not assign the lane label %q before claiming: %s. The ticket was NOT claimed and nothing else was written; re-read it (ticket_get) before retrying.", label, cliFailureText(stderr, err))
+		}
+		// Read the write back before spending the claim: the kernel
+		// canonicalises the assignee and the CLI can no-op, and a claim that
+		// proceeded on an unwritten label would recreate exactly the null
+		// implementer this card exists to end.
+		stamped, err := s.GetTask(ctx, board, in.ID)
+		if err != nil {
+			return ErrorResult("%s. The lane label %q was written but could not be verified, and the ticket was NOT claimed; re-read it (ticket_get) before retrying.", RestErrorMessage(err), label)
+		}
+		if !strings.EqualFold(strings.TrimSpace(stamped.Assignee), label) {
+			return ErrorResult("the lane label did not take effect: ticket %s carries assignee %q, not %q. The ticket was NOT claimed; re-assign the label (or pass a worker the CLI accepts) before claiming.", in.ID, stamped.Assignee, label)
+		}
+	}
+
+	if _, stderr, err := kanban.ClaimWithTTL(ctx, in.ID, board, label, ttl); err != nil {
+		msg := cliFailureText(stderr, err)
+		if !wroteLabel {
+			// The label was already there, so there is nothing this tool wrote
+			// to undo — the card is exactly as the caller found it.
+			return ErrorResult("%s. The lane label %q was already on the ticket, so nothing was undone; re-read it (ticket_get) before retrying.", msg, label)
+		}
+		if _, ustderr, uerr := kanban.AssignLabel(ctx, in.ID, board, unassignLabel, "", false); uerr != nil {
+			return ErrorResult("%s. The lane label %q was assigned before the claim and the automatic unassign ALSO failed (%s): the ticket is still ready and assigned to %q — re-read it (ticket_get) before acting, because a failed claim usually means another run took the card, in which case it is running, not ready — and it needs an operator unassign (`hermes kanban assign %s %s`) before this lane can claim it back.", msg, label, cliFailureText(ustderr, uerr), label, in.ID, unassignLabel)
+		}
+		return ErrorResult("%s. The lane label %q had been assigned, so the failed claim was followed by an unassign: the ticket is back to ready and unassigned, its pre-claim state. Re-read it (ticket_get) before retrying.", msg, label)
 	}
 
 	after, err := s.GetTask(ctx, board, in.ID)
 	if err != nil {
 		return ErrorResult("%s", RestErrorMessage(err))
 	}
+	// Post-conditions, read back rather than assumed: a claim that did not
+	// reach running, or that lost the label on the way, would hand the review
+	// step an implementer it cannot trust.
+	if after.Status != "running" {
+		return ErrorResult("claim did not take effect: ticket %s is %s, not running. Nothing was dispatched; re-check the ticket before retrying.", in.ID, after.Status)
+	}
+	if !strings.EqualFold(strings.TrimSpace(after.Assignee), label) {
+		return ErrorResult("claim took effect but ticket %s carries assignee %q, not the lane label %q, so a review handoff would record the wrong implementer. Re-read it (ticket_get) and re-assign the label before requesting review.", in.ID, after.Assignee, label)
+	}
 	// The TTL pair comes from what was ASKED (resolved once, above, and
 	// passed to the CLI), not from a fresh read of the environment, so the
 	// argv and the response cannot disagree. ClaimExpires is the kernel's
 	// own answer; a warning when the two are far apart is the only runtime
 	// way to see a CLI that stopped honouring --ttl.
-	note := claimNote(ttl)
+	note := claimNote(ttl) + "; " + claimIdentityNote(label, labelSource)
 	if warn := claimTTLWarning(ttl, after.ClaimExpires); warn != "" {
 		note = warn + "; " + note
 	}
