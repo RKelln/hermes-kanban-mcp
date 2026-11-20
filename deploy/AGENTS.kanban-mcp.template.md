@@ -23,6 +23,18 @@
 ## Rules
 
 - **Never touch the live Hermes install tree** (`~/.hermes`) — work in your repo/worktree.
+- **Never work in the shared checkout of a repo another card shares.** Create the ticket with
+  `workspace_kind: "worktree"` so the dispatcher prepares `<repo>/.worktrees/<ticket-id>` and
+  spawns you there; if the card already exists with the default `scratch` workspace, run
+  `git -C <shared-clone> worktree add <your-workspace>/wt -b <type>/<ticket-id>-<desc>` BEFORE
+  the first edit and do everything (build, tests, commits) from it. A `git checkout -b` in the
+  shared clone leaves every later deploy and every sibling card on your branch.
+- **Deploy only a commit `main` contains, from a detached worktree.** `deploy/upgrade.py
+  --expect <sha>` refuses a tree whose HEAD is not a commit main (or `origin/main`) contains —
+  it names the branch and the missing commit — so deploy from
+  `git -C <shared-clone> worktree add --detach /tmp/deploy-<sha> <sha>` and leave the shared
+  checkout on `main`. The gate exists only when `--expect` is passed; a run without it builds
+  whatever HEAD is and says so.
 - **Trust the truncation flags, don't guess.** Every `ticket_get` result reports what it lost: `truncated.body` / `truncated.comments`, a per-comment `truncated` flag, inline `…(N more)` markers, and `comments_total` / `comments_returned` / `comments_dropped`. If any of those is set and you needed the whole thing, re-read with `detail: "full"` — do not reconstruct clipped text, and do not assume an unflagged result was cut.
 - **`triage` is not a lane you use.** It is the kernel's internal intake lane for under-specified input: its exit is a specifier that REWRITES the card's title and body, run inside Hermes. `ticket_create` refuses `triage: true`, the bridge never writes there, and there is no agent "later" lane either — if a card is not yours to start, comment why, or block it with `kind: "needs_input"`. `ticket_claim`'s refusal names the lane you are actually in (and there is no promote companion tool): triage has no agent action, `todo` is waiting on the parent ids it lists, `scheduled` is waiting on time, `running`/`review` are held by a claim or a reviewer.
 - **Ask before deploy/publish** — block with `ticket_block(reason="approval-required: ...")` and wait for the human.

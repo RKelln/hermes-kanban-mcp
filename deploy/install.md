@@ -373,15 +373,47 @@ The manual steps below are the reference for a first install and for changing
 the unit file or the env file.**
 
 ```sh
-python3 deploy/upgrade.py --dry-run                  # preflight and plan, changes nothing
-python3 deploy/upgrade.py --expect <sha-of-the-fix>  # build, back up, install, restart, verify
+# from a worktree at the commit you mean to ship, not from the shared checkout
+SHA=<merge-commit>
+git -C <shared-clone> worktree add --detach "/tmp/deploy-$SHA" "$SHA"
+cd "/tmp/deploy-$SHA"
+
+python3 deploy/upgrade.py --dry-run       # preflight and plan, changes nothing
+python3 deploy/upgrade.py --expect "$SHA" # build, back up, install, restart, verify
 ```
 
+The detached worktree is what makes `--expect` pass on a commit merged after the
+clone last checked out `main`: nothing has to move the shared checkout, and the
+shared checkout stays where it belongs.
+
 `--expect <ref>` is the flag to reach for whenever you are upgrading to ship a
-particular merged commit: the script refuses unless the commit it is about to
-deploy CONTAINS that ref, so a checkout that is behind cannot land a build
-predating the fix you meant to ship. It exists because that happened on
-2026-09-14 — a redeploy served a pre-fix binary and reported the old version.
+particular merged commit. It asks two questions and refuses on either:
+
+1. **Has a merge reviewed this?** `main` must already contain HEAD
+   (`git merge-base --is-ancestor HEAD main`). A `main` checkout passes, and so
+   does a detached checkout of any commit main contains — which is why the
+   worktree above works. An already-merged feature branch passes too. A feature
+   branch main has never merged does **not** pass, even though HEAD *contains*
+   the named commit: every feature branch contains the commits it grew from. On
+   2026-10-18 the shared checkout sat clean on `fix/t_cb0d23c0-claim-ttl` at
+   6688163, which contains the merge commit e7783f8, so `--expect e7783f8` would
+   have built and installed the unreviewed TTL branch and stamped it
+   6688163-6688163 (t_1243c532). The dirty tree that stopped the earlier run was
+   transient, so it was never the guard. The refusal names the branch and the
+   commit main is missing (or says it is a detached HEAD at that commit), and
+   prints the worktree command that deploys the commit you meant.
+2. **Does the build include the fix?** HEAD must contain `--expect`, so a
+   checkout that is behind cannot land a build predating the fix you meant to
+   ship. It exists because that happened on 2026-09-14 — a redeploy served a
+   pre-fix binary and reported the old version.
+
+Local `main` is used when it exists, else `origin/main` (a fetch-only clone or a
+linked worktree can lack the local branch). With neither, the script refuses and
+says to fetch, rather than skipping the check.
+
+Both questions live under `--expect`. Without it the script says so in its
+output and builds whatever HEAD is, so name the commit you mean — the gate is
+not a property of the tree, it is a property of the run that names a commit.
 
 It is binary-only on purpose: it never writes the unit file (that is how the
 `__SERVICE_USER__` placeholder took the service down — systemd reports the
