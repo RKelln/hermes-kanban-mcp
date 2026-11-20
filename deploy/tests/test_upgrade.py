@@ -49,32 +49,100 @@ SMOKE_SH = os.path.join(REPO_ROOT, "scripts", "smoke.sh")
 
 
 def scan_patterns() -> tuple[str, str]:
-    """(pattern, exclude) exactly as scripts/smoke.sh defines them."""
+    """(pattern, exclude) exactly as scripts/smoke.sh defines them.
+
+    The pattern is double-quoted in the script because it contains a double quote
+    itself (`[\"']?` — a value's quote delimiter); the exclude is single-quoted.
+    So this reads either shell word and undoes exactly the escapes bash undoes
+    inside double quotes. Nothing else is unescaped: a regex `\\d` survives,
+    which is what bash would hand git grep too.
+    """
     with open(SMOKE_SH, encoding="utf-8") as fh:
         src = fh.read()
     found = {}
     for key in ("SECRET_SCAN_RE", "SECRET_SCAN_EXCLUDE"):
-        m = re.search(r"^%s='([^']+)'$" % key, src, re.MULTILINE)
+        m = re.search(r"^%s='([^']*)'$" % key, src, re.MULTILINE)
+        if m:
+            found[key] = m.group(1)
+            continue
+        m = re.search(r'^%s="((?:[^"\\]|\\.)*)"$' % key, src, re.MULTILINE)
         if not m:
             raise RuntimeError(
-                "scripts/smoke.sh no longer defines %s='...': the hygiene scan and "
-                "this suite must share ONE pattern, or the gate proves nothing" % key)
-        found[key] = m.group(1)
+                "scripts/smoke.sh no longer defines %s as a quoted assignment: the "
+                "hygiene scan and this suite must share ONE pattern, or the gate "
+                "proves nothing" % key)
+        found[key] = re.sub(r'\\([$`"\\])', r'\1', m.group(1))
     return found["SECRET_SCAN_RE"], found["SECRET_SCAN_EXCLUDE"]
 
 
 HYGIENE_PATTERN, HYGIENE_EXCLUDE = scan_patterns()
 
+# The command smoke.sh runs, so the suite measures the SAME scan the deploy
+# runs. `git grep` rc is 0 for hits, 1 for no hits, and >= 2 when the scan
+# itself is broken.
+GIT_GREP_ARGV = ("git", "grep", "-nE")
 
-def hygiene_hits(cwd: str) -> list[str]:
-    """The lines that survive the scan scripts/smoke.sh runs over the repo."""
-    p = subprocess.run(["git", "grep", "-nE", HYGIENE_PATTERN, "--", ":!*.example"],
+
+def hygiene_hits(cwd: str, pattern: str | None = None,
+                 exclude: str | None = None) -> list[str]:
+    """The lines that survive the scan scripts/smoke.sh runs over the repo.
+
+    Raises AssertionError (a test FAILURE, not a skip) when `git grep` refuses
+    to run: an unusable pattern matches nothing, so "no hits" over a repo
+    holding a credential would otherwise read as a pass. Git's absence is
+    already handled by the class decorator; anything else is a real defect.
+    """
+    pattern = HYGIENE_PATTERN if pattern is None else pattern
+    exclude = HYGIENE_EXCLUDE if exclude is None else exclude
+    p = subprocess.run([*GIT_GREP_ARGV, pattern, "--", ":!*.example"],
                        cwd=cwd, capture_output=True, text=True)
     if p.returncode not in (0, 1):
-        raise unittest.SkipTest("git grep unusable here (rc=%d): %s"
-                                % (p.returncode, p.stderr.strip()))
+        raise AssertionError(
+            "the hygiene scan could not run (git grep rc=%d), so it proves nothing — "
+            "the scan pattern is unusable: %r\n%s"
+            % (p.returncode, pattern, p.stderr.strip()))
     return [line for line in p.stdout.splitlines()
-            if not re.search(HYGIENE_EXCLUDE, line)]
+            if not re.search(exclude, line)]
+
+
+# --- the same scan as scripts/smoke.sh runs it ---------------------------------
+# Lifted from the script at TEST time, so the shell half of the gate is measured
+# as shipped instead of re-typed here. The section runs to the end of the file.
+SCAN_SECTION_MARKER = "# --- secret hygiene: repository scan"
+
+
+def smoke_scan_block(pattern: str | None = None) -> str:
+    """scripts/smoke.sh's repository scan, optionally with a substituted pattern."""
+    with open(SMOKE_SH, encoding="utf-8") as fh:
+        src = fh.read()
+    block = src[src.index(SCAN_SECTION_MARKER):]
+    if pattern is not None:
+        escaped = (pattern.replace("\\", "\\\\").replace('"', '\\"')
+                   .replace("$", "\\$").replace("`", "\\`"))
+        block = re.sub(r"^SECRET_SCAN_RE=.*$",
+                       lambda _m: 'SECRET_SCAN_RE="%s"' % escaped,
+                       block, count=1, flags=re.MULTILINE)
+    return block
+
+
+def run_smoke_scan_block(cwd: str, pattern: str | None = None) -> subprocess.CompletedProcess:
+    """Run that block the way smoke.sh does: same shell options, same fail()."""
+    harness = ("#!/usr/bin/env bash\nset -euo pipefail\n"
+               'fail() { echo "FAIL: $*" >&2; exit 1; }\n'
+               + smoke_scan_block(pattern))
+    return subprocess.run(["bash", "-s"], input=harness, cwd=cwd,
+                          capture_output=True, text=True)
+
+
+@contextlib.contextmanager
+def committed_repo(name: str, text: str):
+    """A throwaway git repo holding one tracked file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init", "-q"], cwd=tmp, capture_output=True)
+        with open(os.path.join(tmp, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        subprocess.run(["git", "add", name], cwd=tmp, capture_output=True)
+        yield tmp
 
 
 class TestPlaceholderDetector(unittest.TestCase):
@@ -451,6 +519,80 @@ class TestSecretHygieneScan(unittest.TestCase):
                 fh.write("%s=%s\n" % (up.PASSWORD_KEY, "..."))
             subprocess.run(["git", "add", "README.md"], cwd=tmp, capture_output=True)
             self.assertEqual(hygiene_hits(tmp), [])
+
+    def test_a_quoted_literal_is_still_a_credential(self):
+        """A quote is the value's DELIMITER, not evidence of a reference.
+
+        Round 1's class started at the first character after `=`, so a pasted
+        value wrapped in shell/dotenv quotes became invisible to the scan while
+        the old `=[^ ]` pattern caught it. Each of these is the same leak a bare
+        value would be, and the constraint on this change is that nothing the
+        base pattern caught may slip through.
+        """
+        token = "0123456789abcdef0123456789abcdef"
+        password = "S3cret-Passw0rd-Value"
+        shapes = {
+            "double-quoted token": '%s="%s"\n' % (up.TOKEN_KEY, token),
+            "single-quoted token": "%s='%s'\n" % (up.TOKEN_KEY, token),
+            "export + double-quoted token": 'export %s="%s"\n' % (up.TOKEN_KEY, token),
+            "double-quoted password": '%s="%s"\n' % (up.PASSWORD_KEY, password),
+        }
+        for label, line in shapes.items():
+            with self.subTest(label):
+                with committed_repo("leak.txt", line) as repo:
+                    self.assertEqual(len(hygiene_hits(repo)), 1,
+                                     "a pasted credential wrapped in a quote is "
+                                     "still a committed credential: " + line.strip())
+
+    def test_an_unusable_pattern_is_a_failure_not_a_skip(self):
+        """A typo in the one shared pattern would disable BOTH gates at once.
+
+        `git grep` exits >= 2 when it cannot compile the pattern; treating that
+        as "nothing to check" is how a clean-looking suite sits over a repo that
+        holds a credential. The suite must go red instead.
+        """
+        broken = HYGIENE_PATTERN + "["
+        self.assertIn("{16,}", broken,
+                      "the fixture must keep the floor so only a validity check "
+                      "can catch it")
+        with committed_repo("leak.txt",
+                            "%s=%s\n" % (up.TOKEN_KEY, "0123456789abcdef0123456789abcdef")) as repo:
+            try:
+                hits = hygiene_hits(repo, pattern=broken)
+            except AssertionError as exc:
+                self.assertIn("could not run", str(exc))
+            except unittest.SkipTest as exc:
+                self.fail("an unusable pattern must FAIL the scan, not skip it: "
+                          "a skip reads as 'all fine' and the gate is green over an "
+                          "unscanned repo (%s)" % exc)
+            else:
+                self.fail("the scan reported %r for a pattern git grep cannot compile"
+                          % (hits,))
+
+    def test_the_shell_scan_fails_closed_when_the_pattern_is_unusable(self):
+        """The shell half of the same gate: same verdict for a broken pattern."""
+        with committed_repo("leak.txt",
+                            "%s=%s\n" % (up.TOKEN_KEY, "0123456789abcdef0123456789abcdef")) as repo:
+            p = run_smoke_scan_block(repo, pattern=HYGIENE_PATTERN + "[")
+        self.assertNotEqual(p.returncode, 0,
+                            "a scan that cannot compile must fail, not pass silently")
+        self.assertIn("scan pattern is unusable", p.stderr)
+        self.assertIn("rc=", p.stderr)
+
+    def test_the_shell_scan_prints_the_offending_lines(self):
+        """AC3: the operator judges a report without re-running grep by hand."""
+        with committed_repo("leak.txt",
+                            "%s=%s\n" % (up.TOKEN_KEY, "0123456789abcdef0123456789abcdef")) as repo:
+            p = run_smoke_scan_block(repo)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("committed secret value", p.stderr)
+        self.assertIn("leak.txt:1:", p.stderr)
+
+    def test_the_shell_scan_passes_a_clean_tree(self):
+        with committed_repo("clean.txt", "nothing to see here\n") as repo:
+            p = run_smoke_scan_block(repo)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("no committed secret values", p.stdout)
 
     def test_the_repo_passes(self):
         hits = hygiene_hits(REPO_ROOT)
