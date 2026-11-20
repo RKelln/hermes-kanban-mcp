@@ -523,6 +523,17 @@ class TestExpectRequiresAReviewedHead(unittest.TestCase):
                       "the refusal must print a runnable worktree command, or the "
                       "operator is left to invent the workaround")
 
+    def test_a_detached_unmerged_commit_is_refused_and_named_as_such(self):
+        # A detached checkout is the SUPPORTED deploy shape, so the refusal must
+        # say "detached HEAD at <sha>" rather than invent a branch name — and it
+        # must still refuse, because a detached HEAD is not a merge.
+        self.git("checkout", "-q", "--detach", self.feature)
+        with self.assertRaises(up.Fail) as caught:
+            self.preflight(self.feature)
+        msg = str(caught.exception)
+        self.assertIn("a detached HEAD at %s" % self.feature, msg)
+        self.assertIn("does not contain %s" % self.feature, msg)
+
     def test_the_merge_commit_on_main_passes(self):
         info = self.preflight(self.merged)
         self.assertEqual(info["branch"], "main")
