@@ -15,6 +15,12 @@ package mcptools
 //     The drift test resolves every `ticket_*` token against the tool
 //     roster the same client lists, so a renamed or removed tool turns the
 //     suite red instead of a remote lane.
+//  3. The text teaches a REAL tool with the WRONG parameter. That is not
+//     hypothetical: round 1 shipped `worker` on ticket_claim, which accepts
+//     the argument and discards it, while the handoff that actually needs
+//     it refused. Tool-name drift alone cannot see that, so a pinned table
+//     of tool↔parameter pairs is checked against each tool's inputSchema
+//     AND against the line that teaches it.
 
 import (
 	"context"
@@ -131,5 +137,78 @@ func TestLaneInstructionsOnlyNameRegisteredTools(t *testing.T) {
 		if !registered[tok] {
 			t.Errorf("instructions name %q, which is not a registered tool", tok)
 		}
+	}
+}
+
+// laneInstructionParams pins the tool↔parameter pairs the text teaches.
+// Every entry is a claim about the served contract, so each one is checked
+// twice: the parameter must exist in that tool's inputSchema, and both the
+// tool and the parameter must appear on ONE line of the text.
+//
+// The second half is the point. Round 1 taught `worker` on ticket_claim:
+// the tool exists, the parameter exists in its schema, and it is silently
+// discarded — the identity a lane needs was never recorded. A schema-only
+// check passes that sentence. A same-line check fails it, because the line
+// that teaches worker must also name ticket_request_review, where the
+// label is actually resolved.
+//
+// Add a pair here whenever the text starts teaching a new parameter.
+var laneInstructionParams = []struct{ tool, param string }{
+	{"ticket_request_review", "worker"},   // implementer label: resolved here, not at claim
+	{"ticket_request_review", "reviewer"}, // omit it; the server resolves a profile
+	{"ticket_request_review", "summary"},  // the reviewer's handoff, required
+	{"ticket_events", "since_event_id"},   // resume the wait from the last event seen
+}
+
+// TestLaneInstructionsOnlyTeachRealParams is the parameter-level drift
+// gate: every tool↔param pair the text teaches must exist in that tool's
+// advertised inputSchema, and must be taught on a line that names the tool.
+// Both halves read the same wire response a client gets, so a renamed
+// parameter or a moved sentence turns the suite red here.
+func TestLaneInstructionsOnlyTeachRealParams(t *testing.T) {
+	cs := newInstructionsSession(t)
+
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	tools := make(map[string]*mcp.Tool, len(res.Tools))
+	for _, tool := range res.Tools {
+		tools[tool.Name] = tool
+	}
+
+	lines := strings.Split(LaneInstructions, "\n")
+	for _, pin := range laneInstructionParams {
+		tool, ok := tools[pin.tool]
+		if !ok {
+			t.Errorf("instructions pair %s.%s names a tool that is not registered", pin.tool, pin.param)
+			continue
+		}
+		props := wireSchemaProps(tool.InputSchema)
+		if props == nil {
+			t.Errorf("%s: InputSchema carries no properties map: %#v", pin.tool, tool.InputSchema)
+			continue
+		}
+		if _, ok := props[pin.param]; !ok {
+			t.Errorf("instructions teach %s.%s, but that parameter is not in the tool's inputSchema", pin.tool, pin.param)
+		}
+
+		taught := false
+		for _, line := range lines {
+			if strings.Contains(line, pin.tool) && strings.Contains(line, pin.param) {
+				taught = true
+				break
+			}
+		}
+		if !taught {
+			t.Errorf("instructions pin %s.%s but no single line teaches both: the text names one without the other", pin.tool, pin.param)
+		}
+	}
+
+	// A pinned pair nobody teaches is a dead claim: it would keep passing
+	// after the sentence it describes was deleted. Refuse the vacuous case
+	// outright, the same way the tool-token gate does.
+	if len(laneInstructionParams) == 0 {
+		t.Fatal("no tool↔param pair pinned: the param gate would pass vacuously")
 	}
 }
