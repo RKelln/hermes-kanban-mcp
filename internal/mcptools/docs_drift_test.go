@@ -55,6 +55,13 @@ var retiredPhrases = []string{
 	"it returns instantly with its",        // AGENTS.md wait bullet
 	"short-circuit once the ticket leaves", // events_tool.go GetTaskEvents doc
 
+	// The status report read as the LAST fetch's status (t_14b74923). The
+	// wait tracks the last fetch that REPORTED one: a degraded poll serves an
+	// empty status and the previous observation is kept (events_tool.go
+	// lastStatus), so a client told "always ... on the last fetch" is told
+	// the field is authoritative for a fetch that may have answered nothing.
+	"always the ticket's status on the last fetch", // register.go tool description
+
 	// The reviewer fallback that cannot be verified (t_b917c3c6, review
 	// F1): request_review does keep the row's existing assignee when no
 	// --reviewer is passed and there is no earlier verdict, but the
@@ -533,6 +540,32 @@ func TestDocs_ServeTheDefaultAssigneeGuard(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "MCP_ALLOW_DEFAULT_ASSIGNEE") {
 			t.Errorf("%s does not name MCP_ALLOW_DEFAULT_ASSIGNEE: neither the operator nor the lane can find the refusal's opt-out", rel)
+		}
+	}
+}
+
+// TestDocs_ServeTheReportedStatusQualifier pins the qualifier the served
+// ticket_events description used to omit (t_14b74923). The wait reports the
+// status of the last fetch THAT REPORTED ONE: events_tool.go keeps lastStatus
+// only from non-empty observations, because a degraded poll serves an empty
+// status and blanking the field would erase the one signal a timed-out wait can
+// still report. "ticket_status is always the ticket's status on the last fetch"
+// told a client the opposite — that the latest fetch is authoritative even when
+// it answered nothing. The negative half above catches that old sentence coming
+// back; this half catches a rewrite that keeps the sentence but shortens the
+// qualifier away, which is how the false claim got there in the first place.
+func TestDocs_ServeTheReportedStatusQualifier(t *testing.T) {
+	b, err := os.ReadFile("register.go")
+	if err != nil {
+		t.Fatalf("read register.go: %v", err)
+	}
+	desc := string(b)
+	for _, want := range []string{
+		"the last fetch that reported one",
+		"leaves the previous value in place",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("register.go no longer serves the ticket_status qualifier (no %q): a client reads the field as the last fetch's status and treats a status-less poll as an observation", want)
 		}
 	}
 }
