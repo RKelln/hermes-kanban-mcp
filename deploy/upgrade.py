@@ -174,17 +174,101 @@ def parse_version_line(journal_text: str | None) -> str | None:
     return hits[-1] if hits else None
 
 
-def contains_commit(sha: str, head: str, cwd: str = REPO) -> bool:
+def contains_commit(sha: str, head: str, cwd: str | None = None) -> bool:
     """True when `head` contains `sha` (equal, or sha is an ancestor).
 
     This is the check that makes intent explicit: naming the commit you MEAN to
     ship catches the case where a deploy lands a build that predates the fix —
     which is how a pre-fix binary got served on 2026-09-14.
+
+    It answers "does the build include the fix", and that is ALL it answers. It
+    is not an exactness gate: a feature branch contains every commit it was
+    branched from, so `contains_commit` alone passes for unreviewed work. That is
+    what `unreviewed_head` is for (t_1243c532).
     """
     if sha == head:
         return True
-    p = run(["git", "-C", cwd, "merge-base", "--is-ancestor", sha, head])
+    p = run(["git", "-C", cwd or REPO, "merge-base", "--is-ancestor", sha, head])
     return p.returncode == 0
+
+
+def resolve_main_ref(cwd: str | None = None) -> str | None:
+    """The reviewed branch to compare against: `main`, else `origin/main`.
+
+    A clone without a local `main` is ordinary here: a fetch-only mirror, a
+    linked worktree created from one, a card workspace. Refusing those for the
+    wrong reason teaches the operator to work around the gate, so this is a
+    lookup rather than an assumption. Local `main` wins when both exist: it is
+    where the human merges.
+
+    `cwd` defaults to REPO at CALL time, not at import time, so a caller that
+    points the script at another tree (the tests do) is honoured.
+    """
+    cwd = cwd or REPO
+    for ref in ("main", "origin/main"):
+        p = run(["git", "-C", cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}"])
+        if p.returncode == 0 and p.stdout.strip():
+            return ref
+    return None
+
+
+def main_contains(head: str, main_ref: str, cwd: str | None = None) -> bool:
+    """True when `main_ref` already contains `head` (a commit equal to it counts)."""
+    p = run(["git", "-C", cwd or REPO, "merge-base", "--is-ancestor", head, main_ref])
+    return p.returncode == 0
+
+
+def shared_checkout(cwd: str | None = None) -> str | None:
+    """The MAIN worktree, the clone every card and every deploy shares.
+
+    `git worktree list` puts it first. Used only to write a runnable remedy into
+    the refusal message, so a failure teaches the right move instead of sending
+    the operator back to the checked-out branch.
+    """
+    p = run(["git", "-C", cwd or REPO, "worktree", "list", "--porcelain"])
+    for line in (p.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            return line[len("worktree "):].strip() or None
+    return None
+
+
+def unreviewed_head(head: str, branch: str, main_ref: str,
+                    cwd: str | None = None) -> str | None:
+    """Why `head` is not a commit `main_ref` already contains; None when it is.
+
+    `--expect` is read as an exactness claim ("ship this"), and until
+    t_1243c532 it was enforced as "HEAD contains the named commit", which a
+    feature branch trivially satisfies. On 2026-10-18 the shared checkout was
+    clean on `fix/t_cb0d23c0-claim-ttl` at 6688163, which contains the merge
+    commit e7783f8, so `--expect e7783f8` would have built and installed the
+    unreviewed TTL branch and stamped it 6688163-6688163. The dirty tree that
+    stopped the earlier run was transient, so it was never the guard.
+
+    The rule this replaces it with: what gets built must already be on main.
+    HEAD on main, a detached checkout of any commit main contains (the supported
+    way to deploy a merge commit without touching the shared checkout), and an
+    already-merged feature branch all pass. A branch main has never seen fails,
+    and the message names the branch, because that is the whole diagnosis.
+    """
+    if main_contains(head, main_ref, cwd=cwd):
+        return None
+
+    where = ("a detached HEAD at %s" % head if branch in ("", "HEAD")
+             else "branch %s (%s)" % (branch, head))
+    shared = shared_checkout(cwd) or cwd or REPO
+    return (
+        "HEAD is %s, and %s does not contain %s.\n"
+        "%s has never seen this commit, so a build here would install code no "
+        "merge has reviewed. --expect names the commit you MEAN to ship; it does "
+        "not authorise whatever this checkout happens to be on.\n"
+        "Deploy the commit you actually mean, from a detached worktree of the "
+        "shared clone (which stays on %s), for example the merge commit on %s:\n"
+        "    git -C %s rev-parse --short %s\n"
+        "    git -C %s worktree add --detach /tmp/deploy-<sha> <sha>\n"
+        "    python3 /tmp/deploy-<sha>/deploy/upgrade.py --expect <sha>\n"
+        % (where, main_ref, head, main_ref, main_ref, main_ref,
+           shared, main_ref, shared)
+    )
 
 
 def stamp(describe: str, sha: str, dirty: bool = False) -> str:
@@ -260,7 +344,26 @@ def preflight(args) -> dict:
         if want.returncode != 0:
             raise Fail("cannot resolve --expect %r: %s" % (args.expect, want.stderr.strip()))
         want = want.stdout.strip()
-        if not contains_commit(want, sha):
+
+        # Two questions, and the second one used to be the only one asked.
+        # "Is this build the work I meant to ship?" is contains_commit's job.
+        # "Is this build REVIEWED?" is this gate's: main must already contain
+        # HEAD, so a clean feature branch cannot ship just because the tree is
+        # tidy (t_1243c532).
+        main_ref = resolve_main_ref(REPO)
+        if main_ref is None:
+            raise Fail(
+                "--expect compares HEAD against main, and this clone has neither "
+                "'main' nor 'origin/main'.\n"
+                "Fetch the reviewed branch (git -C %s fetch origin main) and re-run: "
+                "refusing here is deliberate, because the containment check cannot "
+                "be made with nothing to compare to." % REPO
+            )
+        problem = unreviewed_head(sha, branch, main_ref, REPO)
+        if problem:
+            raise Fail(problem)
+
+        if not contains_commit(want, sha, REPO):
             raise Fail(
                 "the commit being deployed (%s) does NOT contain --expect %s.\n"
                 "That is the shape of a deploy that lands a build predating the "
@@ -443,8 +546,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dry-run", action="store_true", help="preflight and print the plan only")
     ap.add_argument("--expect",
-                    help="refuse unless HEAD contains this ref — name the SHA you "
-                         "intend to ship, e.g. the fix you just merged")
+                    help="refuse unless HEAD is a commit main already contains AND "
+                         "it contains this ref. Name the SHA you intend to ship, "
+                         "e.g. the fix you just merged. An unreviewed branch fails, "
+                         "and so does a detached checkout of an unmerged commit.")
     ap.add_argument("--allow-dirty", action="store_true",
                     help="deploy a dirty working tree (unreviewed code — you were warned)")
     ap.add_argument("--skip-smoke", action="store_true", help="skip the smoke test")
@@ -467,7 +572,9 @@ def main(argv=None) -> int:
             "deploy is distinguishable from a clean build of %s" % info["sha"])
     if not args.expect:
         say("preflight", "note: no --expect given. The version check still proves "
-            "the binary is what was built, not that it is the build you meant to ship.")
+            "the binary is what was built, not that it is the build you meant to "
+            "ship, and the reviewed-branch gate is skipped: this will build whatever "
+            "HEAD is, including an unmerged branch.")
     if PASSWORD_KEY not in info["env_keys"]:
         say("preflight", "note: no %s in %s" % (PASSWORD_KEY, ENV_FILE))
     if "MCP_REVIEWER_PROFILE" not in info["env_keys"]:

@@ -14,6 +14,7 @@ Run:  python3 deploy/tests/test_upgrade.py
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -24,6 +25,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.normpath(os.path.join(HERE, "..", "upgrade.py"))
@@ -442,6 +444,149 @@ class TestContainsCommit(unittest.TestCase):
 
     def test_an_unknown_ref_is_not_silently_true(self):
         self.assertFalse(up.contains_commit("deadbee", self.second, cwd=self.repo))
+
+
+class TestExpectRequiresAReviewedHead(unittest.TestCase):
+    """t_1243c532: `--expect` is an exactness gate, not a "related work is present" gate.
+
+    Functional on purpose, through `preflight` and the real git plumbing. The
+    unit tests around `contains_commit` could not catch this: that function is
+    correct at what it claims, and what it was being asked ("does the build
+    include the fix") is not the question a deploy gate needs answered ("has a
+    merge reviewed the code that is about to be built"). The failure was a clean
+    tree on a feature branch, so these tests are stated as tree states.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = os.path.join(self.tmp.name, "repo")
+        os.makedirs(os.path.join(self.repo, "cmd", "kanban-mcp"))
+        with open(os.path.join(self.repo, "go.mod"), "w", encoding="utf-8"):
+            pass
+        self.git("init", "-q")
+        self.git("symbolic-ref", "HEAD", "refs/heads/main")
+        self.git("config", "user.email", "t@example.invalid")
+        self.git("config", "user.name", "test")
+        self.first = self.commit("one")
+        self.merged = self.commit("two")          # stand-in for the merge commit
+        self.git("checkout", "-q", "-b", "fix/unreviewed")
+        self.feature = self.commit("three")       # ahead of main, unreviewed
+        self.git("checkout", "-q", "main")
+
+    # --- fixture helpers -----------------------------------------------------
+
+    def git(self, *args):
+        p = subprocess.run(["git", "-C", self.repo, *args],
+                           capture_output=True, text=True)
+        if p.returncode != 0:
+            raise AssertionError("git %s failed: %s" % (" ".join(args), p.stderr.strip()))
+        return p.stdout.strip()
+
+    def commit(self, msg):
+        self.git("add", "-A")
+        p = subprocess.run(["git", "-C", self.repo, "commit", "-q", "--allow-empty",
+                            "-m", msg], capture_output=True, text=True)
+        if p.returncode != 0:
+            raise AssertionError("git commit failed: %s" % p.stderr.strip())
+        return self.git("rev-parse", "--short", "HEAD")
+
+    def preflight(self, expect):
+        """Run the real preflight against the fixture repo, with --expect."""
+        real_repo, real_read = up.REPO, up.read_installed
+        up.REPO = self.repo
+
+        def fake_read_installed(path):
+            if path == up.UNIT:
+                return "User=experimance\n"
+            return "KANBAN_USERNAME=admin\n%s=%s\n%s=%s\n" % (
+                up.TOKEN_KEY, "0123456789abcdef", up.PASSWORD_KEY, "not-a-real-secret")
+
+        up.read_installed = fake_read_installed
+        self.addCleanup(lambda: setattr(up, "REPO", real_repo))
+        self.addCleanup(lambda: setattr(up, "read_installed", real_read))
+        with mock.patch("shutil.which", return_value="/usr/bin/go"):
+            return up.preflight(argparse.Namespace(expect=expect, allow_dirty=False))
+
+    # --- the three tree states the card names ---------------------------------
+
+    def test_a_branch_main_has_never_seen_is_refused(self):
+        self.git("checkout", "-q", "fix/unreviewed")
+        with self.assertRaises(up.Fail) as caught:
+            self.preflight(self.merged)
+        msg = str(caught.exception)
+        self.assertIn("does not contain %s" % self.feature, msg)
+        self.assertIn("fix/unreviewed", msg,
+                      "naming the branch is the whole diagnosis, and the message "
+                      "must carry it")
+        self.assertIn(self.repo, msg,
+                      "the refusal must print a runnable worktree command, or the "
+                      "operator is left to invent the workaround")
+
+    def test_the_merge_commit_on_main_passes(self):
+        info = self.preflight(self.merged)
+        self.assertEqual(info["branch"], "main")
+        self.assertEqual(info["sha"], self.merged)
+
+    def test_a_detached_checkout_of_a_commit_on_main_passes(self):
+        # The documented deploy shape: a detached worktree at the merge commit,
+        # so the shared checkout never has to move.
+        self.git("checkout", "-q", "--detach", self.first)
+        info = self.preflight(self.first)
+        self.assertEqual(info["branch"], "HEAD")
+        self.assertEqual(info["sha"], self.first)
+
+    # --- the refusal that was already there, still there ----------------------
+
+    def test_a_detached_commit_that_predates_expect_is_refused(self):
+        # The 2026-09-14 defect: HEAD is on main's history but is OLDER than the
+        # fix --expect names. This is the half contains_commit keeps.
+        self.git("checkout", "-q", "--detach", self.first)
+        with self.assertRaises(up.Fail) as caught:
+            self.preflight(self.merged)
+        self.assertIn("does NOT contain --expect", str(caught.exception))
+
+    # --- negative controls: remove the check, the assertion must fail ---------
+
+    def test_negative_control_the_branch_refusal_is_the_new_gates(self):
+        """With the containment check removed the same tree passes.
+
+        Without this, a refusal could be coming from anything else in preflight
+        (a dirty tree, a missing unit) and the test above would prove nothing.
+        """
+        self.git("checkout", "-q", "fix/unreviewed")
+        real = up.unreviewed_head
+        up.unreviewed_head = lambda *a, **k: None
+        self.addCleanup(lambda: setattr(up, "unreviewed_head", real))
+        info = self.preflight(self.merged)
+        self.assertEqual(info["sha"], self.feature)
+
+    def test_negative_control_the_expect_refusal_is_contains_commit(self):
+        self.git("checkout", "-q", "--detach", self.first)
+        real = up.contains_commit
+        up.contains_commit = lambda *a, **k: True
+        self.addCleanup(lambda: setattr(up, "contains_commit", real))
+        info = self.preflight(self.merged)
+        self.assertEqual(info["sha"], self.first)
+
+    # --- the reviewed branch is looked up, never assumed ----------------------
+
+    def test_origin_main_answers_when_there_is_no_local_main(self):
+        self.git("checkout", "-q", "--detach", self.merged)
+        self.git("update-ref", "refs/remotes/origin/main", self.merged)
+        self.git("branch", "-D", "main")
+        self.assertEqual(up.resolve_main_ref(self.repo), "origin/main")
+        info = self.preflight(self.merged)
+        self.assertEqual(info["sha"], self.merged)
+
+    def test_no_main_branch_at_all_refuses_and_says_which_refs_it_needs(self):
+        self.git("checkout", "-q", "--detach", self.merged)
+        self.git("branch", "-D", "main")
+        with self.assertRaises(up.Fail) as caught:
+            self.preflight(self.merged)
+        msg = str(caught.exception)
+        self.assertIn("neither", msg)
+        self.assertIn("origin/main", msg)
 
 
 class TestNoBuildRefFlag(unittest.TestCase):
