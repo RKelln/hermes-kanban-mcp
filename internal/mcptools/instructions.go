@@ -33,5 +33,5 @@ Handoff — summary is required on ticket_request_review and IS the reviewer's h
 
 Order — push your branch BEFORE the handoff. A done verdict authorises the merge; the reviewer never merges.
 
-Wait — poll ticket_events with since_event_id (the last event id you saw). A request-changes verdict returns the card to your claim label: re-claim it by id before fixing.
+Wait — poll ticket_events with since_event_id (the last event id you saw). A request-changes verdict returns the card to your implementer label: re-claim it by id before fixing.
 `
