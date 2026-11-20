@@ -220,15 +220,62 @@ fi
 echo "  ok: no leaked credentials in the journal"
 
 # --- secret hygiene: repository scan ----------------------------------------------
+# What counts as a COMMITTED credential: an optional quote delimiter followed by
+# 16+ credential characters right after one of the secret variable names. The
+# length floor and the character class are the whole point — the earlier pattern
+# was `=[^ ]`, "any character at all", so it reported four tracked lines that
+# merely USE the names inside shell one-liners (awk '/^MCP_BEARER_TOKEN=/',
+# MCP_BEARER_TOKEN="$TOKEN", grep '^MCP_BEARER_TOKEN=') and turned every upgrade
+# into a reported FAILED after it had already installed and restarted a healthy
+# binary.
+#
+# The quote is the value's DELIMITER, never evidence of a reference:
+# `KEY="<32 hex>"` is a pasted secret and must still fail, while `KEY="$VAR"`
+# and `KEY='^KEY='` stop at the `$`/`^`, which are not in the class.
+#
+# Scope, stated honestly, because the class is not a proof of anything:
+#   * NOT matched: a value containing `.`, `:`, `@`, `$` or a space stops the
+#     match at that character, so a short path (KEY=/etc/kanban-mcp.env), a
+#     reference (KEY="$TOKEN", KEY="$(cat ...)"), a placeholder (KEY=<token>,
+#     KEY=...) and a literal under 16 characters are all missed. The short
+#     literal is out of scope by construction: it is not distinguishable from
+#     shell quoting, so do not lower the floor to chase one — a real token is
+#     32 hex and a real password is longer than a shell variable name.
+#   * MATCHED, and the operator judges them: any value made only of class
+#     characters, which includes a long path (/run/secrets/kanban-password) and
+#     a wordy placeholder (replace-with-a-real-token). `/` is IN the class
+#     because a base64 secret contains it; dropping it would let a pasted
+#     password through, so it stays and those lines are printed instead.
+# When the scan fires, the offending lines are printed below so the operator can
+# tell a leak from a coincidence. A value that must stay in a tracked doc is
+# written as a placeholder (KEY=<token>, KEY=...) rather than by weakening the
+# pattern.
+SECRET_SCAN_RE="(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[\"']?[A-Za-z0-9+/=_-]{16,}"
+SECRET_SCAN_EXCLUDE='=<[^>]+>|=[.]{3}'
 echo "secret hygiene: git grep for committed secret values"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || fail "secret hygiene cannot run — not inside a git repository (git grep needs a work tree)"
-if git grep -nE '(MCP_BEARER_TOKEN|KANBAN_PASSWORD)=[^ ]' -- ':!*.example' \
-    | grep -vE '=<[^>]+>|=[.]{3}' | grep -q .; then
-    fail "secret hygiene git grep found a committed secret value (a secret variable name followed by an equals sign and a value)"
+# `git grep` rc is 0 for hits, 1 for no hits, and >= 2 when the scan itself is
+# broken (an invalid pattern exits 128 in this git). >= 2 must FAIL CLOSED: a
+# pattern typo is otherwise indistinguishable from a clean repository, and this
+# variable is the only copy of the pattern on both surfaces. stderr is left
+# visible so the reason is in the deploy log.
+# Collected, not piped into `grep -q`: under `set -o pipefail` a `-q` reader
+# that exits on the first hit can SIGPIPE the writer and turn a real find into a
+# passes-silently pipeline. The hits are also what the operator needs to see to
+# judge the report.
+SECRET_SCAN_RC=0
+SECRET_HITS=$(git grep -nE "$SECRET_SCAN_RE" -- ':!*.example') || SECRET_SCAN_RC=$?
+if (( SECRET_SCAN_RC >= 2 )); then
+    fail "secret hygiene git grep could not run (rc=$SECRET_SCAN_RC) — the scan pattern is unusable, so this check proves nothing: $SECRET_SCAN_RE"
+fi
+SECRET_HITS=$(printf '%s\n' "$SECRET_HITS" | grep -vE "$SECRET_SCAN_EXCLUDE" || true)
+if [[ -n $SECRET_HITS ]]; then
+    fail "secret hygiene git grep found a committed secret value (a secret variable name followed by 16+ literal credential characters):
+$SECRET_HITS"
 fi
 echo "  ok: no committed secret values in the repository"
-echo "  note: doc placeholders like MCP_BEARER_TOKEN=<token> are excluded from the scan"
+echo "  note: doc placeholders (MCP_BEARER_TOKEN=<token>, KEY=...) and lines that merely read the variable are not a match"
 
 echo
 echo "smoke test passed: steps 1-7 and secret hygiene checks all ok"
