@@ -40,9 +40,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -111,6 +115,70 @@ func assertNoCLI(t *testing.T, argv []string) {
 	if len(argv) != 0 {
 		t.Errorf("argv = %v, want no CLI invocation", argv)
 	}
+}
+
+// refusalRepair decodes the structured arm of an identity refusal and checks
+// the delivery contract every code shares: exactly the four keys, a prose arm
+// that still carries the same one-sentence message, and a non-empty fix.
+func refusalRepair(t *testing.T, res *ToolResult) identityRepair {
+	t.Helper()
+	if !res.IsError {
+		t.Fatalf("expected an IsError refusal, got success: %s", res.Content[0].Text)
+	}
+	if len(res.Content) != 2 {
+		t.Fatalf("refusal has %d content blocks, want 2 (prose then JSON repair)", len(res.Content))
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(res.Content[1].Text), &keys); err != nil {
+		t.Fatalf("structured arm is not JSON: %v (%q)", err, res.Content[1].Text)
+	}
+	if len(keys) != 4 {
+		t.Errorf("structured arm carries %d keys, want exactly code/field/message/fix: %v", len(keys), res.Content[1].Text)
+	}
+	var rep identityRepair
+	if err := json.Unmarshal([]byte(res.Content[1].Text), &rep); err != nil {
+		t.Fatalf("structured arm is not an identity repair: %v", err)
+	}
+	if !strings.HasPrefix(res.Content[0].Text, "invalid_input: ") {
+		t.Errorf("prose arm = %q, want the invalid_input: prefix every tool refusal carries", res.Content[0].Text)
+	}
+	if !strings.Contains(res.Content[0].Text, rep.Message) {
+		t.Errorf("prose arm = %q does not carry the structured message %q, so a client ignoring structured content is worse off", res.Content[0].Text, rep.Message)
+	}
+	if len(rep.Fix) == 0 {
+		t.Errorf("repair %+v has an empty fix; the caller has nothing to merge", rep)
+	}
+	return rep
+}
+
+// rosterFailAfter makes GET /profiles answer the first `allow` probes and
+// 404 after that. It exists to reach the IMPLEMENTER roster check — the
+// reviewer's check has to succeed for the call to get that far, and a backend
+// whose roster is simply absent only ever exercises the reviewer's refusal.
+type rosterFailAfter struct {
+	*claimBackend
+	mu     sync.Mutex
+	probes int
+	allow  int
+}
+
+func (b *rosterFailAfter) handler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/profiles" {
+		b.mu.Lock()
+		b.probes++
+		n := b.probes
+		b.mu.Unlock()
+		if n > b.allow {
+			b.mu.Lock()
+			b.reqs = append(b.reqs, claimReq{method: r.Method, path: r.URL.Path})
+			b.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"detail":"no roster"}`)
+			return
+		}
+	}
+	b.claimBackend.handler(w, r)
 }
 
 // TestTRR_ImplementerStampedThenRecorded is the whole point of the card:
@@ -201,10 +269,13 @@ func TestTRR_ImplementerLabelRequired(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError with no implementer source, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"no implementer label", "MCP_CLAIM_WORKER", "request-changes"} {
+	for _, want := range []string{"No implementer label", "MCP_CLAIM_WORKER"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalMissingWorker || rep.Field != "worker" {
+		t.Errorf("repair = %+v, want missing_worker on worker", rep)
 	}
 	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
@@ -231,10 +302,13 @@ func TestTRR_ImplementerLabelMustNotBeProfile(t *testing.T) {
 		if !res.IsError {
 			t.Fatalf("label %q: expected IsError for a profile label, got success: %s", label, res.Content[0].Text)
 		}
-		for _, want := range []string{"IS an installed profile", "MCP_CLAIM_WORKER", "spawns a worker"} {
+		for _, want := range []string{"IS an installed profile", "non-profile lane label"} {
 			if !strings.Contains(res.Content[0].Text, want) {
 				t.Errorf("label %q: error = %q, want it to mention %q", label, res.Content[0].Text, want)
 			}
+		}
+		if rep := refusalRepair(t, res); rep.Code != refusalWorkerIsProfile || rep.Field != "worker" {
+			t.Errorf("label %q: repair = %+v, want worker_is_profile on worker", label, rep)
 		}
 	}
 	assertNoCLI(t, readArgv())
@@ -259,10 +333,13 @@ func TestTRR_ImplementerLabelMustDifferFromReviewer(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError when the label is the reviewer, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"also the reviewer", "implementer=null"} {
+	for _, want := range []string{"also the reviewer", "distinct worker"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalWorkerEqualsReviewer || rep.Field != "worker" {
+		t.Errorf("repair = %+v, want worker_equals_reviewer on worker", rep)
 	}
 	assertNoCLI(t, readArgv())
 }
@@ -469,10 +546,13 @@ func TestTRR_UnverifiedRosterRefused(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError when the roster is unreadable, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"could not read the installed profile roster", "implementer label"} {
+	for _, want := range []string{"installed profile roster could not be read", "implementer label"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalRosterUnreadable || rep.Field != "reviewer" {
+		t.Errorf("repair = %+v, want roster_unreadable on reviewer", rep)
 	}
 	assertNoCLI(t, readArgv())
 }
@@ -560,10 +640,13 @@ func TestTRR_NoReviewerNoProvenanceRefusedBeforeStamp(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError with no reviewer source, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"no reviewer resolved", "MCP_REVIEWER_PROFILE", "keeps whatever assignee"} {
+	for _, want := range []string{"No reviewer resolved", "MCP_REVIEWER_PROFILE"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalReviewerUnresolved || rep.Field != "reviewer" {
+		t.Errorf("repair = %+v, want reviewer_unresolved on reviewer", rep)
 	}
 	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
@@ -592,10 +675,13 @@ func TestTRR_NoReviewerProvenanceNotSpawnableRefused(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError for a stale prior reviewer, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"ryan", "not an installed profile", "MCP_REVIEWER_PROFILE"} {
+	for _, want := range []string{"ryan", "no longer an installed profile", "report the stale value"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalReviewerUnresolved || rep.Field != "reviewer" {
+		t.Errorf("repair = %+v, want reviewer_unresolved on reviewer", rep)
 	}
 	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
@@ -821,10 +907,13 @@ func TestTRR_StrandGuard(t *testing.T) {
 	if !res.IsError {
 		t.Fatalf("expected IsError for an unassigned review request, got success: %s", res.Content[0].Text)
 	}
-	for _, want := range []string{"no reviewer resolved", "dispatcher", "MCP_REVIEWER_PROFILE"} {
+	for _, want := range []string{"No reviewer resolved", "MCP_REVIEWER_PROFILE"} {
 		if !strings.Contains(res.Content[0].Text, want) {
 			t.Errorf("error = %q, want it to mention %q", res.Content[0].Text, want)
 		}
+	}
+	if rep := refusalRepair(t, res); rep.Code != refusalReviewerUnresolved || rep.Field != "reviewer" {
+		t.Errorf("repair = %+v, want reviewer_unresolved on reviewer", rep)
 	}
 	assertNoCLI(t, readArgv())
 	if n := len(backend.patches()); n != 0 {
@@ -1092,5 +1181,203 @@ func TestTRR_NotFound(t *testing.T) {
 	})
 	if !res.IsError {
 		t.Fatalf("expected IsError for an unknown ticket, got success: %s", res.Content[0].Text)
+	}
+}
+
+// TestTRR_IdentityRefusalsCarryRepair is the delivery-shape contract for the
+// five identity refusals (t_ab55dafa). Each case is an input that refused
+// before this card; the assertions are the repair itself — code, field, the
+// fix key, the one-sentence message budget, and the prose arm that a client
+// ignoring structured content still reads.
+//
+// roster_unreadable appears twice on purpose: the reviewer's roster check and
+// the implementer's are separate refusals, and the earlier one fires first
+// unless the first probe succeeds. The code is shared because the repair is
+// the same class (a transient dependency, not a lane mistake); the field and
+// fix key name the identity that could not be verified.
+func TestTRR_IdentityRefusalsCarryRepair(t *testing.T) {
+	ready := `{"task":{"id":"t_x1","title":"T","status":"ready"},"events":[]}`
+	staleRound := `{"task":{"id":"t_x1","title":"T","status":"ready","assignee":"remote-mcp"},` +
+		`"events":[{"id":5,"kind":"changes_requested","payload":{"reviewer":"ryan"}}]}`
+
+	cases := []struct {
+		name        string
+		workerEnv   string
+		reviewerEnv string
+		noRoster    bool
+		rosterAllow int // >0: the first N /profiles probes succeed, then 404
+		bodies      []string
+		in          TicketRequestReviewInput
+		code        string
+		field       string
+		fixKey      string
+		wantInText  []string
+	}{
+		{
+			name:       "missing_worker",
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice"},
+			code:       refusalMissingWorker,
+			field:      "worker",
+			fixKey:     "worker",
+			wantInText: []string{"No implementer label resolved", "MCP_CLAIM_WORKER"},
+		},
+		{
+			name:       "worker_is_profile",
+			workerEnv:  "alice",
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "bob"},
+			code:       refusalWorkerIsProfile,
+			field:      "worker",
+			fixKey:     "worker",
+			wantInText: []string{"IS an installed profile", "non-profile lane label", "Installed profiles:"},
+		},
+		{
+			name:       "worker_equals_reviewer",
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "bob", Worker: "bob"},
+			code:       refusalWorkerEqualsReviewer,
+			field:      "worker",
+			fixKey:     "worker",
+			wantInText: []string{"also the reviewer", "distinct worker"},
+		},
+		{
+			name:       "roster_unreadable_reviewer",
+			noRoster:   true,
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice"},
+			code:       refusalRosterUnreadable,
+			field:      "reviewer",
+			fixKey:     "reviewer",
+			wantInText: []string{"installed profile roster could not be read", "dashboard API"},
+		},
+		{
+			name:        "roster_unreadable_worker",
+			workerEnv:   "remote-mcp",
+			rosterAllow: 1,
+			bodies:      []string{ready},
+			in:          TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "alice"},
+			code:        refusalRosterUnreadable,
+			field:       "worker",
+			fixKey:      "worker",
+			wantInText:  []string{"implementer label \"remote-mcp\" is unverified", "dashboard API"},
+		},
+		{
+			name:       "reviewer_unresolved_no_source",
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s"},
+			code:       refusalReviewerUnresolved,
+			field:      "reviewer",
+			fixKey:     "reviewer",
+			wantInText: []string{"No reviewer resolved", "MCP_REVIEWER_PROFILE"},
+		},
+		{
+			name:       "reviewer_unresolved_not_profile",
+			bodies:     []string{ready},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s", Reviewer: "not-a-profile"},
+			code:       refusalReviewerUnresolved,
+			field:      "reviewer",
+			fixKey:     "reviewer",
+			wantInText: []string{"not an installed profile, so omit reviewer", "Installed profiles:"},
+		},
+		{
+			name:       "reviewer_unresolved_stale_history",
+			bodies:     []string{staleRound},
+			in:         TicketRequestReviewInput{ID: "t_x1", Board: testBoard, Summary: "s"},
+			code:       refusalReviewerUnresolved,
+			field:      "reviewer",
+			fixKey:     "reviewer",
+			wantInText: []string{"last changes-requested round", "no longer an installed profile"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCP_CLAIM_WORKER", tc.workerEnv)
+			t.Setenv("MCP_REVIEWER_PROFILE", tc.reviewerEnv)
+			installFakeBin(t)
+			backend := newClaimBackend()
+			backend.orders["t_x1"] = tc.bodies
+			if tc.noRoster {
+				backend.profiles = nil
+			}
+			handler := http.HandlerFunc(backend.handler)
+			if tc.rosterAllow > 0 {
+				handler = (&rosterFailAfter{claimBackend: backend, allow: tc.rosterAllow}).handler
+			}
+			srv := httptest.NewServer(handler)
+			t.Cleanup(srv.Close)
+			s := NewServerWithClient(srv.Client(), srv.URL, testBoard)
+
+			res := s.TicketRequestReview(context.Background(), tc.in)
+			rep := refusalRepair(t, res)
+			if rep.Code != tc.code {
+				t.Errorf("code = %q, want %q", rep.Code, tc.code)
+			}
+			if rep.Field != tc.field {
+				t.Errorf("field = %q, want %q", rep.Field, tc.field)
+			}
+			if _, ok := rep.Fix[tc.fixKey]; !ok {
+				t.Errorf("fix = %v, want the %q key", rep.Fix, tc.fixKey)
+			}
+			if n := len([]rune(rep.Message)); n > maxRefusalMessageRunes {
+				t.Errorf("message is %d runes, over the %d-rune one-sentence budget: %q", n, maxRefusalMessageRunes, rep.Message)
+			}
+			if strings.Contains(rep.Message, ";") {
+				t.Errorf("message = %q is semicolon-chained, want one sentence", rep.Message)
+			}
+			for _, want := range tc.wantInText {
+				if !strings.Contains(res.Content[0].Text, want) {
+					t.Errorf("prose arm = %q, want it to mention %q", res.Content[0].Text, want)
+				}
+			}
+		})
+	}
+}
+
+// TestIdentityRefusalMessageBudgetKeepsTheRepair pins the constructor's
+// guarantee: the 200-rune message budget can never replace a repairable
+// refusal with an internal error. A pathological value is cut with a visible
+// marker; code/field/fix survive intact, which is the machine-readable half.
+func TestIdentityRefusalMessageBudgetKeepsTheRepair(t *testing.T) {
+	long := strings.Repeat("x", maxRefusalMessageRunes+50)
+	res := identityRefusal(refusalMissingWorker, "worker", long, "", map[string]string{"worker": "remote-mcp"})
+	rep := refusalRepair(t, res)
+	if n := len([]rune(rep.Message)); n != maxRefusalMessageRunes {
+		t.Errorf("message is %d runes, want it cut to the %d-rune budget", n, maxRefusalMessageRunes)
+	}
+	if !strings.HasSuffix(rep.Message, "…") {
+		t.Errorf("message = %q, want a visible truncation marker", rep.Message)
+	}
+	if rep.Code != refusalMissingWorker || rep.Fix["worker"] != "remote-mcp" {
+		t.Errorf("repair = %+v, want the code and fix intact after the message cut", rep)
+	}
+}
+
+// TestIdentityRefusalRejectsAuthoringBugs keeps the constructor honest: the
+// delivery contract is enforced where the refusal is built, so a later edit
+// cannot quietly ship a prose-only refusal, a fix that names the wrong
+// argument, or a two-sentence message back into the lane.
+func TestIdentityRefusalRejectsAuthoringBugs(t *testing.T) {
+	cases := []struct {
+		name    string
+		code    string
+		field   string
+		message string
+		fix     map[string]string
+	}{
+		{"unknown code", "made_up", "worker", "One sentence.", map[string]string{"worker": "x"}},
+		{"field must be worker or reviewer", refusalMissingWorker, "lane", "One sentence.", map[string]string{"lane": "x"}},
+		{"empty fix", refusalMissingWorker, "worker", "One sentence.", nil},
+		{"fix misses the named field", refusalMissingWorker, "worker", "One sentence.", map[string]string{"reviewer": "x"}},
+		{"semicolon chain", refusalMissingWorker, "worker", "First clause; second clause.", map[string]string{"worker": "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := identityRefusal(tc.code, tc.field, tc.message, "", tc.fix)
+			if !res.IsError || len(res.Content) != 1 || !strings.Contains(res.Content[0].Text, "refusal-authoring bug") {
+				t.Errorf("identityRefusal(%s, %s) = %+v, want a single loud authoring-bug error", tc.code, tc.field, res)
+			}
+		})
 	}
 }

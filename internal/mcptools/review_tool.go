@@ -70,6 +70,7 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -215,16 +216,28 @@ func (s *Server) resolveReviewer(ctx context.Context, board, id string, in Ticke
 	// GET, only on this path (a review without an explicit reviewer).
 	_, events, err := s.getTaskDetail(ctx, board, id)
 	if err != nil {
-		return "", "", ErrorResult("invalid_input: no reviewer resolved (no reviewer argument, and %s is unset), and the ticket's event log could not be read to reuse the reviewer from its last changes-requested round: %s. The read may succeed on a retry; if it does, that history is the only remaining reviewer source here. No reviewer argument was supplied and %s is unset, which is server configuration, not a lane argument: report it to the operator.", reviewerKnob, RestErrorMessage(err), reviewerKnob)
+		return "", "", identityRefusal(refusalReviewerUnresolved, "reviewer",
+			"No reviewer resolved and the ticket's event log could not be read, so retry or pass reviewer with an installed profile name.",
+			"Event log read: "+RestErrorMessage(err)+".",
+			map[string]string{"reviewer": "<installed profile>"})
 	}
 	prior, found, decoded := reviewRoundReviewer(events)
 	switch {
 	case !found:
-		return "", "", ErrorResult("invalid_input: no reviewer resolved: no reviewer argument was passed, %s is unset, and ticket %s has no changes-requested round to reuse a reviewer from (this is its first review). This is refused BEFORE the implementer stamp, because with --reviewer omitted the kernel keeps whatever assignee the card carries, and the stamp below sets that assignee to the lane label — the review row would land on a name the dispatcher never spawns. Passing the card's current assignee instead is no substitute: it is the lane label here, and after a verdict it is the implementer, so that value would make the re-review a self-review. The reviewer is server configuration, not a lane argument: report the unset %s to the operator — a review row with no reviewer is skipped by the dispatcher every tick, so the card would strand there.", reviewerKnob, id, reviewerKnob)
+		return "", "", identityRefusal(refusalReviewerUnresolved, "reviewer",
+			"No reviewer resolved (no reviewer argument, MCP_REVIEWER_PROFILE unset, this ticket's first review), so pass reviewer with an installed profile name.",
+			"",
+			map[string]string{"reviewer": "<installed profile>"})
 	case !decoded:
-		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event could not be decoded, so its reviewer cannot be reused. Report the unset %s to the operator — the reviewer is server configuration, not a lane argument.", reviewerKnob)
+		return "", "", identityRefusal(refusalReviewerUnresolved, "reviewer",
+			"No reviewer resolved and the newest changes-requested event could not be decoded, so pass reviewer with an installed profile name.",
+			"",
+			map[string]string{"reviewer": "<installed profile>"})
 	case prior == "":
-		return "", "", ErrorResult("invalid_input: no reviewer resolved, and the ticket's newest changes-requested event carries no reviewer (malformed provenance — the kernel refuses that shape too). Report the unset %s to the operator — the reviewer is server configuration, not a lane argument.", reviewerKnob)
+		return "", "", identityRefusal(refusalReviewerUnresolved, "reviewer",
+			"No reviewer resolved and the newest changes-requested event carries no reviewer, so pass reviewer with an installed profile name.",
+			"",
+			map[string]string{"reviewer": "<installed profile>"})
 	}
 	return prior, "the ticket's last changes-requested round", nil
 }
@@ -262,15 +275,20 @@ func (s *Server) profileSpawnable(ctx context.Context, reviewer string) (ok, che
 	if err := s.doJSON(ctx, http.MethodGet, "/profiles", nil, nil, &roster); err != nil {
 		return false, false, nil
 	}
+	// Build the WHOLE roster before answering: names is the list a refusal
+	// quotes, and the earlier early-return-on-match version reported only the
+	// profiles up to the match — "Installed profiles: default, alice" when
+	// bob, carol and dave were installed too. A refusal that under-reports the
+	// roster sends the caller looking for a value it already has.
 	for _, p := range roster.Profiles {
 		if p.Name != "" {
 			names = append(names, p.Name)
 		}
 		if strings.EqualFold(p.Name, reviewer) {
-			return true, true, names
+			ok = true
 		}
 	}
-	return false, true, names
+	return ok, true, names
 }
 
 // labelVerdict is the shared answer to the one roster question both
@@ -405,19 +423,31 @@ func (s *Server) resolveImplementerLabel(ctx context.Context, in TicketRequestRe
 	resolved := s.resolveLaneLabel(ctx, in.Worker, ts, "")
 	label, source = resolved.label, resolved.source
 	if label == "" {
-		return "", "", ErrorResult("invalid_input: no implementer label resolved, so this handoff would record implementer=null and a request-changes verdict could not return the ticket (its only exit would be a block). Pass worker, or set %s on the server (e.g. %s=\"remote-mcp\").", implementerKnob, implementerKnob)
+		return "", "", identityRefusal(refusalMissingWorker, "worker",
+			"No implementer label resolved, so pass worker or set MCP_CLAIM_WORKER on the server (e.g. remote-mcp).",
+			"",
+			map[string]string{"worker": "remote-mcp"})
 	}
 	if resolved.verdict == labelInvalidToken {
 		return "", "", ErrorResult("invalid_input: implementer label %q is not a lane token (must match %s); it is written to the ticket's assignee, so keep it to a plain control-plane name", label, kanban.LaneTokenPattern)
 	}
 	if strings.EqualFold(label, reviewer) {
-		return "", "", ErrorResult("invalid_input: the implementer label %q is also the reviewer. The kernel records the assignee as the implementer only when it DIFFERS from the reviewer, so this handoff would still record implementer=null and a request-changes verdict could not return the ticket. Pass a distinct worker label (%s=\"remote-mcp\"), or a different reviewer.", label, implementerKnob)
+		return "", "", identityRefusal(refusalWorkerEqualsReviewer, "worker",
+			fmt.Sprintf("Implementer label %q is also the reviewer, so pass a distinct worker label (e.g. remote-mcp) or a different reviewer.", label),
+			"",
+			map[string]string{"worker": "remote-mcp"})
 	}
 	switch resolved.verdict {
 	case labelRosterUnreadable:
-		return "", "", ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so implementer label %q could NOT be checked. The handoff is refused rather than risked: if that label matches a profile, the dispatcher spawns a worker on the card when a request-changes verdict returns it. Retry once the dashboard API answers, or set %s to a label you know is not a profile (e.g. \"remote-mcp\").", label, implementerKnob)
+		return "", "", identityRefusal(refusalRosterUnreadable, "worker",
+			fmt.Sprintf("The installed profile roster could not be read, so implementer label %q is unverified: retry when the dashboard API answers.", label),
+			"",
+			map[string]string{"worker": label})
 	case labelIsProfile:
-		return "", "", ErrorResult("invalid_input: implementer label %q IS an installed profile. The kernel lands the card back at 'ready' with assignee = implementer, and the dispatcher spawns a worker for a ready card assigned to an on-disk profile — so this handoff would put an agent worker on work the lane was meant to resume. Installed profiles: %s. Set %s to the lane's control-plane label (e.g. \"remote-mcp\"), not a profile.", label, strings.Join(resolved.roster, ", "), implementerKnob)
+		return "", "", identityRefusal(refusalWorkerIsProfile, "worker",
+			fmt.Sprintf("Implementer label %q IS an installed profile, so set MCP_CLAIM_WORKER to a non-profile lane label (e.g. remote-mcp) instead.", label),
+			rosterDetail(resolved.roster),
+			map[string]string{"worker": "remote-mcp"})
 	}
 	return label, source, nil
 }
@@ -586,17 +616,26 @@ func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReview
 	switch {
 	case checked && !ok:
 		if reviewerSource != "the reviewer argument" && reviewerSource != reviewerKnob {
-			return ErrorResult("invalid_input: no reviewer was supplied, so the reviewer recorded on ticket %s's last changes-requested round (%q) was reused — and it is not an installed profile any more, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. This value came from the ticket's history, not from you: report the stale reviewer to the operator (it is the server's MCP_REVIEWER_PROFILE setting or that round's recorded reviewer).", in.ID, flagReviewer, strings.Join(names, ", "))
+			return identityRefusal(refusalReviewerUnresolved, "reviewer",
+				"The reviewer reused from this ticket's last changes-requested round is no longer an installed profile, so pass reviewer or report the stale value.",
+				"Reused reviewer: "+fmt.Sprintf("%q", flagReviewer)+". "+rosterDetail(names),
+				map[string]string{"reviewer": "<installed profile>"})
 		}
-		return ErrorResult("invalid_input: reviewer %q (from %s) is not an installed profile, so the dispatcher could never spawn it and the card would sit in 'review' unclaimed. Installed profiles: %s. If you passed reviewer yourself, omit it and let the server choose; if it came from %s, that server setting is the thing to correct.", flagReviewer, reviewerSource, strings.Join(names, ", "), reviewerKnob)
+		return identityRefusal(refusalReviewerUnresolved, "reviewer",
+			fmt.Sprintf("Reviewer %q (from %s) is not an installed profile, so omit reviewer or correct that source.", flagReviewer, reviewerSource),
+			rosterDetail(names),
+			map[string]string{"reviewer": "<installed profile>"})
 	case !checked:
 		// The roster is the oracle for both directions (spawnable
 		// reviewer, NOT-spawnable implementer), so an unreadable roster
 		// makes the whole handoff unverifiable. This used to proceed with
 		// an announced warning for the reviewer alone; the implementer
 		// half cannot be announced safely (a collision spawns a worker
-		// silently), so the handoff now fails closed in one sentence.
-		return ErrorResult("invalid_input: could not read the installed profile roster (GET /profiles did not answer), so neither the reviewer %q nor the implementer label can be verified. The handoff is refused rather than risked: a non-profile reviewer strands the card, and an implementer label that collides with a profile makes the dispatcher spawn a worker when changes come back. Retry once the dashboard API answers.", flagReviewer)
+		// silently), so the handoff now fails closed.
+		return identityRefusal(refusalRosterUnreadable, "reviewer",
+			"The installed profile roster could not be read, so neither the reviewer nor the implementer label could be verified: retry once the dashboard API answers.",
+			"",
+			map[string]string{"reviewer": flagReviewer})
 	}
 
 	// Implementer provenance. Resolved and verified BEFORE the stamp,
