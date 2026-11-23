@@ -25,7 +25,16 @@ import "context"
 // under 12 KiB; together they left 763 B, under the 1024 B floor. The cap
 // is a blast-radius limit on one response, not a prose diet, so it moved
 // rather than the contract text being trimmed.
-const MaxHelpOutputBytes = 16 * 1024
+//
+// Raised again to 20 KiB on 2026-11-20 (4982 B of headroom) when the
+// structured identity-refusal contract landed (t_ab55dafa): the five refusal
+// codes and the consequence sentences moved out of the refusal messages have
+// to be served here, and at 16 KiB the doc measured 15498 B — 886 B of
+// headroom, under the 1024 B floor, so the next addition would have turned
+// kanban_help into an outage. The addition is contract text, not padding: a
+// client that reads help BEFORE calling does not have to re-derive a handoff
+// from a failed call.
+const MaxHelpOutputBytes = 20 * 1024
 
 // helpDoc is the full usage documentation returned by kanban_help. It is
 // the MCP-native replacement for a docs page: agents self-serve the
@@ -87,7 +96,9 @@ MCP tools for a Hermes kanban board:
     request-changes returns it to you. summary is REQUIRED — it is the
     reviewer's handoff (what changed, the refs to verify, what you proved).
     reviewer resolves as explicit reviewer > MCP_REVIEWER_PROFILE > the
-    reviewer recorded on the ticket's last changes-requested round. reviewer
+    reviewer recorded on the ticket's last changes-requested round (a round
+    whose recording is unreadable or carries no reviewer is malformed
+    provenance, which the kernel refuses too). reviewer
     is a Hermes PROFILE, never the sdlc-review SKILL name:
     the skill is what a review run loads, not who it runs as. OMIT reviewer
     when you can: the server resolves the reviewer, and a lane never needs to
@@ -221,6 +232,22 @@ Lifecycle facts:
   merged and deleted, say so in summary and name the merge commit and the
   range to diff — a reviewer that goes looking for a deleted branch burns
   its run.
+- Identity refusals carry TWO content blocks: the prose message, then a JSON
+  repair {code, field, message, fix}. Merge the fix object into the call you
+  just made instead of re-deriving the handoff; an angle-bracketed value is a
+  placeholder, not a literal argument. Codes: missing_worker,
+  worker_is_profile, worker_equals_reviewer (change worker);
+  reviewer_unresolved (supply reviewer, an installed profile, or report the
+  server knob to the operator); roster_unreadable (GET /profiles did not
+  answer: merge fix and retry once the dashboard API does). The
+  consequences belong here, not in the refusal: a handoff with no implementer
+  records null and a request-changes verdict can only block; the kernel lands
+  the card back at 'ready' with assignee = the implementer, so a label that IS
+  an installed profile makes the dispatcher spawn a worker when changes come
+  back; an implementer equal to the reviewer still records null,
+  because the kernel uses the assignee only when it DIFFERS from the
+  reviewer; an unreadable roster leaves both directions unverified; and an
+  unresolved reviewer leaves a review row the dispatcher never spawns.
 - ticket_events is stateless long-polling: pass the last seen event id as
   since_event_id to wait for the next verdict; empty + timed_out means
   nothing new arrived, and suppressed > 0 says how much kernel bookkeeping

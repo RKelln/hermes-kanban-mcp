@@ -23,6 +23,7 @@ func TestHelpReturnsUsageDoc(t *testing.T) {
 	if res == nil || res.IsError {
 		t.Fatalf("Help returned an error result: %+v", res)
 	}
+	t.Logf("served help = %d bytes, cap = %d, headroom = %d", resultBytes(HelpOut{Text: helpDoc}), MaxHelpOutputBytes, MaxHelpOutputBytes-resultBytes(HelpOut{Text: helpDoc}))
 	if len(res.Content) == 0 {
 		t.Fatal("Help result has no content")
 	}
@@ -42,5 +43,33 @@ func TestHelpReturnsUsageDoc(t *testing.T) {
 	}
 	if headroom := MaxHelpOutputBytes - served; headroom < minHelpHeadroom {
 		t.Errorf("the served help result is %d bytes, %d under the %d-byte cap (want at least %d of headroom): the next addition to helpDoc would make kanban_help fail for every MCP client instead of degrading. Raise MaxHelpOutputBytes deliberately (state the new headroom) or trim helpDoc.", served, headroom, MaxHelpOutputBytes, minHelpHeadroom)
+	}
+}
+
+// TestHelp_DocumentsIdentityRefusalRepair pins the client-facing half of the
+// structured identity refusals (t_ab55dafa): the five codes are named before
+// a client fails, and the consequence sentences removed from the refusal
+// messages live here — help is what a client reads BEFORE calling, not a
+// paragraph it reads after failing.
+func TestHelp_DocumentsIdentityRefusalRepair(t *testing.T) {
+	for _, want := range []string{
+		"{code, field, message, fix}",
+		"missing_worker",
+		"worker_is_profile",
+		"worker_equals_reviewer",
+		"roster_unreadable",
+		"reviewer_unresolved",
+		// The consequence sentences moved out of the refusal messages.
+		"a handoff with no implementer",
+		"records null and a request-changes verdict can only block",
+		"the card back at 'ready' with assignee = the implementer",
+		"makes the dispatcher spawn a worker",
+		"only when it DIFFERS from the",
+		"unreadable roster leaves both directions unverified",
+		"unresolved reviewer leaves a review row the dispatcher never spawns",
+	} {
+		if !strings.Contains(helpDoc, want) {
+			t.Errorf("helpDoc no longer states %q; the refusal message cannot carry the consequence, so a client would lose it", want)
+		}
 	}
 }
