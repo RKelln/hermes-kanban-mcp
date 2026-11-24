@@ -233,8 +233,12 @@ func TestDoPermanentAuthAfterSecondFailure(t *testing.T) {
 	}
 }
 
-// TestDoLoginFailurePropagates: a refused login surfaces as a mapped auth
-// error (not ErrPermanentAuth) and the next call retries the login.
+// TestDoLoginFailurePropagates: a refused login surfaces as a NAMED auth
+// error (not ErrPermanentAuth), and the next call inside the backoff gate
+// does NOT retry the login. That second half is the crash-loop fix: an
+// immediate retry per call is what kept the dashboard's 10-per-60s throttle
+// window full on 2026-11-24. The gate still re-tests the credential once it
+// reopens, which the fake clock below proves.
 func TestDoLoginFailurePropagates(t *testing.T) {
 	f := newFakeBackend(func(w http.ResponseWriter, r *http.Request, authed bool) {
 		w.WriteHeader(http.StatusOK)
@@ -243,6 +247,9 @@ func TestDoLoginFailurePropagates(t *testing.T) {
 	f.loginAllowed.Store(false)
 	defer f.ts.Close()
 	c := f.client()
+	var clock atomic.Int64
+	base := time.Unix(1_700_000_000, 0)
+	c.clock = func() time.Time { return base.Add(time.Duration(clock.Load()) * time.Millisecond) }
 
 	_, err := c.do(context.Background(), http.MethodGet, "boards", nil)
 	if err == nil {
@@ -251,9 +258,9 @@ func TestDoLoginFailurePropagates(t *testing.T) {
 	if errors.Is(err, ErrPermanentAuth) {
 		t.Fatalf("login failure is not a permanent request auth failure: %v", err)
 	}
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Kind != KindAuth {
-		t.Fatalf("want mapped auth error, got %v", err)
+	var authErr *AuthError
+	if !errors.As(err, &authErr) || authErr.Reason != ReasonLoginRefused {
+		t.Fatalf("want a named login refusal, got %v", err)
 	}
 	if got := f.loginHits.Load(); got != 1 {
 		t.Fatalf("want 1 login attempt, got %d", got)
@@ -261,8 +268,15 @@ func TestDoLoginFailurePropagates(t *testing.T) {
 	if _, err := c.do(context.Background(), http.MethodGet, "boards", nil); err == nil {
 		t.Fatal("want second call to fail while login is refused")
 	}
+	if got := f.loginHits.Load(); got != 1 {
+		t.Fatalf("want NO login retry inside the backoff gate, got %d attempts", got)
+	}
+	clock.Add(int64(loginRefusalFloor/time.Millisecond) + 1000)
+	if _, err := c.do(context.Background(), http.MethodGet, "boards", nil); err == nil {
+		t.Fatal("want the call to fail: the credential is still refused")
+	}
 	if got := f.loginHits.Load(); got != 2 {
-		t.Fatalf("want login retried on next call, got %d attempts", got)
+		t.Fatalf("want the login retried once the gate reopened, got %d attempts", got)
 	}
 }
 

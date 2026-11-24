@@ -10,8 +10,10 @@
 //	GET  /mcp    — protected like POST (SSE stream resume)
 //
 // Configuration is env-only (see internal/config). The bearer token and
-// the kanban password are never logged; per-tool-call log lines carry
-// tool, board, duration_ms, and outcome.
+// the kanban password are never logged; the REASON an authentication
+// failed is, because a rejected credential, a throttled login and a board
+// that refuses the session have different repairs. Per-tool-call log lines
+// carry tool, board, duration_ms, and outcome.
 package main
 
 import (
@@ -58,12 +60,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	session, err := kanban.NewSessionClient(cfg.KanbanBaseURL, cfg.KanbanUsername, cfg.KanbanPassword)
+	session, err := kanban.NewForBaseURL(cfg.KanbanBaseURL, cfg.KanbanUsername, cfg.KanbanPassword)
 	if err != nil {
-		logger.Error("kanban session login failed", "error", err)
+		logger.Error("kanban client configuration failed", "error", err, "base_url", cfg.KanbanBaseURL)
 		os.Exit(1)
 	}
-	toolServer := mcptools.NewServerWithClient(session, cfg.KanbanBaseURL, cfg.KanbanDefaultBoard)
+	// One login attempt at startup, so a credential problem is a NAMED
+	// journal line immediately instead of the backend's bare
+	// `auth: Unauthorized` on the first tool call. It is deliberately NOT
+	// fatal: exiting here turns a wrong password into a systemd restart
+	// loop at RestartSec=3, which keeps the dashboard's login throttle
+	// (10 attempts/60s per IP) full and makes the credential problem
+	// permanent. The client serves, fails each tool call with the named
+	// cause, and retries the login under its own backoff (15s → 5m).
+	if err := session.Login(context.Background()); err != nil {
+		logger.Error("kanban login failed at startup; serving and retrying with backoff",
+			"error", err, "base_url", cfg.KanbanBaseURL, "mode", "password-login",
+			"retry", "no faster than every 15s, backing off to 5m while it keeps failing")
+	} else {
+		logger.Info("kanban authenticated", "mode", "password-login", "base_url", cfg.KanbanBaseURL)
+	}
+	toolServer := mcptools.NewServerWithClient(session.HTTPClient(), cfg.KanbanBaseURL, cfg.KanbanDefaultBoard)
 	mux := newMux(cfg, logger, toolServer)
 
 	servers, err := startServers(cfg.BindAddrs, mux, logger)
