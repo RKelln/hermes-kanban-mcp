@@ -72,6 +72,9 @@ type createTaskBody struct {
 // reported status/lane is echoed verbatim. All expected failures are
 // one-line IsError results, and the rendered result never exceeds 2 KB.
 func (s *Server) TicketCreate(ctx context.Context, in TicketCreateInput) *ToolResult {
+	if res := requireWriteCapability(ctx, "ticket_create"); res != nil {
+		return res
+	}
 	board := in.Board
 	if board == "" {
 		return ErrorResult("invalid_input: board required; pass board")
@@ -323,6 +326,9 @@ type completeDoneBody struct {
 // result never exceeds 2 KB. Claiming itself is out of scope (the
 // ticket_claim tool owns that path).
 func (s *Server) TicketComplete(ctx context.Context, in TicketCompleteInput) *ToolResult {
+	if res := requireWriteCapability(ctx, "ticket_complete"); res != nil {
+		return res
+	}
 	board := in.Board
 	if board == "" {
 		return ErrorResult("invalid_input: board required; pass board")

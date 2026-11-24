@@ -24,7 +24,14 @@ type Config struct {
 	// KanbanPassword authenticates against the kanban API. Required. Env: KANBAN_PASSWORD.
 	KanbanPassword string
 	// MCPBearerToken guards MCP tool calls. Required, min 16 chars. Env: MCP_BEARER_TOKEN.
+	// When MCPWriteBearerToken is set this is the READ token: it opens every
+	// read tool plus ticket_comment, and the write tools refuse it.
 	MCPBearerToken string
+	// MCPWriteBearerToken is the optional WRITE token. Env: MCP_WRITE_BEARER_TOKEN.
+	// Unset = the legacy single-token deployment (MCPBearerToken opens the
+	// whole surface). Set = MCPBearerToken becomes read-only and this token
+	// opens everything. Min 16 chars, and it must differ from MCPBearerToken.
+	MCPWriteBearerToken string
 	// KanbanDefaultBoard is the board slug surfaced as informational by
 	// board_list. Board-taking tools reject an omitted board, so this is
 	// no longer used as a fallback. Env: KANBAN_DEFAULT_BOARD.
@@ -93,6 +100,22 @@ const (
 // startup banner name the same variable as Load.
 const EnvAllowDefaultAssignee = "MCP_ALLOW_DEFAULT_ASSIGNEE"
 
+// EnvWriteBearerToken names the optional write token. Exported so the
+// read-token refusal in the write tools (internal/mcptools) names the same
+// variable Load reads, and so deploy docs and code cannot drift apart.
+const EnvWriteBearerToken = "MCP_WRITE_BEARER_TOKEN"
+
+// TokenMode reports the deployment's auth shape: "split" when a separate write
+// token is configured, "single" for the legacy one-token surface. It is what
+// the startup banner prints, so an operator can see the split took effect
+// without ever seeing a secret.
+func (c *Config) TokenMode() string {
+	if c.MCPWriteBearerToken != "" {
+		return "split"
+	}
+	return "single"
+}
+
 // AllowDefaultAssignee reports whether ticket_create may assign a new ticket
 // to the LOCAL `default` profile.
 //
@@ -123,18 +146,19 @@ func AllowDefaultAssignee() bool {
 // names the offending environment variable.
 func Load() (*Config, error) {
 	cfg := &Config{
-		BindAddrs:          getEnv("BIND_ADDRS", defaultBindAddrs),
-		KanbanBaseURL:      getEnv("KANBAN_BASE_URL", defaultKanbanBaseURL),
-		KanbanUsername:     os.Getenv("KANBAN_USERNAME"),
-		KanbanPassword:     os.Getenv("KANBAN_PASSWORD"),
-		MCPBearerToken:     os.Getenv("MCP_BEARER_TOKEN"),
-		KanbanDefaultBoard: getEnv("KANBAN_DEFAULT_BOARD", defaultKanbanBoard),
-		HermesBin:          getEnv("HERMES_BIN", defaultHermesBin),
-		MCPCompleteMode:    getEnv("MCP_COMPLETE_MODE", defaultCompleteMode),
-		MCPClaimWorker:     getEnv("MCP_CLAIM_WORKER", defaultClaimWorker),
-		MCPCommentAuthor:   getEnv("MCP_COMMENT_AUTHOR", defaultCommentAuthor),
-		MCPReviewerProfile: getEnv("MCP_REVIEWER_PROFILE", defaultReviewerProfile),
-		LogLevel:           getEnv("LOG_LEVEL", defaultLogLevel),
+		BindAddrs:           getEnv("BIND_ADDRS", defaultBindAddrs),
+		KanbanBaseURL:       getEnv("KANBAN_BASE_URL", defaultKanbanBaseURL),
+		KanbanUsername:      os.Getenv("KANBAN_USERNAME"),
+		KanbanPassword:      os.Getenv("KANBAN_PASSWORD"),
+		MCPBearerToken:      os.Getenv("MCP_BEARER_TOKEN"),
+		MCPWriteBearerToken: os.Getenv(EnvWriteBearerToken),
+		KanbanDefaultBoard:  getEnv("KANBAN_DEFAULT_BOARD", defaultKanbanBoard),
+		HermesBin:           getEnv("HERMES_BIN", defaultHermesBin),
+		MCPCompleteMode:     getEnv("MCP_COMPLETE_MODE", defaultCompleteMode),
+		MCPClaimWorker:      getEnv("MCP_CLAIM_WORKER", defaultClaimWorker),
+		MCPCommentAuthor:    getEnv("MCP_COMMENT_AUTHOR", defaultCommentAuthor),
+		MCPReviewerProfile:  getEnv("MCP_REVIEWER_PROFILE", defaultReviewerProfile),
+		LogLevel:            getEnv("LOG_LEVEL", defaultLogLevel),
 	}
 
 	if cfg.KanbanUsername == "" {
@@ -148,6 +172,19 @@ func Load() (*Config, error) {
 	}
 	if len(cfg.MCPBearerToken) < minBearerTokenLen {
 		return nil, fmt.Errorf("environment variable MCP_BEARER_TOKEN must be at least %d characters", minBearerTokenLen)
+	}
+	// An empty MCP_WRITE_BEARER_TOKEN is "unset": that is the legacy
+	// single-token deployment, and it is what an EnvironmentFile line with no
+	// value produces. Anything else must be a real, distinct secret — an equal
+	// pair would silently deploy a "split" that grants nothing, so it is
+	// refused rather than accepted as one token with extra steps.
+	if cfg.MCPWriteBearerToken != "" {
+		if len(cfg.MCPWriteBearerToken) < minBearerTokenLen {
+			return nil, fmt.Errorf("environment variable %s must be at least %d characters", EnvWriteBearerToken, minBearerTokenLen)
+		}
+		if cfg.MCPWriteBearerToken == cfg.MCPBearerToken {
+			return nil, fmt.Errorf("environment variable %s must differ from MCP_BEARER_TOKEN (equal values mean no split; leave %s unset for the single-token deployment)", EnvWriteBearerToken, EnvWriteBearerToken)
+		}
 	}
 
 	if v, ok := os.LookupEnv("MCP_ALLOW_SKIP_CLAIM"); ok && v != "" {
@@ -203,6 +240,10 @@ func (c *Config) String() string {
 	fmt.Fprintf(&b, "KanbanUsername=%s\n", c.KanbanUsername)
 	fmt.Fprintf(&b, "KanbanPassword=***\n")
 	fmt.Fprintf(&b, "MCPBearerToken=***\n")
+	if c.MCPWriteBearerToken != "" {
+		fmt.Fprintf(&b, "MCPWriteBearerToken=***\n")
+	}
+	fmt.Fprintf(&b, "MCPTokenMode=%s\n", c.TokenMode())
 	fmt.Fprintf(&b, "KanbanDefaultBoard=%s\n", c.KanbanDefaultBoard)
 	fmt.Fprintf(&b, "HermesBin=%s\n", c.HermesBin)
 	fmt.Fprintf(&b, "MCPCompleteMode=%s\n", c.MCPCompleteMode)

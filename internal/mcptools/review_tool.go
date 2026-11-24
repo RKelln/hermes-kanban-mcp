@@ -541,6 +541,9 @@ func (s *Server) getTaskDetail(ctx context.Context, board, id string) (*kanban.T
 // happened AND that the kernel recorded the implementer, and return the
 // authoritative state.
 func (s *Server) TicketRequestReview(ctx context.Context, in TicketRequestReviewInput) *ToolResult {
+	if res := requireWriteCapability(ctx, "ticket_request_review"); res != nil {
+		return res
+	}
 	board := in.Board
 	if board == "" {
 		return ErrorResult("invalid_input: board required; pass board")

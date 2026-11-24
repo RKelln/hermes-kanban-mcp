@@ -82,6 +82,15 @@ Set at minimum:
 - `KANBAN_USERNAME` / `KANBAN_PASSWORD` — kanban dashboard login.
 - `MCP_BEARER_TOKEN` — the static token MCP clients must present (≥ 16 chars,
   enforced at startup; a 64-hex-char `openssl rand -hex 32` output is ideal).
+- `MCP_WRITE_BEARER_TOKEN` — OPTIONAL; **leave it unset unless you want the
+  read/write split.** When set (≥ 16 chars, and it must differ from
+  `MCP_BEARER_TOKEN` — equal values are refused at startup), `MCP_BEARER_TOKEN`
+  becomes the READ token: it opens every read tool plus `ticket_comment`, while
+  `ticket_create`, `ticket_claim`, `ticket_complete`, `ticket_block` and
+  `ticket_request_review` answer with a `capability_denied` tool error naming
+  `MCP_WRITE_BEARER_TOKEN`. Generate it with a second `openssl rand -hex 32`.
+  Unset or empty is exactly the old one-token behaviour, so nothing breaks
+  until you opt in.
 - `BIND_ADDRS` — e.g. `<tailscale-ip>:9130,127.0.0.1:9130` so both remote
   (Tailscale) and local opencode clients reach the same server. Never bind
   `0.0.0.0`; the server rejects it at startup.
@@ -220,10 +229,12 @@ journal.
 
 ## 7. Configure MCP clients
 
-Every client speaks the same streamable-HTTP endpoint with one static bearer
-token. There is no OAuth and no `/.well-known/*` discovery, so a client that
+Every client speaks the same streamable-HTTP endpoint with a static bearer
+token — one token on a default install, or two when the read/write split is
+on (see "Which token does a client get?" below). There is no OAuth and no
+`/.well-known/*` discovery, so a client that
 insists on an OAuth flow cannot connect — it must accept a literal
-`Authorization: Bearer <token>` header.
+`Authorization: Bearer ...` header.
 
 ```
 http://<host>:9130/mcp
@@ -247,6 +258,54 @@ spawn as real workers on this host):
 ```sh
 sudo grep '^MCP_BEARER_TOKEN=' /etc/kanban-mcp.env
 ```
+
+### Which token does a client get?
+
+With `MCP_WRITE_BEARER_TOKEN` unset there is one token and this subsection does
+not apply. With it set, the same endpoint accepts two credentials, and the
+difference is not cosmetic: `ticket_create` puts a card on this host's kanban
+dispatcher, which spawns a real worker process for it within about a minute —
+so the write token is closer to a shell credential than to a read key.
+
+- **Read token** (`MCP_BEARER_TOKEN`) opens `board_list`, `ticket_list`,
+  `ticket_get`, `ticket_events`, `review_queue`, `kanban_help` and
+  `ticket_comment`. Give it to anything that observes or annotates: the review
+  sweeper (`deploy/review-sweeper.md` only lists, reads and comments), a
+  dashboard, an assistant asked what is on the board.
+- **Write token** (`MCP_WRITE_BEARER_TOKEN`) opens all of the above **plus**
+  `ticket_create`, `ticket_claim`, `ticket_complete`, `ticket_block` and
+  `ticket_request_review`. Give it only to the lane that files and claims
+  cards.
+
+A write call with the read token is refused **in band**: the tool result is
+`IsError` with a prose arm prefixed `capability_denied:` and a JSON arm
+carrying `{"code":"write_token_required",...}` that names
+`MCP_WRITE_BEARER_TOKEN` and says where to get it. It is deliberately **not** a
+401 — the credential is valid, merely insufficient, and a client that reads a
+bare 401 retries with the same token.
+
+One token per client session. The capability comes from the token that opened
+the MCP session (the `initialize` request), so a client holding both uses
+whichever one it connected with; do not mix them inside one session.
+
+The client blocks below are **unchanged** — they name `MCP_BEARER_TOKEN`
+because that is the one credential a default install has. On a split install,
+point the same header (opencode, Claude Code) or `bearer_token_env_var` (codex)
+at the token that client should use:
+
+- opencode / Claude Code: substitute the chosen token where the block below
+  shows the read token. `deploy/client-config.sh` always substitutes the env
+  file's `MCP_BEARER_TOKEN` — the **read** token under a split — so its output
+  is only right for a read-only client; for a write client, paste the write
+  token into the same header by hand
+  (`sudo grep '^MCP_WRITE_BEARER_TOKEN=' /etc/kanban-mcp.env`).
+- codex: `deploy/codex-kanban.sh` exports the env file's `MCP_BEARER_TOKEN` —
+  the **read** token under a split — and it overwrites whatever was already in
+  the environment, so a write lane cannot use that wrapper as-is. Keep
+  `bearer_token_env_var = "MCP_BEARER_TOKEN"` in the config and launch `codex`
+  directly with the same variable set to the write token for that one process
+  (never exported globally):
+  `MCP_BEARER_TOKEN="$(sudo grep '^MCP_WRITE_BEARER_TOKEN=' /etc/kanban-mcp.env | cut -d= -f2-)" codex exec …`
 
 ### opencode
 
@@ -335,7 +394,10 @@ ticket, a commit, or a prompt is burned.
 
 1. Write a fresh `MCP_BEARER_TOKEN` (`openssl rand -hex 32`) into
    `/etc/kanban-mcp.env`, leaving every other key alone and the mode at `0600`.
-   Back the old file up first; the CLI has no rotate verb.
+   Back the old file up first; the CLI has no rotate verb. **If the read/write
+   split is on, rotate `MCP_WRITE_BEARER_TOKEN` in the same pass** — they are
+   independent credentials, and rotating only the read token leaves every write
+   lane's access intact, which is exactly the access worth burning.
 2. Reload the process. systemd reads `EnvironmentFile` at start, so
    `sudo systemctl restart kanban-mcp`. Without root, and when you own the
    service account, `kill -9 "$(systemctl show -p MainPID --value kanban-mcp)"`
@@ -350,16 +412,19 @@ ticket, a commit, or a prompt is burned.
    `Mcp-Session-Id`. A rotation that only shows the new token working has not
    proved the old one is dead.
 
-**Rotation breaks every client you forget.** The bridge validates one static
-token for all of them, so a lane on another machine starts returning 401 the
+**Rotation breaks every client you forget.** The bridge validates static
+tokens for all of them, so a lane on another machine starts returning 401 the
 moment the service restarts. Announce it before restarting, and re-emit that
-machine's config in the same pass.
+machine's config in the same pass. Under the split, a client keeps the token it
+was given: rotating the write token does not disturb read-only clients, and
+rotating the read token does not disturb write ones.
 
 ### If a client will not connect
 
 | symptom | cause |
 | --- | --- |
 | **401** `invalid_token` | token missing or wrong — this is our middleware, on both surfaces |
+| a tool error starting `capability_denied:` on a write call | the client holds the read token — valid, but insufficient; it is refused in band, not with a 401. Give that client `MCP_WRITE_BEARER_TOKEN` (§7) |
 | **403** `Forbidden: invalid Host header` | not auth. The Go SDK's DNS-rebinding guard fires when the connection lands on a loopback socket but the URL carries a name (an SSH tunnel, or a hosts alias). Use the tailnet address, or `127.0.0.1` at the tunnel end |
 | **429** | per-IP token bucket (`MCP_RATE_LIMIT`, default 120/min, burst 20). Every local client shares one bucket, so a burst in one starves the others |
 | tools listed but every result is `{}` or empty | a pre-envelope-fix build. Check the running version: the startup journal line (`journalctl -u kanban-mcp | grep version`) or `kanban-mcp -version` |
@@ -471,6 +536,36 @@ sudo grep -q '^MCP_CLAIM_WORKER=' /etc/kanban-mcp.env || \
   printf '\nMCP_CLAIM_WORKER=remote-mcp\n' | sudo tee -a /etc/kanban-mcp.env
 sudo systemctl restart kanban-mcp.service
 ```
+
+### Turning the read/write split on (optional, live install)
+
+`MCP_WRITE_BEARER_TOKEN` is optional and this section is only for opting in.
+The upgrade script and §3 never rewrite an existing env file, so a live install
+gains the second token by hand — back up, append, restart:
+
+```sh
+sudo cp -a /etc/kanban-mcp.env /etc/kanban-mcp.env.bak-$(date +%Y%m%d-%H%M)
+sudo sh -c 'printf "\nMCP_WRITE_BEARER_TOKEN=%s\n" "$(openssl rand -hex 32)" >> /etc/kanban-mcp.env'
+sudo systemctl restart kanban-mcp.service
+```
+
+- `sh -c` runs as root under `sudo`, so the generated secret never passes
+  through your shell history and never appears in the command line.
+- If the appended value ever equals `MCP_BEARER_TOKEN`, the service REFUSES to
+  start (equal values mean no split). That failure is in the journal:
+  `journalctl -u kanban-mcp --since "-2 min"`.
+- Confirm it took effect without reading a secret: the boot banner now prints
+  `MCPTokenMode=split` (`journalctl -u kanban-mcp --since "-2 min" | grep
+  MCPTokenMode`). `MCPTokenMode=single` means the variable did not land.
+- Nothing changes for a read-only client — the old token still opens every read
+  tool and `ticket_comment`. Every existing client that files or claims cards
+  must be given the new token (see §7); until it is, its
+  `ticket_create`/`claim`/`complete`/`block`/`request_review` calls return
+  `capability_denied: ... MCP_WRITE_BEARER_TOKEN`. Plan the re-issue in the
+  same change window, or the lanes go read-only the moment the service
+  restarts.
+- Undo is one line: delete `MCP_WRITE_BEARER_TOKEN` from the env file and
+  restart. Every client is immediately back to the single-token surface.
 
 Then make one real `ticket_request_review` call and check the ticket reaches
 `review` with a spawnable assignee, and that the event records the IMPLEMENTER

@@ -21,10 +21,16 @@ func okHandler() http.Handler {
 	})
 }
 
-// do runs one request through the middleware and returns the recorder.
-// When set is true the Authorization header is always set (even to ""),
-// which lets tests distinguish "header absent" from "header empty".
+// do runs one request through the legacy (single-token) middleware and
+// returns the recorder. When set is true the Authorization header is always
+// set (even to ""), which lets tests distinguish "header absent" from
+// "header empty".
 func do(method, authHeader string, set ...bool) *httptest.ResponseRecorder {
+	return doTokens(method, Tokens{Read: testToken}, authHeader, set...)
+}
+
+// doTokens runs one request through the middleware configured with tokens.
+func doTokens(method string, tokens Tokens, authHeader string, set ...bool) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, "/mcp", nil)
 	if len(set) == 1 && set[0] {
 		req.Header.Set("Authorization", authHeader)
@@ -32,7 +38,7 @@ func do(method, authHeader string, set ...bool) *httptest.ResponseRecorder {
 		req.Header.Set("Authorization", authHeader)
 	}
 	rec := httptest.NewRecorder()
-	Bearer(testToken, okHandler()).ServeHTTP(rec, req)
+	Bearer(tokens, okHandler()).ServeHTTP(rec, req)
 	return rec
 }
 
