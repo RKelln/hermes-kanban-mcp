@@ -34,11 +34,11 @@ gateway, so:
 
 A standalone `hermes dashboard` unit, with its own `--host` / `--port`, is the
 **old backend**: upstream prints a retirement notice for it on `hermes update`,
-and `hermes gateway migrate --backends` moves it onto the gateway's listener,
-carrying its host/port into `webapp.*` so clients never move. That is why this
-host's `webapp.port` is `9119` (the old backend's port) rather than the `9120`
-default. Do not build a dashboard unit for a new install; on an existing one the
-migration is the path.
+and `hermes gateway migrate --backends --apply` moves it onto the gateway's
+listener (`--backends` alone only reports), carrying its host/port into `webapp.*`
+so clients never move. That is why this host's `webapp.port` is `9119` (the old
+backend's port) rather than the `9120` default. Do not build a dashboard unit for a
+new install; on an existing one the migration is the path.
 
 Two traps have cost real mornings. Both are about the *bind*, not the password.
 
@@ -63,13 +63,21 @@ the tailnet IP.
 **Trap 2 — a login crash-loop defeats its own throttle.** The password login allows
 10 attempts per 60 s per client IP (`dashboard_auth/routes.py`,
 `_PW_RATE_MAX_ATTEMPTS`, a process-local sliding window) keyed on the ASGI peer, so
-every local client shares one bucket. `kanban-mcp` logs in once at startup and does
-not re-login on 401, so a bridge holding a dead credential exits and restarts
-(`Restart=on-failure`, `RestartSec=3` ≈ 20 starts a minute), spends the window
-rate-limited (429), and cannot recover on its own — and nothing can test the gate
-while it loops. The order that works is the one `deploy/rotate-credentials.py`
-implements: **stop the bridge first**, then write the hash, then restart the
-gateway, then start the bridge into a drained budget.
+every local client shares one bucket. The bridge logs in **once, at startup**
+(`kanban.NewSessionClient`, called from `main`); if that login fails the process
+exits 1, and `Restart=on-failure` + `RestartSec=3` retries it ~20 times a minute.
+Every restart lands inside the 10-attempt window, the window never drains, and the
+bridge cannot recover on its own — and no gate can be tested while it loops. An
+already-running bridge does **not** re-login: it keeps its old session and answers
+`auth: Unauthorized` per tool call once that session ages out, so a rotated
+password reads as a healthy bridge pointing at a broken backend until the next
+restart turns it into the loop above. (The 401-refresh in
+`internal/kanban/client.go` belongs to the separate `Client` that
+`internal/kanban/cmd/probe` uses; the server binary runs on the raw
+`*http.Client` from `NewSessionClient`.) The order that works is the one
+`deploy/rotate-credentials.py` implements: **stop the bridge first**, then write the
+hash, then restart the gateway, verify the new credential while the bridge is still
+stopped, then start it into a drained budget.
 
 ## 1. Build the binary
 
@@ -432,12 +440,16 @@ python3 deploy/rotate-credentials.py            # generate a strong password
 python3 deploy/rotate-credentials.py --prompt   # or type one (hidden input)
 ```
 
-It resolves the origin from `webapp.host` / `webapp.port` (`--origin` overrides it
-for a proxy or tunnel), then runs stop → hash → env → gateway restart → bridge
-start → verify in that order, because a running bridge burns the login budget
-before the new credential can land (§0, trap 2). It **refuses to run at all** when
-the Webapp is bound to loopback, since that bind cannot authenticate the bridge
-(§0, trap 1) — nothing is changed in that case.
+It verifies against the origin behind `KANBAN_BASE_URL` — the URL the bridge
+actually dials — and refuses before changing anything when that URL disagrees with
+`webapp.host` / `webapp.port`, because a moved listener with a stale env would
+otherwise verify green on the new port while the bridge crash-loops on the old one
+(`--origin` replaces the verified URL for a proxy or tunnel). It then runs stop →
+hash → env → gateway restart → **verify** → bridge start, because a running bridge
+burns the login budget before the new credential can land (§0, trap 2) and
+verifying before the start means a bad value leaves nothing running to crash-loop.
+It **refuses to run at all** when the Webapp is bound to loopback, since that bind
+cannot authenticate the bridge (§0, trap 1) — nothing is changed in that case.
 
 Nothing it prints is a credential: status lines carry a length and a SHA-256
 prefix, so a pasted log or a ticket comment is not a leak. Without `--prompt` the

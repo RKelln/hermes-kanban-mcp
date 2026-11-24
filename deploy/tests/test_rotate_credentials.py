@@ -14,7 +14,7 @@ The origin tests pin the other half of the same morning: the script must follow
 (where /api/* ignores session cookies) before it changes anything.
 
 Run:  python3 deploy/tests/test_rotate_credentials.py
-      python3 -m unittest discover -s deploy    # both deploy suites (57 tests)
+      python3 -m unittest discover -s deploy    # both deploy suites (68 tests)
 """
 
 from __future__ import annotations
@@ -228,6 +228,147 @@ class OriginResolution(unittest.TestCase):
                    "  host: '100.126.212.105'\n  port: 9119\n")
         webapp = rot.webapp_bind(self.config)
         self.assertEqual((webapp.host, webapp.port), ("100.126.212.105", 9119))
+
+
+class BridgeTarget(unittest.TestCase):
+    """KANBAN_BASE_URL decides the URL verified, and a mismatch with webapp.* is refused.
+
+    Review F2, 2026-11-24: the script used to verify `webapp.host:port`, not the URL
+    the started bridge dials. A moved `webapp.port` with a stale env then verified
+    green on the new listener while the bridge crash-looped on the old URL.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rotate-target-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.env = pathlib.Path(self.tmp) / "kanban-mcp.env"
+        self.env.write_text(ORIGINAL, encoding="utf-8")
+        self._saved_env_file = rot.ENV_FILE
+        setattr(rot, "ENV_FILE", self.env)
+        self.addCleanup(setattr, rot, "ENV_FILE", self._saved_env_file)
+
+    def test_origin_is_derived_from_the_base_url(self):
+        self.assertEqual(rot.bridge_origin("http://127.0.0.1:9119/api/plugins/kanban/"),
+                         "http://127.0.0.1:9119")
+        self.assertEqual(rot.bridge_origin("https://board.example.org/api/plugins/kanban/"),
+                         "https://board.example.org")
+
+    def test_a_stale_env_port_is_a_problem(self):
+        webapp = rot.Webapp(True, "100.126.212.105", 9119, "")
+        problem = rot.bridge_target_problem(webapp, "http://127.0.0.1:9120")
+        self.assertIn("9120", problem)
+        self.assertIn("9119", problem)
+
+    def test_the_live_host_shape_is_accepted(self):
+        # This host: the env dials loopback:9119 while webapp.host is the tailnet
+        # address on the same port -- the listener's loopback companion socket.
+        webapp = rot.Webapp(True, "100.126.212.105", 9119, "")
+        self.assertEqual(rot.bridge_target_problem(webapp, "http://127.0.0.1:9119"), "")
+
+    def test_a_different_non_loopback_host_is_a_problem(self):
+        webapp = rot.Webapp(True, "100.126.212.105", 9119, "")
+        self.assertNotEqual(rot.bridge_target_problem(webapp, "http://100.9.9.9:9119"), "")
+
+    def test_a_public_url_is_accepted_behind_a_proxy(self):
+        webapp = rot.Webapp(True, "127.0.0.1", 9120, "https://board.example.org")
+        self.assertEqual(rot.bridge_target_problem(webapp, "https://board.example.org"), "")
+
+    def test_bind_addrs_come_from_the_env_file_not_a_constant(self):
+        """Review F5: the post-start probe must use BIND_ADDRS, not a hard-coded port."""
+        self.assertEqual(rot.bridge_bind_addrs(),
+                         (("<tailscale-ip>", 9130), ("127.0.0.1", 9130)))
+
+    def test_bind_addrs_parses_ipv6(self):
+        self.assertEqual(rot.parse_hostport("[::1]:9130"), ("::1", 9130))
+
+
+class MainFlow(unittest.TestCase):
+    """The step order, driven through main() with every side effect stubbed.
+
+    Review F2/F3 of 2026-11-24 were order properties: what URL is verified, whether
+    the bridge is already started when it is verified, and what happens when the
+    started bridge never comes up. Each is asserted on the recorded calls, so a
+    reorder fails here rather than at 03:00 on a live host.
+    """
+
+    CONFIG = "webapp:\n  enabled: true\n  host: 100.126.212.105\n  port: 9119\n"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rotate-main-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.env = pathlib.Path(self.tmp) / "kanban-mcp.env"
+        self.env.write_text(ORIGINAL, encoding="utf-8")
+        os.chmod(self.env, 0o600)
+        self.config = pathlib.Path(self.tmp) / "config.yaml"
+        self.config.write_text(self.CONFIG, encoding="utf-8")
+        self.commands: list[tuple[str, ...]] = []
+        self._patch("ENV_FILE", self.env)
+        self._patch("CONFIG_FILE", self.config)
+        self._patch("OPERATOR_COPY", pathlib.Path(self.tmp) / "operator-password")
+        self._patch("sudo_systemctl", lambda *a: self.commands.append(("sudo",) + a))
+        self._patch("systemctl_user", lambda *a: self.commands.append(("user",) + a))
+        self._patch("run", lambda cmd, **kw: self.commands.append(tuple(cmd)))
+        self._patch("hermes_bin", lambda: "/fake/hermes")
+        self._patch("origin_ready", lambda origin: True)
+        self._patch("verify_login", lambda password, origin, **kw: self.commands.append(("verify", origin)))
+        self._patch("bridge_healthz", lambda host, port: True)
+        self._patch("bridge_active", lambda: "active")
+
+    def _patch(self, name, value):
+        self.addCleanup(setattr, rot, name, getattr(rot, name))
+        setattr(rot, name, value)
+
+    def run_main(self, *argv):
+        saved = rot.sys.argv
+        rot.sys.argv = ["rotate-credentials.py", *argv]
+        self.addCleanup(setattr, rot.sys, "argv", saved)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = rot.main()
+        except SystemExit as exc:
+            rc = exc.code
+        return rc, buf.getvalue()
+
+    def test_verification_precedes_the_bridge_start(self):
+        rc, out = self.run_main()
+        self.assertEqual(rc, 0, out)
+        verify = next(i for i, c in enumerate(self.commands) if c[0] == "verify")
+        start = self.commands.index(("sudo", "start", "kanban-mcp"))
+        self.assertLess(verify, start, "the credential was verified only after the bridge started")
+        self.assertEqual(self.commands[verify], ("verify", "http://127.0.0.1:9119"),
+                         "verified something other than the URL KANBAN_BASE_URL gives the bridge")
+
+    def test_refuses_a_stale_env_port_before_changing_anything(self):
+        self.env.write_text(ORIGINAL.replace(":9119/api", ":9120/api"), encoding="utf-8")
+        before = self.env.read_bytes()
+        rc, out = self.run_main()
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.commands, [], "a refused run must not touch the host")
+        self.assertEqual(self.env.read_bytes(), before)
+        self.assertIn("webapp.port is 9119", out)
+
+    def test_loopback_bind_refuses_before_changing_anything(self):
+        self.config.write_text("webapp:\n  enabled: true\n  host: 127.0.0.1\n  port: 9119\n",
+                               encoding="utf-8")
+        before = self.env.read_bytes()
+        rc, out = self.run_main()
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.env.read_bytes(), before)
+        self.assertIn("loopback bind", out)
+
+    def test_a_bridge_that_does_not_come_up_is_stopped_again(self):
+        self._patch("bridge_active", lambda: "failed")
+        rc, out = self.run_main()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(self.commands[1:], [
+            ("/fake/hermes", "dashboard", "password", "--password-stdin"),
+            ("user", "restart", "hermes-gateway"),
+            ("verify", "http://127.0.0.1:9119"),
+            ("sudo", "start", "kanban-mcp"),
+            ("sudo", "stop", "kanban-mcp"),
+        ], "a bridge that did not come up was left running")
 
 
 if __name__ == "__main__":
