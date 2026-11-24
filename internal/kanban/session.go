@@ -194,6 +194,16 @@ func (t *reauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nameAuthFailure(resp,
 			"kanban session was refreshed but the request could not be replayed (its body cannot be rewound), so it was not retried", false), nil
 	}
+
+	// From here the 401 is never returned: the response the caller gets is
+	// the retry's (or an error). A RoundTripper owns every body it does not
+	// hand back, so this one is drained and closed before the second
+	// request. Closing it late (or never) leaks the whole connection: with
+	// the real transport the socket and its readLoop stay alive for the
+	// life of the process — one per re-auth, and one every gate cycle in the
+	// session-REJECTED state (a misconfigured bind hit that path ~every 15s).
+	drainAndClose(resp.Body)
+
 	next, err := base.RoundTrip(retry)
 	if err != nil {
 		return nil, err
@@ -240,6 +250,20 @@ func authCause(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// drainAndClose releases a response body this transport will not return.
+// The drain is bounded because the payload is a 401 envelope (tiny) and a
+// body past the bound could not be a recycled connection anyway; reading
+// the remainder first is what lets net/http put the connection back in the
+// pool instead of dropping the socket.
+func drainAndClose(body io.ReadCloser) {
+	if body == nil {
+		return
+	}
+	const maxDrain = 4 << 10
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxDrain))
+	_ = body.Close()
 }
 
 // nameAuthFailure replaces a 401 body with a detail that names the cause.
