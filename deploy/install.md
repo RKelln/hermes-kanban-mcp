@@ -160,6 +160,22 @@ Set at minimum:
   (Tailscale) and local opencode clients reach the same server. Never bind
   `0.0.0.0`; the server rejects it at startup.
 
+The upstream credential is that dashboard login, and the bridge handles it
+without a restart: a 401 mid-run triggers **one** re-login and one retry, and a
+failure is reported by CAUSE (§7, "When the board rejects the bridge's
+credential"). Two rules follow from the dashboard's own login throttle (10
+attempts per 60s per IP):
+
+- **A wrong password is not a startup failure.** The process starts, logs the
+  named cause, and fails each tool call with it; its login retries are paced
+  (15s, 30s, 1m, 2m, 4m, 5m). Refusing to start instead would make
+  `Restart=on-failure` (3s) the busiest login client on the box and keep the
+  throttle full — measured on 2026-11-24, that is exactly how a lane stayed
+  unauthenticated after the password had been fixed.
+- **Fix the credential in the env file, then `systemctl restart kanban-mcp`.**
+  Nothing needs to be cleared: the throttle window is the dashboard's 60s
+  sliding window and expires on its own.
+
 Never commit this file — `.gitignore` covers `*.env`; only the `.example`
 template is tracked.
 
@@ -279,9 +295,18 @@ journalctl -u kanban-mcp -f
 ```
 
 Structured JSON log lines to journald: `startup complete` (with the redacted
-config), `listening` per bind address, and shutdown/errors. **That is all.** The
-server writes no per-request access log and no `auth_failed` line at any log
-level, so:
+config), `listening` per bind address, and shutdown/errors, plus the UPSTREAM
+credential state — one of:
+
+```
+"msg":"kanban authenticated","mode":"password-login","base_url":"…"
+"msg":"kanban login failed at startup; serving and retrying with backoff","error":"kanban login REFUSED (HTTP 401 …)…"
+```
+
+The second is not fatal: the bridge is serving, every tool call carries the
+named cause, and the login is retried under the backoff described in §3.
+Beyond those lines the server writes no per-request access log and no
+`auth_failed` line at any log level for the MCP-client bearer token, so:
 
 - an empty journal is not evidence that a request never arrived, and
 - a client that is being rejected with 401 leaves **no trace on this host**.
@@ -541,6 +566,30 @@ proves the hash, not the reach (trap 1).
 | tools listed but every result is `{}` or empty | a pre-envelope-fix build. Check the running version: the startup journal line (`journalctl -u kanban-mcp | grep version`) or `kanban-mcp -version` |
 
 `/healthz` returns a bare `ok`; it is a liveness check, not a version check.
+
+### When the board rejects the bridge's credential
+
+These errors come back as tool results, prefixed with the stable `auth: ` kind.
+They are about the **bridge → board** credential (`KANBAN_USERNAME` /
+`KANBAN_PASSWORD`), NOT about the client's bearer token — a client's own 401
+says `invalid_token` instead. Read the sentence after `auth:`: each cause has
+one repair, and they used to be one string (`auth: Unauthorized`), which sent
+three lanes hunting the wrong credential on 2026-11-24.
+
+| tool error says | what happened | repair |
+| --- | --- | --- |
+| `kanban login REFUSED (HTTP 401 "Invalid credentials")` | the dashboard rejected the password | fix `KANBAN_PASSWORD` in `/etc/kanban-mcp.env` (rotated? wrong account?) and restart the unit |
+| `kanban login REFUSED (HTTP 404 "Unknown provider")` | no password provider is registered on the dashboard | the dashboard's auth provider config is `basic`-less; fix it or use another credential — the password cannot work here |
+| `kanban login THROTTLED (HTTP 429 …)` | this IP spent the dashboard's 10-attempts-per-60s budget | wait the 60s window out. Do NOT restart-loop the bridge: it will not POST again until its own gate reopens (≥15s, doubling to 5m) |
+| `kanban login backing off …` | an earlier failure shut the gate; **no** login POST was made for this call | nothing to do for this call — the sentence names the last cause and the wait. Fix that cause |
+| `kanban login failed: the dashboard did not answer (…)` | connection refused / DNS / the gateway is restarting | bring the dashboard up; the bridge retries on a short schedule (2s → 10s) and heals by itself |
+| `kanban session REJECTED … no_cookie` | the login SUCCEEDED and the board still answers 401 for the cookie on `/api/*` | the origin's bind does not accept a cookie session: a loopback-bound origin requires the `X-Hermes-Session-Token` credential instead. This bridge is wired for the password/cookie path on a gated (non-loopback) bind — check `webapp.host` against that |
+
+A 401 mid-run is **self-healing**: the bridge logs in once and retries the
+request, so an origin restart needs no `kanban-mcp` restart. If you see
+`session REJECTED` repeatedly, the credential shape is wrong rather than stale,
+and the bridge deliberately stops re-logging in (15s and growing) so the login
+throttle cannot be tripped.
 
 ## Upgrading an existing install
 
