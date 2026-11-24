@@ -14,6 +14,7 @@ The origin tests pin the other half of the same morning: the script must follow
 (where /api/* ignores session cookies) before it changes anything.
 
 Run:  python3 deploy/tests/test_rotate_credentials.py
+      python3 -m unittest discover -s deploy    # both deploy suites (57 tests)
 """
 
 from __future__ import annotations
