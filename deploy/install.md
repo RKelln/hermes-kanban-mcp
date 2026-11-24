@@ -10,9 +10,74 @@ the Hermes kanban backend); MCP clients on other machines only need the
 
 - Go 1.25+ on the build machine.
 - The target host runs Linux with systemd.
-- The kanban dashboard REST API is reachable from the target host at
-  `KANBAN_BASE_URL` (default `http://127.0.0.1:9119/api/plugins/kanban/`).
-- A kanban dashboard login (`KANBAN_USERNAME` / `KANBAN_PASSWORD`).
+- The gateway's Webapp listener is running and reachable from the target host at
+  `KANBAN_BASE_URL` — the plugin-prefixed origin described below.
+- A login for that listener (`KANBAN_USERNAME` / `KANBAN_PASSWORD`).
+
+### The origin: the gateway's Webapp listener
+
+The board's REST API is served by **the gateway's own HTTP listener**, not by a
+separate `hermes dashboard` process. Upstream mounts the same FastAPI app
+(`hermes_cli.web_server`, which carries the kanban plugin router) onto the
+gateway, so:
+
+- the process that must be running is the gateway — on this kind of install
+  `systemctl --user status hermes-gateway`, not a `hermes-dashboard` unit;
+- the knob is `webapp.enabled` / `webapp.host` / `webapp.port` in the gateway
+  home's `config.yaml` (upstream defaults: `false`, `127.0.0.1`, `9120`);
+  `hermes webapp --status` reports whether the running gateway actually serves it,
+  which is a different question from what the config says;
+- `KANBAN_BASE_URL` is that listener plus the plugin prefix:
+  `http://<webapp.host>:<webapp.port>/api/plugins/kanban/`. It has a compiled-in
+  default that predates this move — set it explicitly to the resolved bind instead
+  of relying on it (`internal/config/config.go`).
+
+A standalone `hermes dashboard` unit, with its own `--host` / `--port`, is the
+**old backend**: upstream prints a retirement notice for it on `hermes update`,
+and `hermes gateway migrate --backends --apply` moves it onto the gateway's
+listener (`--backends` alone only reports), carrying its host/port into `webapp.*`
+so clients never move. That is why this host's `webapp.port` is `9119` (the old
+backend's port) rather than the `9120` default. Do not build a dashboard unit for a
+new install; on an existing one the migration is the path.
+
+Two traps have cost real mornings. Both are about the *bind*, not the password.
+
+**Trap 1 — a loopback webapp bind refuses session cookies on `/api/*`.**
+`web_server.py` derives `app.state.auth_required` from the configured bind: `False`
+for `127.0.0.1` / `::1` / `localhost`, `True` for a wildcard or a concrete address
+(and for any bind once `webapp.public_url` names a public host). `/api/*` then
+branches on it — gated mode accepts the login's session cookie, loopback mode
+accepts only `X-Hermes-Session-Token`, the 43-character token in
+`<gateway home>/webapp/session-token` that is injected into the SPA and never sent
+as a cookie. So with `webapp.host: 127.0.0.1`, `POST /auth/password-login` returns
+200 **with cookies** and every `/api/*` read still 401s: the symptom reads as a
+wrong password, the cause is a wrong bind. It is not only a browser problem —
+`kanban-mcp` is a cookie client with no session-token path, so **it cannot
+authenticate against a loopback bind at all**. Point `webapp.host` at the host's
+Tailscale/LAN address (or set `webapp.public_url` behind a proxy) and keep
+`KANBAN_BASE_URL` on that listener. A non-loopback bind also opens a companion
+socket on the loopback address *behind the same gate*, which is why
+`http://127.0.0.1:<port>/api/plugins/kanban/` works here even though the bind is
+the tailnet IP.
+
+**Trap 2 — a login crash-loop defeats its own throttle.** The password login allows
+10 attempts per 60 s per client IP (`dashboard_auth/routes.py`,
+`_PW_RATE_MAX_ATTEMPTS`, a process-local sliding window) keyed on the ASGI peer, so
+every local client shares one bucket. The bridge logs in **once, at startup**
+(`kanban.NewSessionClient`, called from `main`); if that login fails the process
+exits 1, and `Restart=on-failure` + `RestartSec=3` retries it ~20 times a minute.
+Every restart lands inside the 10-attempt window, the window never drains, and the
+bridge cannot recover on its own — and no gate can be tested while it loops. An
+already-running bridge does **not** re-login: it keeps its old session and answers
+`auth: Unauthorized` per tool call once that session ages out, so a rotated
+password reads as a healthy bridge pointing at a broken backend until the next
+restart turns it into the loop above. (The 401-refresh in
+`internal/kanban/client.go` belongs to the separate `Client` that
+`internal/kanban/cmd/probe` uses; the server binary runs on the raw
+`*http.Client` from `NewSessionClient`.) The order that works is the one
+`deploy/rotate-credentials.py` implements: **stop the bridge first**, then write the
+hash, then restart the gateway, verify the new credential while the bridge is still
+stopped, then start it into a drained budget.
 
 ## 1. Build the binary
 
@@ -236,6 +301,13 @@ on (see "Which token does a client get?" below). There is no OAuth and no
 insists on an OAuth flow cannot connect — it must accept a literal
 `Authorization: Bearer ...` header.
 
+The `:9130` endpoint below is the bridge's own face. The board's REST **origin**
+behind it is the gateway's Webapp listener (§0, "the origin"), and the two fail
+differently: a bridge that cannot reach or authenticate to the origin answers
+`auth: Unauthorized` (or `connection refused`) on every tool call while its
+bearer auth is working perfectly. Diagnose the origin before re-issuing a client
+config.
+
 ```
 http://<host>:9130/mcp
 ```
@@ -418,6 +490,45 @@ moment the service restarts. Announce it before restarting, and re-emit that
 machine's config in the same pass. Under the split, a client keeps the token it
 was given: rotating the write token does not disturb read-only clients, and
 rotating the read token does not disturb write ones.
+
+### Rotating the dashboard password (and the bridge with it)
+
+The dashboard password lives in two places, and only one of them is readable
+back: the gateway stores a hash in `dashboard.basic_auth` (the plaintext is
+unrecoverable), and `/etc/kanban-mcp.env` stores `KANBAN_PASSWORD`, which is what
+the bridge logs in with. Rotate one alone and the bridge is left holding a dead
+credential, so use the script:
+
+```sh
+python3 deploy/rotate-credentials.py            # generate a strong password
+python3 deploy/rotate-credentials.py --prompt   # or type one (hidden input)
+```
+
+It verifies against the origin behind `KANBAN_BASE_URL` — the URL the bridge
+actually dials — and refuses before changing anything when that URL disagrees with
+`webapp.host` / `webapp.port`, because a moved listener with a stale env would
+otherwise verify green on the new port while the bridge crash-loops on the old one
+(`--origin` replaces the verified URL for a proxy or tunnel). It then runs stop →
+hash → env → gateway restart → **verify** → bridge start, because a running bridge
+burns the login budget before the new credential can land (§0, trap 2) and
+verifying before the start means a bad value leaves nothing running to crash-loop.
+It **refuses to run at all** when the Webapp is bound to loopback, since that bind
+cannot authenticate the bridge (§0, trap 1) — nothing is changed in that case.
+
+Nothing it prints is a credential: status lines carry a length and a SHA-256
+prefix, so a pasted log or a ticket comment is not a leak. Without `--prompt` the
+generated value is also written to `~/.hermes/kanban-mcp-operator-password` (mode
+0600) so you can sign in to the Web UI — move it into your password manager, then
+delete that file.
+
+Reading the env file to confirm the sync is an explicit `sudo` read, by design.
+Do not add a `NOPASSWD` helper for it: that turns "the operator can read this
+file" into "anything running as the service account can", which is the whole
+capability the file exists to gate.
+
+If you rotate by hand anyway, the check is a real login **and** a
+`GET /api/plugins/kanban/boards` with the resulting cookie — a 200 from the login
+proves the hash, not the reach (trap 1).
 
 ### If a client will not connect
 
