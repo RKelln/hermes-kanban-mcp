@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Upgrade the running kanban-mcp bridge from this repo.
 
-    python3 deploy/upgrade.py [--dry-run] [--expect <ref>] [--allow-dirty] [--skip-smoke]
+    sudo -v && python3 deploy/upgrade.py [--dry-run] [--expect <ref>] [--allow-dirty] [--skip-smoke]
 
 WHY THIS IS BINARY-ONLY
 -----------------------
@@ -32,9 +32,11 @@ and the `systemctl restart`. The backup is a plain user-owned copy under
 ~/.local/state/kanban-mcp/backups — no sudo, because the installed binary is
 world-readable. Reading a root:root 0600 env file (what deploy/install.md §3
 installs) is a third, read-only use: `sudo -n cat`, which never prompts, so
---dry-run cannot stall on a password; if that is not possible the script refuses
-and says to run `sudo -v` first. Prefer `sudo -v` over piping a password into
-this script: a pipe puts it in your shell history.
+--dry-run cannot stall on a password. On that host shape the credential must be
+cached BEFORE the run, or it stops at PREFLIGHT — before the build — so invoke it
+as `sudo -v && python3 deploy/upgrade.py …` (deploy/install.md documents the same
+command; where the operator can already read both files the `sudo -n` fallback is
+never reached). Piping a password in instead would land it in your shell history.
 """
 
 from __future__ import annotations
@@ -89,7 +91,7 @@ def stdin_is_tty() -> bool:
 def sudo(cmd, **kw):
     """Run a privileged command (the two writes: install, restart).
 
-    Non-interactive callers should cache a ticket first (`sudo -v`) — piping a
+    Non-interactive callers should cache a credential first (`sudo -v`) — piping a
     password in puts it in your shell history. With no terminal, sudo is invoked
     as `sudo -S -p ''`: read the password from stdin, print no prompt. On a
     terminal we let sudo prompt normally, because `-S` reads the typed password
@@ -440,7 +442,20 @@ def verify(want_version: str, since: str, env_text: str, skip_smoke: bool) -> No
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog="Privileges: the preflight reads the unit and env files with\n"
+               "`sudo -n cat`, which never prompts, so where those files are\n"
+               "root-owned (what deploy/install.md §3 installs) cache a credential\n"
+               "first:\n"
+               "\n"
+               "    sudo -v && python3 deploy/upgrade.py --expect <sha>\n"
+               "\n"
+               "Without it such a host stops at PREFLIGHT, before anything is built\n"
+               "or installed. Never pipe a password in instead: it lands in your\n"
+               "shell history.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+
     ap.add_argument("--dry-run", action="store_true", help="preflight and print the plan only")
     ap.add_argument("--expect",
                     help="refuse unless HEAD contains this ref — name the SHA you "
