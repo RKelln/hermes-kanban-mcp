@@ -598,9 +598,21 @@ The manual steps below are the reference for a first install and for changing
 the unit file or the env file.**
 
 ```sh
-python3 deploy/upgrade.py --dry-run                  # preflight and plan, changes nothing
-python3 deploy/upgrade.py --expect <sha-of-the-fix>  # build, back up, install, restart, verify
+sudo -v && python3 deploy/upgrade.py --dry-run                  # preflight and plan, changes nothing
+sudo -v && python3 deploy/upgrade.py --expect <sha-of-the-fix>  # build, back up, install, restart, verify
 ```
+
+**Why the `sudo -v` is part of the command, not an optional nicety:** the
+preflight reads the unit file and the env file, and where they are root-owned —
+`root:root 0600` is what §3 installs — it reads them with `sudo -n cat`, which
+never prompts by design (the reason `--dry-run` cannot stall on a password). A
+fresh shell has no cached credential, so on that host shape a bare
+`python3 deploy/upgrade.py` stops at PREFLIGHT, before anything is built or
+installed, with a message telling you to run `sudo -v`. `sudo -v` caches the
+credential for the sudo calls inside the same invocation, so the command above
+runs start to finish; on a host where the operator can already read both files
+the `sudo -n` fallback is never reached and the prefix costs nothing. It is
+never a way to hand the script a password — do not pipe one in.
 
 `--expect <ref>` is the flag to reach for whenever you are upgrading to ship a
 particular merged commit: the script refuses unless the commit it is about to
@@ -632,8 +644,8 @@ What it touches, and what it needs:
   The env file is only read, never replaced, so new keys still belong appended
   by hand (never re-run §3 on a live host). On a host where it is `root:root
   0600` — what §3 installs — the read uses `sudo -n` (read-only, and it never
-  prompts): run `sudo -v` once before a non-interactive run, and `--dry-run`
-  stays prompt-free.
+  prompts): that is why the documented command above starts with `sudo -v`, and
+  why `--dry-run` stays prompt-free.
 - **First install:** not this script. Follow sections 1–5 above.
 
 **Do not re-run §3 on a live host.** `install -m 0600 deploy/kanban-mcp.env.example
