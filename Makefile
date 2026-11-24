@@ -9,6 +9,7 @@ test:
 	go build ./... && go vet ./... && go test -race ./...
 	@echo "== deploy tooling (offline)"
 	@python3 deploy/tests/test_upgrade.py
+	@python3 deploy/tests/test_rotate_credentials.py
 
 # Python review-sweeper unit suite. Offline-only tests; the e2e setup/repro
 # scripts under sweeper/tests (review-sweeper-e2e-*.py, review-sweeper-repro.py)
@@ -36,3 +37,4 @@ test-sweeper:
 # here instead of at deploy time.
 test-deploy:
 	python3 deploy/tests/test_upgrade.py
+	python3 deploy/tests/test_rotate_credentials.py
