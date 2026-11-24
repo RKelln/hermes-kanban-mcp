@@ -146,6 +146,15 @@ func Register(srv *mcp.Server, s *Server) {
 		getSchema(),
 		s.TicketGet)
 
+	// --- write tools -------------------------------------------------------
+	//
+	// These five are the bridge's write surface: each handler's FIRST
+	// statement is requireWriteCapability, which refuses a request that
+	// authenticated with the read token (MCP_BEARER_TOKEN when a write token
+	// is configured) with a `capability_denied` tool error naming
+	// MCP_WRITE_BEARER_TOKEN. A new write tool must do the same AND be added
+	// to writeToolCalls in capability_test.go — TestEveryRegisteredToolIsClassified
+	// fails until every registered tool is on one side of that line.
 	addTool(srv, "ticket_claim", "Atomically claim a ready ticket (ready -> running) via the hermes CLI. Before claiming, it ASSIGNS the lane label (worker > MCP_CLAIM_WORKER > the server default remote-mcp) to the card while it is still ready — identity is set once, at claim: the kernel then records that label as the review handoff's implementer, and the label is stable per lane, so ticket_request_review needs no worker argument for a card claimed here. A label that IS an installed profile is REFUSED before any write, because a ready card assigned to a spawnable profile is claimed by the dispatcher within about a minute. A non-ready ticket is refused with the reason for THAT status (triage is Hermes' internal intake lane with no agent action; todo names the parent ids it waits on; scheduled waits on time; running/review are held) — there is no promote tool. The claim TTL is the server's MCP_CLAIM_TTL_SECONDS (default 14400s = 4h), passed as an explicit --ttl: this lane has no heartbeat verb, so the TTL is the whole margin a run gets. The result reports claim_ttl_seconds, claim_ttl_source (MCP_CLAIM_TTL_SECONDS | default) and warns when the kernel's expiry disagrees with what was asked. If a claim does expire, re-claim with this tool — the dispatcher's reclaim books a failed attempt against the ticket. (id and board required)",
 		claimSchema(),
 		s.TicketClaim)

@@ -48,6 +48,8 @@ var optionalVars = []string{
 	"MCP_ALLOW_DEFAULT_ASSIGNEE",
 	"MCP_CLAIM_WORKER",
 	"MCP_COMMENT_AUTHOR",
+	"MCP_REVIEWER_PROFILE",
+	EnvWriteBearerToken,
 	"MCP_RATE_LIMIT",
 	"LOG_LEVEL",
 }
@@ -298,11 +300,13 @@ func TestStringRedactsSecrets(t *testing.T) {
 	const (
 		password = "hunter2-secret-value"
 		token    = "tok-1234567890abcd"
+		writeTok = "wri-abcdefgh9876543210"
 	)
 	t.Setenv("KANBAN_USERNAME", "test-user")
 	t.Setenv("KANBAN_PASSWORD", password)
 	t.Setenv("MCP_BEARER_TOKEN", token)
 	unsetEnv(t, optionalVars...)
+	t.Setenv(EnvWriteBearerToken, writeTok)
 
 	cfg, err := Load()
 	if err != nil {
@@ -316,11 +320,20 @@ func TestStringRedactsSecrets(t *testing.T) {
 	if strings.Contains(s, token) {
 		t.Errorf("String() leaks MCP_BEARER_TOKEN: %q", s)
 	}
+	if strings.Contains(s, writeTok) {
+		t.Errorf("String() leaks %s: %q", EnvWriteBearerToken, s)
+	}
 	if !strings.Contains(s, "KanbanPassword=***") {
 		t.Errorf("String() does not mask KanbanPassword: %q", s)
 	}
 	if !strings.Contains(s, "MCPBearerToken=***") {
 		t.Errorf("String() does not mask MCPBearerToken: %q", s)
+	}
+	if !strings.Contains(s, "MCPWriteBearerToken=***") {
+		t.Errorf("String() does not mask MCPWriteBearerToken: %q", s)
+	}
+	if !strings.Contains(s, "MCPTokenMode=split") {
+		t.Errorf("String() does not report the split mode: %q", s)
 	}
 	// Every non-secret field must be present.
 	for _, want := range []string{

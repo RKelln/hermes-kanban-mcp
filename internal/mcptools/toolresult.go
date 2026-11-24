@@ -20,9 +20,10 @@ package mcptools
 //     paragraph it reads after failing.
 //
 // This is not a general error envelope. Ordinary validation and backend
-// failures keep ErrorResult's single prose block; only the identity refusals
-// in review_tool.go — the ones whose repair is an argument change — get a
-// second block.
+// failures keep ErrorResult's single prose block; only the refusals whose
+// repair is MECHANICAL get a second block — the identity refusals in
+// review_tool.go (change one argument) and the capability refusal in
+// capability.go (present a different token).
 
 import (
 	"encoding/json"

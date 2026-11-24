@@ -205,6 +205,9 @@ func (s *Server) resolveClaimLabel(ctx context.Context, worker string) (label, s
 // ends up exactly as it was found rather than carrying an identity nothing
 // claimed.
 func (s *Server) TicketClaim(ctx context.Context, in TicketClaimInput) *ToolResult {
+	if res := requireWriteCapability(ctx, "ticket_claim"); res != nil {
+		return res
+	}
 	board := in.Board
 	if board == "" {
 		return ErrorResult("invalid_input: board required; pass board")
@@ -415,6 +418,9 @@ const fallbackBlockNote = "typed kind unavailable; recorded as untyped block"
 // "block unavailable" error — the tool keeps T5's REST fallback engaged
 // and records the block as untyped with kind_applied=false.
 func (s *Server) TicketBlock(ctx context.Context, in TicketBlockInput) *ToolResult {
+	if res := requireWriteCapability(ctx, "ticket_block"); res != nil {
+		return res
+	}
 	board := in.Board
 	if board == "" {
 		return ErrorResult("invalid_input: board required; pass board")

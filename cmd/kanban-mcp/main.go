@@ -104,6 +104,11 @@ func main() {
 // handed to the Streamable HTTP handler's getServer closure, which is
 // the canonical single-server wiring from the design. All tools are
 // are registered via mcptools.Register.
+//
+// The bearer middleware is handed BOTH tokens: with MCP_WRITE_BEARER_TOKEN
+// unset the matrix collapses to the legacy single token, and with it set the
+// read token's requests carry CapabilityRead into the tool handlers, which
+// refuse the write tools in band.
 func newMux(cfg *config.Config, logger *slog.Logger, toolServer *mcptools.Server) http.Handler {
 	rl := httpauth.NewRateLimiter(cfg.MCPRateLimit, httpauth.DefaultBurst)
 
@@ -114,12 +119,14 @@ func newMux(cfg *config.Config, logger *slog.Logger, toolServer *mcptools.Server
 	mcptools.Register(srv, toolServer)
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return srv }, nil)
 
+	tokens := httpauth.Tokens{Read: cfg.MCPBearerToken, Write: cfg.MCPWriteBearerToken}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.Handle("/mcp", httpauth.Bearer(cfg.MCPBearerToken, rl.Wrap(h)))
+	mux.Handle("/mcp", httpauth.Bearer(tokens, rl.Wrap(h)))
 	return mux
 }
 
